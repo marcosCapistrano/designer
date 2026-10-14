@@ -14,7 +14,7 @@ test('authenticated import renders pages, reuses baseline and preserves design o
   expect(rendered.pages[0].renders.base.error).toBeUndefined();
   await page.getByRole('button', { name: 'Import pages' }).click();
   await expect(page.getByRole('status')).toContainText('Imported 0 pages; reused 1.');
-  await page.getByLabel('Source', { exact: true }).selectOption('react');
+  await page.getByRole('combobox', { name: 'Source', exact: true }).selectOption('react');
   await page.getByLabel('Entry file').fill('missing.tsx');
   await page.getByRole('button', { name: 'Import pages' }).click();
   await expect(page.getByRole('alert')).toContainText('previous design and edits are preserved');
