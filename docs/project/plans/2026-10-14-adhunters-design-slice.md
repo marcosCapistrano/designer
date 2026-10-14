@@ -88,7 +88,7 @@
 - Test: `packages/sync/src/extract.test.ts`
 
 **Interfaces:**
-- `SourceProject` gains `aliases?: Record<string, string>`, for example `{ "@/": "site/src/" }`. The server reads it from the `compilerOptions.paths` of the `tsconfig.json` nearest the app directory, statically, without `extends` chains. An `extends` fails with a diagnostic.
+- `SourceProject` gains `aliases?: Record<string, string>`, for example `{ "@/": "site/src/" }`. Task 6 reads it on the server from `compilerOptions.paths` of the `tsconfig.json` nearest the app directory, statically; an `extends` fails with a diagnostic (ledger Ruling B). This task only consumes `aliases`.
 
 - [ ] **Step 1: Write failing tests.**
   - `import { X } from "@/components/X"` with alias `@/` resolves to `site/src/components/X.tsx`.
@@ -107,7 +107,7 @@
 - Test: `packages/sync/src/adapters.test.ts`
 
 **Interfaces:**
-- `.hub/adapters.json` = `{ "modules": { "<specifier>": { "<export>|*": Adapter } } }`
+- `.hub/adapters.json` = `{ "modules": { "<specifier>": { "<export>|*": Adapter } }, "styles"?: { "ignore": string[] } }`. `styles.ignore` lists exact source-relative CSS paths the importer skips, both as imports from JSX and as `@import` targets (ledger Ruling A: the Tailwind-only `tailwind.css` during migration).
 - `Adapter = { kind: "element"; tag: string; attrs?: Record<string, string> } | { kind: "children" } | { kind: "omit" }`
 - `SourceProject` gains `adapters?: Adapters`.
 
@@ -118,6 +118,7 @@
   - An adapter with `kind: "omit"` renders nothing.
   - `adapter tag must be model-safe`: `{element script}` fails.
   - An unmapped external import still fails with `External import … needs a preview adapter`.
+  - `styles.ignore: ["app/tailwind.css"]` makes `import "./tailwind.css"` in `app/layout.tsx` a no-op, while a utility class used in JSX still fails with `Unresolved CSS class`.
 - [ ] **Step 2:** Run the tests and confirm they fail.
 - [ ] **Step 3:** Implement.
 - [ ] **Step 4:** Run the tests and confirm they pass.
@@ -184,6 +185,7 @@
 
 - [ ] **Step 1:** Run CSS plan tasks T2 to T5 as written: resolver, extractor/emitter/CLI, check and guard, tokens.
 - [ ] **Step 2:** Run CSS plan T6 and T12, limited to the routes `login` plus the layout scenario, for the parity harness and BASE baseline.
+- [ ] **Step 2b:** Split `site/src/app/globals.css` (ledger Ruling A): Tailwind-only parts move to `site/src/app/tailwind.css`, imported by `layout.tsx` right after `globals.css`; a `site/src/styles/reset.css` copied from BASE preflight is imported by `globals.css` now instead of at CSS-plan R1. Parity must stay green.
 - [ ] **Step 3:** Add `.hub/app.json` with `design.include: ["/login"]` and `design.dir: "design-hub"` (CSS plan D23: `design/` is taken). Add `.hub/adapters.json` for `next/link`, `next/image`, `react` `Suspense`, `lucide-react` and the Radix modules the closure uses. Commit both on `css-modules`.
 
 ### Task 9: Convert the `/login` closure, then iterate to a clean import
