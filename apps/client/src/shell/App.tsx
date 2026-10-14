@@ -9,6 +9,7 @@ import { WsClient, wsUrl } from '../net/ws.js';
 import { AppList } from './AppList.js';
 import { AppView } from './AppView.js';
 import { Login } from './Login.js';
+import { LOGOUT_ERROR_TEXT, logoutLocks } from './logout.js';
 import { parseHash } from './route.js';
 import type { Route } from './route.js';
 
@@ -17,6 +18,7 @@ type Auth = 'checking' | 'in' | 'out' | 'offline';
 export function App(): JSX.Element {
   const [auth, setAuth] = useState<Auth>('checking');
   const [route, setRoute] = useState<Route>(() => parseHash(location.hash));
+  const [logoutError, setLogoutError] = useState<string | null>(null);
   const api = useMemo(() => new ApiClient({ onUnauthorized: () => setAuth('out') }), []);
   const ws = useMemo(() => new WsClient({ url: wsUrl(location) }), []);
 
@@ -39,26 +41,53 @@ export function App(): JSX.Element {
   }, []);
 
   // The socket lives exactly as long as the session. Leaving 'in' (or unmounting) closes it.
+  // An expired session refuses the socket's upgrade with a 401, which the browser reports only as a
+  // close. So each close asks the server whether the session still holds. A rejected check is ignored:
+  // the network is down, and the socket's backoff keeps going. The listener comes off before close(),
+  // so closing here never starts a check.
   useEffect(() => {
     if (auth !== 'in') return;
+    const offStatus = ws.onStatus((s) => {
+      if (s !== 'closed') return;
+      void api.session().then(
+        (ok) => {
+          if (!ok) setAuth('out');
+        },
+        () => {},
+      );
+    });
     ws.connect();
-    return () => ws.close();
-  }, [auth, ws]);
+    return () => {
+      offStatus();
+      ws.close();
+    };
+  }, [auth, api, ws]);
 
-  // A phone or tablet wakes with a socket that may be dead. Returning to the page reconnects it at once.
+  // A phone or tablet wakes with a socket that may be dead, and a network that returns may have
+  // dropped one too. Returning to the page or coming back online reconnects it at once.
   useEffect(() => {
     const onVisible = (): void => {
       if (document.visibilityState === 'visible') ws.kick();
     };
+    const onOnline = (): void => ws.kick();
     document.addEventListener('visibilitychange', onVisible);
-    return () => document.removeEventListener('visibilitychange', onVisible);
+    window.addEventListener('online', onOnline);
+    return () => {
+      document.removeEventListener('visibilitychange', onVisible);
+      window.removeEventListener('online', onOnline);
+    };
   }, [ws]);
 
+  // The user stays logged in until the server confirms the logout (a 401 also means no session is left).
   const logout = async (): Promise<void> => {
+    setLogoutError(null);
     try {
       await api.logout();
-    } catch {
-      // The screen locks either way. A failed request only leaves the server-side session to expire.
+    } catch (e) {
+      if (!logoutLocks(e)) {
+        setLogoutError(LOGOUT_ERROR_TEXT);
+        return;
+      }
     }
     setAuth('out');
   };
@@ -98,9 +127,16 @@ export function App(): JSX.Element {
     <div class="shell">
       <header class="shell-header">
         <span class="shell-title">Hub</span>
-        <button type="button" class="shell-button shell-button-quiet" data-testid="logout" onClick={() => void logout()}>
-          Log out
-        </button>
+        <div class="shell-header-actions">
+          {logoutError !== null && (
+            <span class="shell-header-error" role="alert" data-testid="logout-error">
+              {logoutError}
+            </span>
+          )}
+          <button type="button" class="shell-button shell-button-quiet" data-testid="logout" onClick={() => void logout()}>
+            Log out
+          </button>
+        </div>
       </header>
       <main class="shell-main">
         {route.name === 'app' ? (

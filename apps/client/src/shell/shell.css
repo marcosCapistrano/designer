@@ -39,6 +39,21 @@
   font-weight: 600;
 }
 
+.shell-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.shell-header-error {
+  min-width: 0;
+  font-size: 14px;
+  color: #d93025;
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+
 .shell-main {
   flex: 1 1 0;
   min-height: 0;
