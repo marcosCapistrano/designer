@@ -157,6 +157,28 @@
 - [ ] **Step 4:** Run the tests and confirm they pass.
 - [ ] **Step 5:** Commit.
 
+### Task 5b: Inline fallback for components that cannot be shared yet
+
+Ledger Ruling F. In incremental sync (always shared mode), a source component that cannot become a shared definition because of a children slot or prop-driven `className`/`style` is expanded in place per occurrence (the existing expanded mode), instead of failing the route. Every other shared-definition failure still fails.
+
+**Files:**
+- Modify: `packages/sync/src/extract.ts`, `packages/sync/src/synchronize.ts`, `packages/sync/src/types.ts`
+- Test: `packages/sync/src/components.test.ts`
+
+**Interfaces:**
+- `ExtractResult` (ok) and `synchronizePages` (ok) gain `inlined: { route: string; component: string; file: string; reason: 'children' | 'prop-css' }[]`.
+- The expanded root element of each inlined occurrence gets `name` = the component name (`ElementNode.name` exists in the model).
+
+- [ ] **Step 1: Write failing tests.**
+  - The fixture Chip (`className` and `children` from callers) imports through `synchronizePages`, with `inlined` listing it once per route with reason `prop-css`.
+  - A `Card` with `{children}` is inlined with reason `children`, and its root carries `name: "Card"`.
+  - A component with no slot and no prop-driven CSS still becomes a shared definition plus instances.
+  - A component failing for any other reason (for example, route-dependent CSS) still fails.
+- [ ] **Step 2:** Run the tests and confirm they fail.
+- [ ] **Step 3:** Implement.
+- [ ] **Step 4:** Run the tests and confirm they pass.
+- [ ] **Step 5:** Commit.
+
 ### Task 6: Partial import and route scope (server)
 
 **Files:**
