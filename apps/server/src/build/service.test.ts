@@ -1,4 +1,4 @@
-import { rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import type { BuildTask, BuildTaskStatus, ServerMsg } from '@hub/protocol';
 import type { AppManifest } from '@hub/protocol/manifest';
@@ -739,6 +739,200 @@ describe('BuildService usage limit', () => {
   });
 });
 
+/** Waits until a script step has written `name` into the checkout. */
+async function written(s: Setup, name: string): Promise<void> {
+  await vi.waitFor(() => expect(existsSync(join(s.work, name))).toBe(true));
+}
+
+function originHasBranch(s: Setup, branch: string): boolean {
+  try {
+    git(s.origin, 'rev-parse', '--verify', '--quiet', `refs/heads/${branch}`);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+describe('BuildService leftovers of a finished task', () => {
+  it('Stop then Close then a new message starts task 2 on a new branch and keeps the leftovers locally', async () => {
+    const s = setup({
+      scripts: [
+        [
+          async (o) => {
+            write('half-done.ts')(o);
+            await untilAborted(o);
+          },
+          done('s1'),
+        ],
+        [write('b.txt'), done('s1')],
+      ],
+    });
+    const mainBefore = git(s.origin, 'rev-parse', 'main');
+    await s.svc.send('demo', 'Add a half done feature');
+    await written(s, 'half-done.ts');
+    s.svc.stop('demo');
+    await s.svc.idle('demo');
+    const first = latest(s);
+    expect(first).toMatchObject({ status: 'failed', error: 'Stopped by you.' });
+    await s.svc.close('demo', first.id);
+    expect(git(s.work, 'status', '--porcelain')).toBe('?? half-done.ts');
+
+    const second = await s.svc.send('demo', 'Something else');
+    await s.svc.idle('demo');
+
+    expect(second).toMatchObject({ id: 2, branch: 'build/something-else-2' });
+    expect(git(s.work, 'branch', '--show-current')).toBe('build/something-else-2');
+    // The old branch holds the leftovers as one local commit...
+    expect(git(s.work, 'log', '-1', '--format=%s', first.branch)).toBe('Uncommitted work left by task #1');
+    expect(git(s.work, 'ls-tree', '-r', '--name-only', first.branch)).toContain('half-done.ts');
+    // ...which the new branch, cut from origin/main, does not have.
+    expect(git(s.work, 'ls-tree', '-r', '--name-only', 'build/something-else-2')).not.toContain('half-done.ts');
+    expect(git(s.work, 'status', '--porcelain')).toBe('');
+    // Nothing of it reached GitHub.
+    expect(originHasBranch(s, first.branch)).toBe(false);
+    expect(git(s.origin, 'rev-parse', 'main')).toBe(mainBefore);
+    expect(feed(s)).toContainEqual([
+      'status',
+      `Kept the changes task #1 left uncommitted as a commit on ${first.branch}. It stays on the server and is not pushed.`,
+    ]);
+    expect(latest(s)).toMatchObject({ id: 2, status: 'review' });
+  });
+
+  it('keeps untracked files a verify command left behind after the task merged', async () => {
+    const s = setup({ scripts: [[write('a.txt'), done('s1')], [write('b.txt'), done('s1')]] });
+    const first = await run(s);
+    s.github.markMerged(1);
+    // What a verify command leaves: untracked, not in .gitignore (a rewritten next-env.d.ts, a test report).
+    mkdirSync(join(s.work, 'reports'));
+    writeFileSync(join(s.work, 'reports', 'junit.xml'), '<testsuites/>');
+    writeFileSync(join(s.work, 'next-env.d.ts'), '// generated');
+
+    await s.svc.send('demo', 'Add a notes file');
+    await s.svc.idle('demo');
+
+    expect(s.store.task(first.id)?.status).toBe('merged');
+    expect(latest(s)).toMatchObject({ id: 2, status: 'review' });
+    expect(git(s.work, 'log', '-1', '--format=%s', first.branch)).toBe('Uncommitted work left by task #1');
+    const kept = git(s.work, 'ls-tree', '-r', '--name-only', first.branch);
+    expect(kept).toContain('reports/junit.xml');
+    expect(kept).toContain('next-env.d.ts');
+  });
+
+  it('still refuses a dirty default branch', async () => {
+    const s = setup();
+    writeFileSync(join(s.work, 'mine.txt'), 'my own work');
+
+    await expect(s.svc.send('demo', 'Add a notes file')).rejects.toMatchObject({
+      status: 409,
+      message: 'The checkout has uncommitted changes on main. Commit or discard them first.',
+    });
+
+    expect(git(s.work, 'status', '--porcelain')).toBe('?? mine.txt');
+    expect(s.store.latestTask('demo')).toBeNull();
+  });
+
+  it('still refuses a dirty branch that is not a build/ branch, even after a task closed', async () => {
+    const s = setup({ scripts: [[write('a.txt'), done('s1')]] });
+    const first = await run(s);
+    await s.svc.close('demo', first.id);
+    git(s.work, 'checkout', '-b', 'feature/mine', 'main');
+    writeFileSync(join(s.work, 'mine.txt'), 'my own work');
+
+    await expect(s.svc.send('demo', 'Another')).rejects.toMatchObject({
+      status: 409,
+      message: 'The checkout has uncommitted changes on feature/mine. Commit or discard them first.',
+    });
+
+    expect(git(s.work, 'status', '--porcelain')).toBe('?? mine.txt');
+    expect(git(s.work, 'branch', '--show-current')).toBe('feature/mine');
+  });
+
+  it('still refuses a dirty build/ branch that belongs to no task', async () => {
+    const s = setup();
+    git(s.work, 'checkout', '-b', 'build/unknown-7', 'main');
+    writeFileSync(join(s.work, 'mine.txt'), 'my own work');
+
+    await expect(s.svc.send('demo', 'Add a notes file')).rejects.toMatchObject({
+      status: 409,
+      message: expect.stringContaining('uncommitted changes on build/unknown-7'),
+    });
+
+    expect(git(s.work, 'status', '--porcelain')).toBe('?? mine.txt');
+  });
+
+  it('a failed commit of the leftovers is a 409 and starts no task', async () => {
+    let rejecting = false;
+    const s = setup({
+      scripts: [[write('a.txt'), done('s1')]],
+      openRepo: repoWith((real) => ({
+        async commitAll(message) {
+          if (rejecting) throw new Error('hook rejected the commit');
+          return real.commitAll(message);
+        },
+      })),
+    });
+    const first = await run(s);
+    s.github.markMerged(1);
+    writeFileSync(join(s.work, 'left.txt'), 'x');
+    rejecting = true;
+
+    await expect(s.svc.send('demo', 'More')).rejects.toMatchObject({
+      status: 409,
+      message: 'Git: hook rejected the commit',
+    });
+
+    expect(latest(s).id).toBe(first.id);
+    expect(s.svc.isRunning('demo')).toBe(false);
+  });
+});
+
+describe('BuildService fetch on a continued task', () => {
+  /** Moves origin/main on GitHub's side, from another clone. Returns the new tip. */
+  function advanceOriginMain(s: Setup): string {
+    const other = join(dirname(s.origin), 'other');
+    git(dirname(s.origin), 'clone', s.origin, other);
+    writeFileSync(join(other, 'upstream.txt'), 'upstream\n');
+    git(other, 'add', '-A');
+    git(other, 'commit', '-m', 'upstream change');
+    git(other, 'push', 'origin', 'main');
+    return git(s.origin, 'rev-parse', 'main');
+  }
+
+  it('refreshes origin/<base> before Claude continues, so Claude sees the real base', async () => {
+    const s = setup({ scripts: [[write('a.txt'), done('s1')], [write('b.txt'), done('s1')]] });
+    await run(s);
+    const tip = advanceOriginMain(s);
+    expect(git(s.work, 'rev-parse', 'origin/main')).not.toBe(tip);
+
+    await s.svc.send('demo', 'More');
+    await s.svc.idle('demo');
+
+    expect(git(s.work, 'rev-parse', 'origin/main')).toBe(tip);
+  });
+
+  it('a failed fetch is logged in one line and does not fail the send', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    let failFetch = false;
+    const s = setup({
+      scripts: [[write('a.txt'), done('s1')], [write('b.txt'), done('s1')]],
+      openRepo: repoWith(() => ({
+        async fetch() {
+          if (failFetch) throw new Error('could not resolve host');
+        },
+      })),
+    });
+    const first = await run(s);
+    failFetch = true;
+
+    await s.svc.send('demo', 'More');
+    await s.svc.idle('demo');
+
+    expect(latest(s)).toMatchObject({ id: first.id, status: 'review' });
+    const lines = warn.mock.calls.map((call) => String(call[0]));
+    expect(lines.filter((line) => line.includes('fetch'))).toEqual(['Build fetch for demo failed: could not resolve host']);
+  });
+});
+
 describe('BuildService recover', () => {
   it('marks interrupted tasks failed', async () => {
     const s = setup();
@@ -783,12 +977,31 @@ describe('BuildService close and merge', () => {
 
     const closed = await s.svc.close('demo', first.id);
     expect(closed).toMatchObject({ status: 'closed', error: null });
-    expect(feed(s)).toContainEqual(['status', 'Task closed. The next message starts a new branch.']);
+    expect(feed(s)).toContainEqual([
+      'status',
+      'Task closed. The pull request stays open on GitHub. The next message starts a new branch.',
+    ]);
     expect(lastTaskMsg(s)).toMatchObject({ running: false, task: { id: first.id, status: 'closed' } });
+    // Closing is local: it does not touch the pull request.
+    expect(s.github.calls).not.toContain('closePr');
+    expect(s.github.prs.get(1)?.state).toBe('open');
 
     await s.svc.send('demo', 'Add a notes file');
     await s.svc.idle('demo');
     expect(latest(s)).toMatchObject({ id: 2, branch: 'build/add-a-notes-file-2' });
+  });
+
+  it('close of a task that never opened a pull request does not mention one', async () => {
+    const s = setup({ scripts: [[untilAborted, done('s1')]] });
+    await s.svc.send('demo', 'Add a notes file');
+    s.svc.stop('demo');
+    await s.svc.idle('demo');
+    const task = latest(s);
+    expect(task.prNumber).toBeNull();
+
+    await s.svc.close('demo', task.id);
+
+    expect(feed(s)).toContainEqual(['status', 'Task closed. The next message starts a new branch.']);
   });
 
   it('close returns merged and closed tasks as they are', async () => {

@@ -88,6 +88,19 @@ describe('migrate', () => {
     db.close();
   });
 
+  it('adds the pushed_sha column to tasks created before it existed', () => {
+    const db = new Database(':memory:');
+    migrate(db, MIGRATIONS.slice(0, 1));
+    db.prepare(
+      "INSERT INTO build_tasks (app, title, branch, base, status, created_at, updated_at) VALUES ('a', 't', 'build/t-1', 'main', 'review', 1, 1)",
+    ).run();
+
+    expect(migrate(db)).toBe(MIGRATIONS.length);
+
+    expect(db.prepare('SELECT pushed_sha FROM build_tasks').get()).toEqual({ pushed_sha: null });
+    db.close();
+  });
+
   it('a failing multi-statement migration is rolled back whole', () => {
     const db = new Database(':memory:');
     migrate(db, ['CREATE TABLE a(x)']);

@@ -17,6 +17,9 @@ CREATE TABLE build_messages (
   id INTEGER PRIMARY KEY AUTOINCREMENT, app TEXT NOT NULL, task_id INTEGER REFERENCES build_tasks(id),
   kind TEXT NOT NULL, text TEXT NOT NULL, created_at INTEGER NOT NULL);
 CREATE INDEX build_messages_app ON build_messages (app, id);`,
+  // The commit the hub last pushed for a task. Unlike head_sha, GitHub's own view of the head never overwrites it,
+  // so a push can tell "the branch is as the hub left it" from "someone else pushed to it".
+  'ALTER TABLE build_tasks ADD COLUMN pushed_sha TEXT;',
 ];
 
 function readVersion(db: Db): number {

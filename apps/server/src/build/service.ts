@@ -1,5 +1,6 @@
 import { type BuildState, type BuildTask, type BuildTaskStatus, isOpenTask } from '@hub/protocol';
 import type { AppEntry } from '../apps/registry.js';
+import type { GitRepo } from '../git/git.js';
 import { BuildError, mergeTask, pollCi, refreshCi } from './ci.js';
 import { addBuildMessage, type BuildDeps, publishTask } from './deps.js';
 import { finishTask } from './finish.js';
@@ -117,7 +118,12 @@ export class BuildService {
     if (this.isRunning(app)) throw new BuildError('Claude is still working on this app.', 409);
     if (task.status === 'merged' || task.status === 'closed') return task;
     const closed = this.deps.store.updateTask(task.id, { status: 'closed', error: null });
-    addBuildMessage(this.deps, app, task.id, 'status', 'Task closed. The next message starts a new branch.');
+    // Closing is local: the hub does not close the pull request, so a task that opened one says it stays open.
+    const copy =
+      task.prNumber === null
+        ? 'Task closed. The next message starts a new branch.'
+        : 'Task closed. The pull request stays open on GitHub. The next message starts a new branch.';
+    addBuildMessage(this.deps, app, task.id, 'status', copy);
     publishTask(this.deps, closed, false);
     return closed;
   }
@@ -293,12 +299,19 @@ export class BuildService {
     if (task !== null) {
       const { branch } = task;
       if ((await git(() => repo.currentBranch())) !== branch) await git(() => repo.checkout(branch));
+      // Claude has no token and cannot fetch, so the hub refreshes origin/<base> for it. Best effort: an
+      // unreachable GitHub must not stop Claude from working on what is already checked out.
+      try {
+        await repo.fetch();
+      } catch (err) {
+        console.warn(`Build fetch for ${app} failed: ${errorText(err)}`);
+      }
       return { task, created: false };
     }
 
     const current = await git(() => repo.currentBranch());
     if (await git(() => repo.isDirty())) {
-      throw new BuildError(`The checkout has uncommitted changes on ${current}. Commit or discard them first.`, 409);
+      await this.keepLeftovers(app, current, repo, git);
     }
     await git(() => repo.fetch());
     const base = await git(() => repo.defaultBranch());
@@ -312,6 +325,31 @@ export class BuildService {
       this.discard(created.id, err);
       throw err;
     }
+  }
+
+  /**
+   * Called when a new task finds the checkout dirty. If the checkout sits on the build/ branch of a task that is
+   * over (closed or merged), what is left there is that task's: it is committed on that branch, locally and never
+   * pushed, so the new branch can start clean. Anything else is a person's own work on the server: refused.
+   */
+  private async keepLeftovers(
+    app: string,
+    current: string,
+    repo: GitRepo,
+    git: <T>(step: () => Promise<T>) => Promise<T>,
+  ): Promise<void> {
+    const over = current.startsWith('build/') ? this.deps.store.taskForBranch(app, current) : null;
+    if (over === null || isOpenTask(over.status)) {
+      throw new BuildError(`The checkout has uncommitted changes on ${current}. Commit or discard them first.`, 409);
+    }
+    await git(() => repo.commitAll(`Uncommitted work left by task #${over.id}`));
+    addBuildMessage(
+      this.deps,
+      app,
+      over.id,
+      'status',
+      `Kept the changes task #${over.id} left uncommitted as a commit on ${current}. It stays on the server and is not pushed.`,
+    );
   }
 
   /** Starts the background work for a reserved run. `work` never rejects. */

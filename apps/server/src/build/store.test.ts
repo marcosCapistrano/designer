@@ -135,4 +135,49 @@ describe('BuildStore', () => {
     expect(store.latestTask('demo')?.id).toBe(c.id);
     expect(store.latestTask('none')).toBeNull();
   });
+
+  it('updateTask throws on an unknown id and changes nothing', () => {
+    const store = setup();
+    const task = store.createTask({ app: 'demo', title: 'T', branch: 'build/t-1', base: 'main' });
+    expect(() => store.updateTask(99, { status: 'closed' })).toThrow('build task 99 not found');
+    expect(store.task(task.id)).toEqual(task);
+  });
+
+  it('messages: limit applies with and without afterId', () => {
+    const store = setup();
+    for (let i = 1; i <= 6; i++) {
+      store.addMessage({ app: 'demo', taskId: null, kind: 'user', text: `m${i}` });
+    }
+    // Without afterId: the newest `limit`, ascending.
+    expect(store.messages('demo', undefined, 2).map((m) => m.text)).toEqual(['m5', 'm6']);
+    // With afterId: the first `limit` after it, ascending.
+    expect(store.messages('demo', 2, 2).map((m) => m.text)).toEqual(['m3', 'm4']);
+    expect(store.messages('demo', 5, 10).map((m) => m.text)).toEqual(['m6']);
+    expect(store.messages('demo', 6, 10)).toEqual([]);
+    expect(store.messages('demo', undefined, 100)).toHaveLength(6);
+  });
+
+  it('taskForBranch finds the newest task on a branch of one app, whatever its status', () => {
+    const store = setup();
+    const a = store.createTask({ app: 'demo', title: 'a', branch: 'build/a-1', base: 'main' });
+    store.createTask({ app: 'other', title: 'a', branch: 'build/a-1', base: 'main' });
+    store.updateTask(a.id, { status: 'merged' });
+    expect(store.taskForBranch('demo', 'build/a-1')?.id).toBe(a.id);
+    expect(store.taskForBranch('demo', 'build/a-1')?.status).toBe('merged');
+    expect(store.taskForBranch('demo', 'build/zzz-9')).toBeNull();
+    expect(store.taskForBranch('none', 'build/a-1')).toBeNull();
+  });
+
+  it('pushed sha round-trips through updateTask and is not part of the task', () => {
+    const store = setup();
+    const task = store.createTask({ app: 'demo', title: 'T', branch: 'build/t-1', base: 'main' });
+    expect(store.pushedSha(task.id)).toBeNull();
+    store.updateTask(task.id, { pushedSha: 'abc123' });
+    expect(store.pushedSha(task.id)).toBe('abc123');
+    expect(store.task(task.id)).not.toHaveProperty('pushedSha');
+    // headSha follows GitHub and is a different record.
+    store.updateTask(task.id, { headSha: 'def456' });
+    expect(store.pushedSha(task.id)).toBe('abc123');
+    expect(store.pushedSha(404)).toBeNull();
+  });
 });

@@ -161,11 +161,24 @@ export async function finishTask(deps: BuildDeps, input: FinishInput): Promise<B
     // A stop that arrived during the branch check above must not be dropped: nothing is pushed after it.
     if (signal.aborted) return fail('Stopped by you.');
     set({ status: 'pushing' });
+    // A task that has pushed before may have been amended or rebased since (a squash, a rebase onto the base).
+    // The branch is the hub's own, so the push may rewrite it, but only while GitHub still has the commit the hub
+    // last pushed there: the lease is that commit, not the head GitHub reports (that follows whoever pushed last).
+    // A first push has no lease and must be a plain push.
+    const lease = deps.store.pushedSha(task.id);
+    const pushing = await repo.headSha();
     try {
-      await repo.push(task.branch);
+      await repo.push(task.branch, { leaseSha: lease });
     } catch (err) {
-      return fail(`git push failed: ${errorText(err)}`);
+      const text = errorText(err);
+      if (lease !== null && /stale info/i.test(text)) {
+        return fail(
+          `git push failed: ${task.branch} on GitHub no longer matches the commit the hub last pushed, so someone else changed it and nothing was overwritten. Close this task and start a new one.`,
+        );
+      }
+      return fail(`git push failed: ${text}`);
     }
+    deps.store.updateTask(task.id, { pushedSha: pushing });
     note('status', `Pushed ${task.branch}.`);
 
     const github = deps.github;
