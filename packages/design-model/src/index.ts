@@ -7,3 +7,5 @@ export * from './apply.js';
 export * from './ops/structure.js';
 export * from './describe.js';
 export * from './session.js';
+export * from './props.js';
+export * from './export.js';

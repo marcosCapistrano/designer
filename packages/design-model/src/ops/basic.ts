@@ -120,9 +120,11 @@ export const basicHandlers: HandlerMap = {
 
   setToken: {
     validate(_doc, op) {
-      return NAME_PATTERN.test(op.group) && NAME_PATTERN.test(op.name)
-        ? null
-        : `Invalid token name: group "${op.group}", name "${op.name}"`;
+      if (!NAME_PATTERN.test(op.group) || !NAME_PATTERN.test(op.name)) {
+        return `Invalid token name: group "${op.group}", name "${op.name}"`;
+      }
+      // A token is emitted as a custom property, so its value gets the same checks.
+      return op.value === null ? null : validateStyle(`--${op.group}-${op.name}`, op.value);
     },
     mutate(draft, op) {
       const existing = ownValue(draft.tokens, op.group);
