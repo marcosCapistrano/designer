@@ -347,6 +347,24 @@ describe('CanvasController', () => {
     expect(q.length).toBe(0);
   });
 
+  it('a camera set after the manifest but before the first frame survives the deferred fit', () => {
+    const { c, flush } = harness();
+    c.resize(800, 600, 1);
+    c.setManifest(M);
+    c.setCamera({ x: 120, y: -40, scale: 0.02 });
+    flush();
+    expect(c.camera).toEqual({ x: 120, y: -40, scale: 0.02 });
+  });
+
+  it('a camera set before the manifest arrives survives the first fit', () => {
+    const { c, flush } = harness();
+    c.resize(800, 600, 1);
+    c.setCamera({ x: 120, y: -40, scale: 0.5 });
+    c.setManifest(M);
+    flush();
+    expect(c.camera).toEqual({ x: 120, y: -40, scale: 0.5 });
+  });
+
   it('defers the first fit until a frame exists', () => {
     const { c, flush } = harness();
     c.resize(800, 600, 1);
