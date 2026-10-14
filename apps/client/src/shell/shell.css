@@ -1,0 +1,148 @@
+/* The app shell, tablet first: a full-height column. Each screen scrolls inside its own area, never the page. */
+
+.shell {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  background: #e9e9ec;
+  color: #202124;
+  font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+}
+
+.shell-center {
+  box-sizing: border-box;
+  overflow: auto;
+  padding: 16px;
+}
+
+/* Centered by auto margins rather than justify-content, so tall content scrolls instead of being clipped at the top. */
+.shell-center > * {
+  margin: auto;
+}
+
+.shell-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex: 0 0 auto;
+  min-width: 0;
+  padding: 4px 16px;
+  background: #fff;
+  border-bottom: 1px solid #dadce0;
+}
+
+.shell-title {
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.shell-main {
+  flex: 1 1 0;
+  min-height: 0;
+  min-width: 0;
+  overflow: auto;
+}
+
+.shell-note {
+  font-size: 16px;
+  color: #5f6368;
+}
+
+.shell-offline {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 12px;
+  box-sizing: border-box;
+  max-width: 420px;
+  padding: 16px;
+  background: #fff;
+  border-radius: 12px;
+  font-size: 16px;
+  line-height: 1.4;
+}
+
+.shell-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  min-width: 44px;
+  min-height: 44px;
+  padding: 0 16px;
+  border: 0;
+  border-radius: 10px;
+  background: #1a73e8;
+  color: #fff;
+  font: inherit;
+  font-size: 16px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.shell-button-quiet {
+  background: transparent;
+  color: #1a73e8;
+}
+
+.shell-button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.shell-button:focus-visible,
+.login-input:focus-visible {
+  outline: 3px solid #8ab4f8;
+  outline-offset: 2px;
+}
+
+.login {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 360px;
+  padding: 24px;
+  background: #fff;
+  border-radius: 16px;
+}
+
+.login-title {
+  font-size: 22px;
+  font-weight: 600;
+}
+
+.login-label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 14px;
+  color: #5f6368;
+}
+
+/* 16px or larger, so iOS does not zoom the page when the field takes focus. */
+.login-input {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 44px;
+  padding: 0 12px;
+  border: 1px solid #dadce0;
+  border-radius: 10px;
+  color: #202124;
+  font: inherit;
+  font-size: 17px;
+}
+
+.login-error {
+  margin: 0;
+  font-size: 14px;
+  color: #d93025;
+}
+
+.login-submit {
+  width: 100%;
+}
