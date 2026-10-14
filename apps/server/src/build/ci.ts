@@ -73,8 +73,13 @@ function announceCi(deps: BuildDeps, task: BuildTask, ci: CiStatus): void {
   }
 }
 
-/** Ends a task whose PR GitHub reports merged, and fires the merge hook when the merge commit is known. */
+/**
+ * Ends a task whose PR GitHub reports merged, and fires the merge hook when the merge commit is known.
+ * A poll and a merge can both see the same merge, so a task already recorded merged is returned as is.
+ */
 function recordMergedOnGitHub(deps: BuildDeps, task: BuildTask, n: number, mergeSha: string | null): BuildTask {
+  const current = deps.store.task(task.id);
+  if (current?.status === 'merged') return current;
   const merged = deps.store.updateTask(task.id, { status: 'merged', mergeSha });
   addBuildMessage(deps, task.app, task.id, 'status', `Pull request #${n} was merged on GitHub.`);
   publishTask(deps, merged, false);
@@ -180,6 +185,9 @@ export async function mergeTask(deps: BuildDeps, app: string, taskId: number, ru
 
   const out = await github.merge(ref, n, pr.headSha);
   if (!out.merged || out.sha === null) throw new BuildError(`GitHub refused the merge: ${out.message}`, 409);
+  // A poll may have recorded this merge while the merge was in flight; record and announce it once.
+  const current = deps.store.task(task.id);
+  if (current?.status === 'merged') return current;
   const merged = deps.store.updateTask(task.id, { status: 'merged', mergeSha: out.sha, error: null });
   addBuildMessage(deps, app, task.id, 'status', `Merged pull request #${n}.`);
   publishTask(deps, merged, false);

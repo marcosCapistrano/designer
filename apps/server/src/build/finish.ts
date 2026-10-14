@@ -24,6 +24,16 @@ function errorText(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+/** A branch name as the guard compares it: no refs/heads/ or heads/ prefix, and case ignored. */
+function comparable(name: string): string {
+  return name.trim().replace(/^(refs\/heads\/|heads\/)/, '').toLowerCase();
+}
+
+/** Statuses during which Claude or the hub is actively working on the task. */
+function isRunning(status: BuildTask['status']): boolean {
+  return status === 'working' || status === 'verifying' || status === 'pushing';
+}
+
 /**
  * Finishes a Build task: commits what Claude left, verifies it (each failing command gets up to
  * MAX_FIX_ATTEMPTS Claude fixes), pushes the work branch and opens or updates its pull request.
@@ -37,7 +47,7 @@ export async function finishTask(deps: BuildDeps, input: FinishInput): Promise<B
 
   const set = (patch: TaskPatch): BuildTask => {
     task = deps.store.updateTask(task.id, patch);
-    publishTask(deps, task, true);
+    publishTask(deps, task, isRunning(task.status));
     return task;
   };
   const note = (kind: BuildMessageKind, text: string): void => {
@@ -49,15 +59,28 @@ export async function finishTask(deps: BuildDeps, input: FinishInput): Promise<B
     return task;
   };
 
-  /** Why the checkout may not be committed to or pushed, or null when it may. */
+  /**
+   * Why the checkout may not be committed to or pushed, or null when it may. Allowlist: the checked-out
+   * branch must be the task's own build/ branch, and not the default branch or the PR base.
+   */
   const blockedReason = async (): Promise<string | null> => {
     const branch = task.branch;
     if (branch.trim() === '') return 'Refusing to commit or push: the task has no work branch.';
-    if (branch === (await repo.defaultBranch())) {
-      return `Refusing to commit or push ${branch}: the hub never commits to or pushes the default branch.`;
-    }
     const current = await repo.currentBranch();
-    return current === branch ? null : `Claude switched to branch ${current}; the work must stay on ${branch}.`;
+    if (current === '' || current === 'HEAD') {
+      return 'Refusing to commit or push: the checkout is not on a named branch.';
+    }
+    if (current !== branch) return `Claude switched to branch ${current}; the work must stay on ${branch}.`;
+    if (comparable(current) === comparable(await repo.defaultBranch())) {
+      return `Refusing to commit or push ${current}: the hub never commits to or pushes the default branch.`;
+    }
+    if (comparable(current) === comparable(task.base)) {
+      return `Refusing to commit or push ${current}: it is the pull request base branch.`;
+    }
+    if (!current.startsWith('build/')) {
+      return `Refusing to commit or push ${current}: the hub only commits to build/ branches.`;
+    }
+    return null;
   };
 
   const commitLeftovers = async (): Promise<void> => {
@@ -131,6 +154,7 @@ export async function finishTask(deps: BuildDeps, input: FinishInput): Promise<B
     if (commands.length === 0) note('status', 'No typecheck or test commands found; skipped checks.');
     const stopped = await verify(commands);
     if (stopped !== null) return stopped;
+    if (signal.aborted) return fail('Stopped by you.');
 
     const beforePush = await blockedReason();
     if (beforePush !== null) return fail(beforePush);
