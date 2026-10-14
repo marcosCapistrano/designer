@@ -1,6 +1,6 @@
 import ts from '@typescript/typescript6';
 import { canonicalStringify, validateDoc, type ComponentDef, type DesignDoc, type DesignNode, type ElementNode, type StyleMap } from '@hub/design-model';
-import { applyStyles, parseStyles } from './css.js';
+import { applyStyles, CssError, parseStyles, type Rule } from './css.js';
 import type { ExtractOptions, ExtractResult, PreviewNode, RouteEntry, SourceDiagnostic, SourceProject } from './types.js';
 import { choiceKey, choicesProblem, PreviewRequired } from './choices.js';
 
@@ -62,7 +62,7 @@ export function extractPages(project: SourceProject, entries: RouteEntry[], opti
       const files = new Set<string>();
       const loadedStyles = new Set<string>();
       const modules = new Map<string, Module>();
-      const rules: ReturnType<typeof parseStyles> = [];
+      const rules: Rule[] = [];
       const inline = new Map<string, StyleMap>();
       const stack: string[] = [];
       const namespace = stableId(entry.route);
@@ -101,7 +101,11 @@ export function extractPages(project: SourceProject, entries: RouteEntry[], opti
               const scope = cssFile.endsWith('.module.css') ? `c${stableId(cssFile)}` : null;
               if (!loadedStyles.has(cssFile)) {
                 currentFile = cssFile;
-                rules.push(...parseStyles(project.files[cssFile]!, scope));
+                rules.push(...parseStyles(project.files[cssFile]!, scope, { file: cssFile, resolveImport(spec, from) {
+                  const imported = resolveFile(project, from, spec);
+                  if (!imported.endsWith('.css')) throw new Error(`Unsupported CSS @import ${spec}`);
+                  files.add(imported); return { file: imported, text: project.files[imported]! };
+                } }).rules);
                 currentFile = file;
                 loadedStyles.add(cssFile);
               }
@@ -423,17 +427,16 @@ export function extractPages(project: SourceProject, entries: RouteEntry[], opti
       const first = nodes[0];
       const root: ElementNode = nodes.length === 1 && first?.kind === 'element' ? first
         : { id: `s${namespace}`, kind: 'element', tag: 'div', attrs: {}, style: { base: {} }, children: nodes };
-      if (root === first) applyStyles(root, rules, inline);
-      else for (const node of nodes) if (node.kind === 'element') applyStyles(node, rules, inline);
+      applyStyles(root, rules, inline, root === first ? 'page' : 'wrapper');
       for (const [name, definition] of Object.entries(definitions)) {
-        applyStyles(definition.root, rules, inline);
+        applyStyles(definition.root, rules, inline, 'definition');
         const existing = doc.components[name];
         if (existing && canonicalStringify(existing) !== canonicalStringify(definition)) throw new Error(`Shared component ${name} has route-dependent props or CSS; provide an explicit preview adapter`);
         doc.components[name] = definition;
       }
       doc.pages[id] = { id, name: entry.route, route: entry.route, root };
       dependencies[id] = [...files].sort();
-    } catch (error) { diagnostics.push({ file: error instanceof PreviewRequired ? error.gap.file : currentFile, message: error instanceof Error ? error.message : 'Extraction failed', ...(error instanceof PreviewRequired ? { gap: error.gap } : {}) }); }
+    } catch (error) { diagnostics.push({ file: error instanceof PreviewRequired ? error.gap.file : error instanceof CssError ? error.file : currentFile, message: error instanceof Error ? error.message : 'Extraction failed', ...(error instanceof PreviewRequired ? { gap: error.gap } : {}) }); }
   }
   if (diagnostics.length) return { ok: false, diagnostics };
   const invalid = validateDoc(doc);

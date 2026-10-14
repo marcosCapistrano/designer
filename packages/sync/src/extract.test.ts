@@ -71,10 +71,29 @@ describe('static import', () => {
     expect(result).not.toHaveProperty('doc');
   });
 
-  it.each(['.title:hover { color: red; }', '.title p { color: red; }', '@media (max-width: 700px) { p { color: red; } }', 'p { color: red !important; }'])('rejects unsupported CSS: %s', (css) => {
+  it.each(['.title::before { content: "x"; }', '.title + p { color: red; }', '@media (max-width: 700px) { p { color: red; } }', 'p { color: red !important; }'])('rejects unsupported CSS: %s', (css) => {
     const result = extractPages({ files: { 'page.tsx': `import './style.css'; export default () => <p>Hi</p>`, 'style.css': css } }, [{ route: '/', file: 'page.tsx' }]);
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.diagnostics[0]!.message).toContain('Unsupported CSS');
+  });
+
+  it('inlines relative CSS @import against the importing file, tracks it as a dependency and names it in diagnostics', () => {
+    const files = {
+      'app/page.tsx': `import './globals.css'; export default () => <ul className="list"><li>A</li><li>B</li></ul>`,
+      'app/globals.css': `@import "./styles/base.css"; .list > :not(:last-child) { margin-bottom: 4px; }`,
+      'app/styles/base.css': `@import "./tokens.css"; @layer base { .list li { color: red; } }`,
+      'app/styles/tokens.css': `:root { --gap: 4px; }`,
+    };
+    const result = extractPages({ files }, [{ route: '/', file: 'app/page.tsx' }]);
+    expect(result.ok, JSON.stringify(result)).toBe(true);
+    if (result.ok) {
+      const root = Object.values(result.doc.pages)[0]!.root;
+      expect(root.children.map((child) => child.kind === 'element' && child.style.base)).toEqual([{ color: 'red', 'margin-bottom': '4px' }, { color: 'red' }]);
+      expect(Object.values(result.dependencies)[0]).toEqual(['app/globals.css', 'app/page.tsx', 'app/styles/base.css', 'app/styles/tokens.css']);
+    }
+    const broken = extractPages({ files: { ...files, 'app/styles/tokens.css': '.x::after { content: ""; }' } }, [{ route: '/', file: 'app/page.tsx' }]);
+    expect(broken.ok).toBe(false);
+    if (!broken.ok) expect(broken.diagnostics[0]).toMatchObject({ file: 'app/styles/tokens.css', message: 'Unsupported CSS pseudo-element ::after' });
   });
 
   it('rejects unresolved utility classes and side-effect code', () => {
