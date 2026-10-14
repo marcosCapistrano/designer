@@ -9,3 +9,4 @@ export * from './describe.js';
 export * from './session.js';
 export * from './props.js';
 export * from './export.js';
+export * from './files.js';
