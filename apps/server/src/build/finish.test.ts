@@ -1,0 +1,353 @@
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import type { BuildTask, ServerMsg } from '@hub/protocol';
+import type { AppManifest } from '@hub/protocol/manifest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { FakeClaudeRunner, type FakeStep } from '../claude/fake.js';
+import { type Db, openDb } from '../db.js';
+import { openRepo } from '../git/git.js';
+import { git, makeTestRepo, TEST_IDENTITY } from '../git/test-repo.js';
+import { FakeGitHub } from '../github/fake.js';
+import type { CommandResult, RunCommand } from './commands.js';
+import type { BuildDeps } from './deps.js';
+import { finishTask, MAX_FIX_ATTEMPTS } from './finish.js';
+import { BuildStore } from './store.js';
+
+const OK: CommandResult = { ok: true, code: 0, output: '', timedOut: false, aborted: false };
+
+function failed(output = 'boom'): CommandResult {
+  return { ok: false, code: 1, output, timedOut: false, aborted: false };
+}
+
+/**
+ * A fake RunCommand. `decide(cmd, call)` answers the n-th call (1-based) of each command;
+ * every command run is recorded.
+ */
+function commandRunner(decide: (cmd: string, call: number) => CommandResult = () => OK) {
+  const counts = new Map<string, number>();
+  const calls: string[] = [];
+  const run: RunCommand = async (cmd) => {
+    calls.push(cmd);
+    const call = (counts.get(cmd) ?? 0) + 1;
+    counts.set(cmd, call);
+    return decide(cmd, call);
+  };
+  return { run, calls };
+}
+
+const manifest: AppManifest = {
+  name: 'demo-app',
+  template: 'base@1',
+  design: { dir: 'design', routes: 'routes.json', devices: ['desktop'] },
+  build: { install: 'i', typecheck: 'tc', test: 'pnpm test' },
+  deploy: {
+    image: 'ghcr.io/owner/demo-app',
+    staging: { server: 'staging', url: 'https://staging.example.com' },
+    production: { server: 'prod', url: 'https://example.com', domain: null },
+  },
+};
+
+let t = 1000;
+const opened: Db[] = [];
+const roots: string[] = [];
+
+beforeEach(() => {
+  t = 1000;
+});
+
+afterEach(() => {
+  for (const db of opened.splice(0)) db.close();
+  for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+});
+
+interface Harness {
+  deps: BuildDeps;
+  store: BuildStore;
+  github: FakeGitHub;
+  runner: FakeClaudeRunner;
+  commands: string[];
+  origin: string;
+  work: string;
+  task: BuildTask;
+}
+
+/** A demo checkout on build/notes-1 with one user request, a fake runner and a fake GitHub. */
+function setup(
+  opts: {
+    scripts?: FakeStep[][];
+    decide?: (cmd: string, call: number) => CommandResult;
+    noGitHub?: boolean;
+  } = {},
+): Harness {
+  const { origin, work } = makeTestRepo();
+  roots.push(dirname(origin));
+  git(work, 'checkout', '-b', 'build/notes-1');
+
+  const db = openDb(':memory:');
+  opened.push(db);
+  const store = new BuildStore(db, () => t);
+  const task = store.createTask({ app: 'demo', title: 'Add notes', branch: 'build/notes-1', base: 'main' });
+  store.addMessage({ app: 'demo', taskId: task.id, kind: 'user', text: 'add notes' });
+
+  const hub = {
+    sent: [] as ServerMsg[],
+    broadcast(m: ServerMsg): void {
+      this.sent.push(m);
+    },
+  };
+  const runner = new FakeClaudeRunner(opts.scripts ?? [[{ type: 'done', sessionId: 's', ok: true }]]);
+  const commands = commandRunner(opts.decide);
+  const github = new FakeGitHub();
+  const deps: BuildDeps = {
+    store,
+    runner,
+    hub,
+    registry: { get: async () => null },
+    openRepo: (dir) => openRepo(dir, { identity: TEST_IDENTITY }),
+    github: opts.noGitHub ? null : github,
+    runCommand: commands.run,
+    now: () => t,
+  };
+  return { deps, store, github, runner, commands: commands.calls, origin, work, task };
+}
+
+function finish(h: Harness, task: BuildTask): Promise<BuildTask> {
+  return finishTask(h.deps, { task, dir: h.work, manifest, signal: new AbortController().signal });
+}
+
+function texts(store: BuildStore): string[] {
+  return store.messages('demo').map((m) => m.text);
+}
+
+function writeNotes(work: string): void {
+  writeFileSync(join(work, 'notes.md'), 'notes\n');
+}
+
+/** Wraps the checkout so a test can see every commit and push the finish step makes. */
+function recordGitWrites(deps: BuildDeps): { deps: BuildDeps; commits: string[]; pushes: string[] } {
+  const commits: string[] = [];
+  const pushes: string[] = [];
+  const wrapped: BuildDeps['openRepo'] = (dir) => {
+    const repo = deps.openRepo(dir);
+    return {
+      ...repo,
+      async commitAll(message) {
+        commits.push(message);
+        return repo.commitAll(message);
+      },
+      async push(branch) {
+        pushes.push(branch);
+        return repo.push(branch);
+      },
+    };
+  };
+  return { deps: { ...deps, openRepo: wrapped }, commits, pushes };
+}
+
+describe('finishTask', () => {
+  it('pushes and opens a PR when checks pass', async () => {
+    const h = setup();
+    writeNotes(h.work);
+
+    const result = await finish(h, h.task);
+
+    expect(result).toMatchObject({ status: 'review', prNumber: 1, ci: 'pending', error: null });
+    expect(h.github.prs.get(1)).toMatchObject({ headRef: 'build/notes-1' });
+    expect(h.github.prs.get(1)?.body).toContain('1. add notes');
+    const head = git(h.work, 'rev-parse', 'HEAD');
+    expect(result.headSha).toBe(head);
+    expect(git(h.origin, 'rev-parse', 'refs/heads/build/notes-1')).toBe(head);
+    expect(texts(h.store)).toEqual(
+      expect.arrayContaining(['Committed changes Claude left uncommitted.', 'Opened pull request #1.']),
+    );
+  });
+
+  it('no commits means no PR', async () => {
+    const h = setup();
+
+    const result = await finish(h, h.task);
+
+    expect(result.status).toBe('no_changes');
+    expect(texts(h.store)).toContain('No code changes, so no pull request.');
+    expect(h.github.calls).toEqual([]);
+    expect(h.commands).toEqual([]);
+  });
+
+  it('failing test is fixed by Claude, then passes', async () => {
+    const h = setup({
+      decide: (cmd, call) => (cmd === 'pnpm test' && call === 1 ? failed('1 test failing') : OK),
+      scripts: [
+        [
+          (o) => {
+            writeFileSync(join(o.cwd, 'fix.txt'), 'x');
+          },
+          { type: 'done', sessionId: 's', ok: true },
+        ],
+      ],
+    });
+    writeNotes(h.work);
+
+    const result = await finish(h, h.task);
+
+    expect(h.runner.calls[0]?.prompt).toContain('exit code 1');
+    expect(h.runner.calls[0]?.prompt).toContain('`pnpm test`');
+    expect(result.status).toBe('review');
+    expect(git(h.origin, 'ls-tree', '-r', '--name-only', 'refs/heads/build/notes-1')).toContain('fix.txt');
+  });
+
+  it('gives up after two fix attempts', async () => {
+    const h = setup({ decide: (cmd) => (cmd === 'pnpm test' ? failed() : OK) });
+    writeNotes(h.work);
+
+    const result = await finish(h, h.task);
+
+    expect(h.runner.calls).toHaveLength(MAX_FIX_ATTEMPTS);
+    expect(result).toMatchObject({ status: 'failed', error: 'test still fails after 2 fix attempts.' });
+    expect(h.github.calls).toEqual([]);
+    expect(() => git(h.origin, 'rev-parse', '--verify', '--quiet', 'refs/heads/build/notes-1')).toThrow();
+  });
+
+  it('switching branches fails the task', async () => {
+    const h = setup();
+    writeNotes(h.work);
+    git(h.work, 'checkout', 'main');
+
+    const result = await finish(h, h.task);
+
+    expect(result.status).toBe('failed');
+    expect(result.error).toContain('switched to branch main');
+    expect(h.commands).toEqual([]);
+    expect(() => git(h.origin, 'rev-parse', '--verify', '--quiet', 'refs/heads/build/notes-1')).toThrow();
+  });
+
+  it('a fix turn that switches branches fails the task instead of committing elsewhere', async () => {
+    const h = setup({
+      decide: (cmd, call) => (cmd === 'pnpm test' && call === 1 ? failed() : OK),
+      scripts: [
+        [
+          (o) => {
+            git(o.cwd, 'checkout', '-b', 'elsewhere');
+            writeFileSync(join(o.cwd, 'fix.txt'), 'x');
+          },
+          { type: 'done', sessionId: 's', ok: true },
+        ],
+      ],
+    });
+    writeNotes(h.work);
+
+    const result = await finish(h, h.task);
+
+    expect(result.status).toBe('failed');
+    expect(result.error).toContain('switched to branch elsewhere');
+    expect(() => git(h.origin, 'rev-parse', '--verify', '--quiet', 'refs/heads/build/notes-1')).toThrow();
+  });
+
+  it('existing PR is updated, not duplicated', async () => {
+    const h = setup();
+    writeNotes(h.work);
+    const first = await finish(h, h.task);
+    writeFileSync(join(h.work, 'more.md'), 'more\n');
+    git(h.work, 'add', '-A');
+    git(h.work, 'commit', '-m', 'more notes');
+
+    const second = await finish(h, first);
+
+    expect(second).toMatchObject({ status: 'review', prNumber: 1 });
+    expect(texts(h.store)).toContain('Updated pull request #1.');
+    expect(h.github.prs.size).toBe(1);
+  });
+
+  it('follow-up without changes keeps the PR as is', async () => {
+    const h = setup();
+    writeNotes(h.work);
+    const first = await finish(h, h.task);
+    const commandsBefore = h.commands.length;
+
+    const second = await finish(h, first);
+
+    expect(second).toMatchObject({ status: 'review', prNumber: 1 });
+    expect(texts(h.store)).toContain('No new changes.');
+    expect(h.commands).toHaveLength(commandsBefore);
+    expect(h.runner.calls).toHaveLength(0);
+    expect(h.github.calls.filter((call) => call === 'createPr')).toHaveLength(1);
+    expect(h.github.prs.size).toBe(1);
+  });
+
+  it('missing GitHub client fails after pushing', async () => {
+    const h = setup({ noGitHub: true });
+    writeNotes(h.work);
+
+    const result = await finish(h, h.task);
+
+    expect(result).toMatchObject({
+      status: 'failed',
+      error: expect.stringMatching(/^GITHUB_TOKEN is not set/),
+    });
+    expect(git(h.origin, 'rev-parse', 'refs/heads/build/notes-1')).toBe(git(h.work, 'rev-parse', 'HEAD'));
+  });
+
+  it('usage limit during a fix queues the task', async () => {
+    const h = setup({
+      decide: (cmd) => (cmd === 'pnpm test' ? failed() : OK),
+      scripts: [[{ type: 'done', sessionId: '', ok: false, error: 'usage_limit:99' }]],
+    });
+    writeNotes(h.work);
+
+    const result = await finish(h, h.task);
+
+    expect(result).toMatchObject({ status: 'queued', retryAt: 99 });
+    expect(h.store.pendingPrompt(h.task.id)).toContain('exit code 1');
+  });
+
+  it('refuses to commit or push the default branch', async () => {
+    const h = setup();
+    git(h.work, 'checkout', 'main');
+    const task = h.store.createTask({ app: 'demo', title: 'Add notes', branch: 'main', base: 'main' });
+    writeNotes(h.work);
+    const { deps, commits, pushes } = recordGitWrites(h.deps);
+    const head = git(h.work, 'rev-parse', 'HEAD');
+    const originMain = git(h.origin, 'rev-parse', 'refs/heads/main');
+
+    const result = await finishTask(deps, { task, dir: h.work, manifest, signal: new AbortController().signal });
+
+    expect(result.status).toBe('failed');
+    expect(result.error).toContain('default branch');
+    expect(commits).toEqual([]);
+    expect(pushes).toEqual([]);
+    expect(git(h.work, 'rev-parse', 'HEAD')).toBe(head);
+    expect(git(h.origin, 'rev-parse', 'refs/heads/main')).toBe(originMain);
+    expect(git(h.work, 'status', '--porcelain')).toContain('notes.md');
+    expect(h.commands).toEqual([]);
+    expect(h.github.calls).toEqual([]);
+  });
+
+  it('refuses to commit or push an empty branch name', async () => {
+    const h = setup();
+    const task = h.store.createTask({ app: 'demo', title: 'Add notes', branch: '', base: 'main' });
+    writeNotes(h.work);
+    const { deps, commits, pushes } = recordGitWrites(h.deps);
+
+    const result = await finishTask(deps, { task, dir: h.work, manifest, signal: new AbortController().signal });
+
+    expect(result.status).toBe('failed');
+    expect(result.error).toContain('no work branch');
+    expect(commits).toEqual([]);
+    expect(pushes).toEqual([]);
+    expect(git(h.work, 'status', '--porcelain')).toContain('notes.md');
+  });
+
+  it('a failing commit fails the task instead of throwing', async () => {
+    const h = setup();
+    mkdirSync(join(h.work, '.git', 'hooks'), { recursive: true });
+    writeFileSync(join(h.work, '.git', 'hooks', 'pre-commit'), '#!/bin/sh\necho "hook rejected" >&2\nexit 1\n', {
+      mode: 0o755,
+    });
+    writeNotes(h.work);
+
+    const result = await finish(h, h.task);
+
+    expect(result.status).toBe('failed');
+    expect(result.error).toMatch(/^Could not finish the task: /);
+    expect(h.github.calls).toEqual([]);
+  });
+});
