@@ -1,9 +1,12 @@
 import * as css from 'css-tree';
-import type { Device, ElementNode, StyleMap } from '@hub/design-model';
+import type { Device, ElementNode, StyleMap, Tokens } from '@hub/design-model';
+import { TOKEN_GROUP, TOKEN_NAME } from './tokens.js';
 import { isSourceOnly, matchSelector, specificity, type SelectorAst, type TreeNode } from './selectors.js';
 
 /** `file` is the stylesheet that declares the rule and `text` its unscoped selector, for diagnostics. */
 export interface Rule { selector: SelectorAst; text: string; file: string; device: Device; layer: number; declarations: StyleMap; specificity: [number, number, number]; sourceOnly: boolean }
+/** A dashed `:root` custom property `--group-name`, split at the first dash (Ruling D). */
+export interface Token { group: string; name: string; value: string; layer: number; file: string }
 /** `layers` collects first-appearance layer order across every stylesheet of one page. */
 export interface StyleOptions { file: string; resolveImport(spec: string, from: string): { file: string; text: string }; layers?: string[] }
 /** A CSS failure attributed to the stylesheet that contains it. */
@@ -13,6 +16,8 @@ export class CssError extends Error { constructor(readonly file: string, message
 const LAYERS = ['reset', 'theme', 'base', 'components', 'utilities'];
 const SOURCE_ONLY_MEDIA = new Set(['hover:hover', 'hover:none', 'prefers-reduced-motion:reduce', 'min-width:1536px']);
 const DEVICE_MEDIA: Record<string, Device> = { 'max-width:1023px': 'tablet', 'max-width:599px': 'mobile' };
+// Animation definitions only matter while something animates, which the resting frame never shows (Ruling E).
+const SOURCE_ONLY_AT_RULES = new Set(['keyframes', 'property']);
 
 /** Resolves a media query list to a device or to a state the resting frame never shows (R2). */
 function media(prelude: css.AtrulePrelude | css.Raw | null): Device | 'source' {
@@ -39,9 +44,9 @@ function media(prelude: css.AtrulePrelude | css.Raw | null): Device | 'source' {
 }
 
 /** A deliberately bounded CSS subset. Unsupported rules fail before any design is written. */
-export function parseStyles(text: string, scope: string | null, opts: StyleOptions): { rules: Rule[]; tokens: Record<string, string>; sourceOnly: number } {
+export function parseStyles(text: string, scope: string | null, opts: StyleOptions): { rules: Rule[]; tokens: Token[]; sourceOnly: number } {
   const rules: Rule[] = [];
-  const tokens: { name: string; value: string; layer: number }[] = [];
+  const tokens: Token[] = [];
   const layers = opts.layers ?? [];
   let sourceOnly = 0;
   interface Context { device: Device; layer: number; source: boolean; top: boolean }
@@ -74,6 +79,7 @@ export function parseStyles(text: string, scope: string | null, opts: StyleOptio
           read(node.block.children, { ...at, layer: LAYERS.indexOf(names[0]!), top: false }, stack);
           return;
         }
+        if (SOURCE_ONLY_AT_RULES.has(node.name) && node.block) { sourceOnly++; return; }
         if (node.name !== 'media' || !node.block) throw new Error(`Unsupported CSS at-rule @${node.name} ${prelude}`);
         const target = media(node.prelude);
         if (target === 'source') read(node.block.children, { ...at, source: true, top: false }, stack);
@@ -96,8 +102,12 @@ export function parseStyles(text: string, scope: string | null, opts: StyleOptio
         if (text === ':root' && at.device === 'base' && !source) {
           own = {};
           for (const [property, value] of Object.entries(declarations)) {
-            if (property.startsWith('--')) tokens.push({ name: property.slice(2), value, layer: at.layer });
-            else own[property] = value;
+            // Undashed custom properties such as shadcn's `--background` stay declarations on the root.
+            const dash = property.startsWith('--') ? property.indexOf('-', 2) : -1;
+            if (dash < 0) { own[property] = value; continue; }
+            const group = property.slice(2, dash), name = property.slice(dash + 1);
+            if (!TOKEN_GROUP.test(group) || !TOKEN_NAME.test(name)) throw new Error(`Unsupported CSS token name ${property}: a :root token must be --group-name in lowercase letters, digits, _ and -`);
+            tokens.push({ group, name, value, layer: at.layer, file: stack[stack.length - 1]! });
           }
           if (!Object.keys(own).length) return;
         }
@@ -117,8 +127,21 @@ export function parseStyles(text: string, scope: string | null, opts: StyleOptio
     } catch (error) { throw error instanceof CssError ? error : new CssError(file, error instanceof Error ? error.message : 'Invalid CSS'); }
   }
   sheet(text, opts.file, [opts.file]);
+  return { rules, tokens, sourceOnly };
+}
+
+/** The token each `--group-name` resolves to over every stylesheet of a page, in load order: layer order, then source order. */
+export function winningTokens(tokens: Token[]): Token[] {
+  const winners = new Map<string, Token>();
   const ordered = tokens.map((token, order) => ({ token, order })).sort((a, b) => a.token.layer - b.token.layer || a.order - b.order);
-  return { rules, tokens: Object.fromEntries(ordered.map(({ token }) => [token.name, token.value])), sourceOnly };
+  for (const { token } of ordered) winners.set(`--${token.group}-${token.name}`, token);
+  return [...winners.values()];
+}
+
+export function cascadeTokens(tokens: Token[]): Tokens {
+  const result: Tokens = {};
+  for (const token of winningTokens(tokens)) (Object.hasOwn(result, token.group) ? result[token.group]! : (result[token.group] = {}))[token.name] = token.value;
+  return result;
 }
 
 /**
@@ -145,13 +168,18 @@ export function applyStyles(root: ElementNode, rules: Rule[], inline: Map<string
         .sort((a, b) => a.rule.layer - b.rule.layer || a.rule.specificity[0] - b.rule.specificity[0] || a.rule.specificity[1] - b.rule.specificity[1] || a.rule.specificity[2] - b.rule.specificity[2] || a.order - b.order);
       for (const device of ['base', 'tablet', 'mobile'] as const) {
         const style: StyleMap = {};
+        // Keys are kept in the order they were last set, so the checks below see the cascade order.
+        const set = (map: StyleMap | undefined) => { for (const [property, value] of Object.entries(map ?? {})) { delete style[property]; style[property] = value; } };
         for (const { rule } of matching) {
-          if (rule.device === 'base' || rule.device === device || (device === 'mobile' && rule.device === 'tablet')) Object.assign(style, rule.declarations);
+          if (rule.device === 'base' || rule.device === device || (device === 'mobile' && rule.device === 'tablet')) set(rule.declarations);
         }
-        Object.assign(style, inline.get(node.id));
-        // Canonical style maps sort properties. Mixed shorthand/longhand order cannot be retained.
+        set(inline.get(node.id));
+        // Canonical style maps sort properties, which puts a shorthand before its own longhands. A longhand set
+        // before its shorthand (which resets it) cannot be retained; `all` resets everything and sorts anywhere.
+        const order = Object.keys(style);
         for (const shorthand of ['all', 'margin', 'padding', 'border', 'background', 'font', 'flex', 'grid', 'animation', 'transition', 'outline', 'list-style', 'overflow', 'gap', 'inset']) {
-          if (Object.hasOwn(style, shorthand) && Object.keys(style).some((property) => property !== shorthand && (shorthand === 'all' || property.startsWith(`${shorthand}-`)))) {
+          const at = order.indexOf(shorthand);
+          if (at >= 0 && order.some((property, index) => property !== shorthand && (shorthand === 'all' || (index < at && property.startsWith(`${shorthand}-`))))) {
             throw new Error(`Unsupported CSS mixed shorthand and longhand: ${shorthand}`);
           }
         }

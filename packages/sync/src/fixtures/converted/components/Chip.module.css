@@ -1,0 +1,26 @@
+@layer utilities {
+  :where(.root) {
+    display: inline-flex;
+    padding-inline: var(--space-3);
+    color: var(--ember-text-muted);
+  }
+  @media (hover: hover) {
+    .root:hover {
+      color: var(--ember-text-primary);
+    }
+  }
+  :where(.rootWhen1) {
+    color: var(--ember-accent-default);
+  }
+  .svg1 {
+    width: var(--space-3);
+    height: var(--space-3);
+    animation: var(--animate-spin);
+    animation-duration: 2s;
+  }
+  @media (max-width: 599px) {
+    :where(.root) {
+      padding-inline: var(--space-2);
+    }
+  }
+}

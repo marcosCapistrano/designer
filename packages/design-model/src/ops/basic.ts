@@ -14,6 +14,8 @@ import type { HandlerMap } from './handler.js';
 import { lookupNode, ownValue, requireElement, requireNode, validateAttrName } from './util.js';
 
 const NAME_PATTERN = /^[a-z][a-z0-9-]*$/;
+// A token name follows its group in `--group-name`, so it may start with a digit and use `_` (`--space-0_5`).
+const TOKEN_NAME_PATTERN = /^[a-z0-9_][a-z0-9_-]*$/;
 
 // setStyle and setName apply to element and instance nodes. validate has already rejected text nodes.
 function requireNonText(draft: DesignDoc, id: string): ElementNode | InstanceNode {
@@ -129,8 +131,8 @@ export const basicHandlers: HandlerMap = {
 
   setToken: {
     validate(_doc, op) {
-      // group and name become CSS custom property names, so they must match NAME_PATTERN.
-      if (!NAME_PATTERN.test(op.group) || !NAME_PATTERN.test(op.name)) {
+      // group and name become the CSS custom property name `--group-name`.
+      if (!NAME_PATTERN.test(op.group) || !TOKEN_NAME_PATTERN.test(op.name)) {
         return `Invalid token name: group "${op.group}", name "${op.name}"`;
       }
       if (op.value === null) return null;

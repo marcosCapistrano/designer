@@ -1,6 +1,8 @@
 import * as csstree from 'css-tree';
 
 const KEBAB_CASE = /^-?-?[a-z][a-z0-9-]*$/;
+// Custom properties may also use `_`, as token names such as `--space-0_5` do.
+const CUSTOM_PROPERTY = /^--[a-z][a-z0-9_-]*$/;
 const VAR_CALL = /var\(/i;
 // Characters that could end a declaration or rule, or the <style> element that holds the CSS,
 // and comment markers, which could hide the rest of the stylesheet.
@@ -47,7 +49,7 @@ function tokenIssue(value: string): TokenIssue {
 
 // Returns null when the declaration is valid, otherwise a reason naming the property.
 export function validateStyle(prop: string, value: string): string | null {
-  if (!KEBAB_CASE.test(prop)) {
+  if (!KEBAB_CASE.test(prop) && !CUSTOM_PROPERTY.test(prop)) {
     return `Property "${prop}" must be kebab-case`;
   }
 

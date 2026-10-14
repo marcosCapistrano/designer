@@ -1,18 +1,21 @@
 import { createHash } from 'node:crypto';
 import { applyOp, canonicalStringify, validateDoc, type ComponentDef, type DesignDoc, type Op, type Page } from '@hub/design-model';
 import { extractPages } from './extract.js';
-import type { PreviewChoices, RouteEntry, SourceDiagnostic, SourceProject } from './types.js';
+import type { PreviewChoices, RouteEntry, SourceDiagnostic, SourceProject, TokenSource } from './types.js';
+import { mergeTokens } from './tokens.js';
 import { choicesProblem } from './choices.js';
 import { ADAPTERS_FILE, adaptersIssue } from './adapters.js';
 
 /** Bump whenever extraction semantics change, so cached baselines are rebuilt. */
-export const SYNC_VERSION = 3;
+export const SYNC_VERSION = 4;
 export interface PageBaseline {
   entry: RouteEntry;
   commit: string;
   hashes: Record<string, string>;
   page: Page;
   components?: Record<string, ComponentDef>;
+  /** The route's resolved `:root` tokens, with the stylesheet that defined each. */
+  tokens?: TokenSource[];
 }
 export interface SyncBaseline {
   version: number;
@@ -65,6 +68,11 @@ export function synchronizePages(input: {
   const doc: DesignDoc = { meta: { version: 1, seq: 0 }, pages: {}, components: {}, tokens: {} };
   const rebuilt: string[] = [], reused: string[] = [];
   const diagnostics: SourceDiagnostic[] = [];
+  const tokenOrigins = new Map<string, TokenSource>();
+  function addTokens(tokens: TokenSource[] | undefined) {
+    const conflict = mergeTokens(doc.tokens, tokenOrigins, tokens ?? []);
+    if (conflict) diagnostics.push(conflict);
+  }
   function mergeComponents(components: Record<string, ComponentDef>) {
     for (const [name, definition] of Object.entries(components)) {
       const existing = doc.components[name];
@@ -84,6 +92,7 @@ export function synchronizePages(input: {
       baseline.pages[entry.route] = structuredClone(saved);
       doc.pages[saved.page.id] = structuredClone(saved.page);
       mergeComponents(saved.components ?? {});
+      addTokens(saved.tokens);
       reused.push(entry.route);
       continue;
     }
@@ -91,8 +100,10 @@ export function synchronizePages(input: {
     if (!extracted.ok) { diagnostics.push(...extracted.diagnostics); continue; }
     const page = Object.values(extracted.doc.pages)[0]!;
     const hashes = Object.fromEntries(extracted.dependencies[page.id]!.map((file) => [file, hash(project.files[file]!)]));
-    baseline.pages[entry.route] = { entry: structuredClone(entry), commit, hashes, page: structuredClone(page), components: structuredClone(extracted.doc.components) };
+    const tokens = extracted.tokens[page.id] ?? [];
+    baseline.pages[entry.route] = { entry: structuredClone(entry), commit, hashes, page: structuredClone(page), components: structuredClone(extracted.doc.components), ...(tokens.length ? { tokens: structuredClone(tokens) } : {}) };
     mergeComponents(extracted.doc.components);
+    addTokens(tokens);
     doc.pages[page.id] = page;
     rebuilt.push(entry.route);
   }

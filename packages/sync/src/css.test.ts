@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { ElementNode } from '@hub/design-model';
-import { applyStyles, CssError, parseStyles, type Rule } from './css.js';
+import { applyStyles, cascadeTokens, CssError, parseStyles, type Rule } from './css.js';
 import { parseSelector } from './selectors.js';
 
 const el = (tag: string, cls = '', children: ElementNode[] = []): ElementNode => ({ id: `n${Math.random().toString(16).slice(2)}`, kind: 'element', tag, attrs: cls ? { class: cls } : {}, style: { base: {} }, children });
@@ -82,13 +82,47 @@ describe('stylesheet parsing', () => {
     expect(() => style('.a:hover { color: blue }', el('p', 'b'))).toThrow('Unresolved CSS class b');
   });
 
-  it('reads :root custom properties as tokens and other :root properties as root rules', () => {
-    const parsed = parse(':root { --space-4: 1rem; color: red } @layer theme { :root { --space-4: 2rem; --gap: 3px } }');
-    expect(parsed.tokens).toEqual({ 'space-4': '1rem', gap: '3px' });
+  it('reads dashed :root custom properties as tokens split at the first dash, other :root properties as root rules (Ruling D)', () => {
+    const parsed = parse(':root { --space-4: 1rem; --gap: 3px; color: red } @layer theme { :root { --space-0_5: 2px; --ember-text-primary: #fff; --text-xs-leading: 1.5 } }');
+    expect(cascadeTokens(parsed.tokens)).toEqual({ space: { '4': '1rem', '0_5': '2px' }, ember: { 'text-primary': '#fff' }, text: { 'xs-leading': '1.5' } });
     const root = el('main', '', [el('p')]);
     applyStyles(root, parsed.rules, new Map());
-    expect(root.style.base).toEqual({ color: 'red' });
+    expect(root.style.base).toEqual({ color: 'red', '--gap': '3px' });
     expect((root.children[0] as ElementNode).style.base).toEqual({});
+  });
+
+  it('keeps custom properties outside a resting base :root as declarations', () => {
+    const parsed = parse('.dark { --ember-bg: #000 } html { --space-9: 1px } @media (max-width: 1023px) { :root { --space-4: 2rem } }');
+    expect(parsed.tokens).toEqual([]);
+    const root = el('html', 'dark');
+    applyStyles(root, parsed.rules, new Map());
+    expect(root.style).toEqual({ base: { '--ember-bg': '#000', '--space-9': '1px' }, tablet: { '--ember-bg': '#000', '--space-9': '1px', '--space-4': '2rem' }, mobile: { '--ember-bg': '#000', '--space-9': '1px', '--space-4': '2rem' } });
+  });
+
+  it('cascades a token defined twice: layer order first, then source order', () => {
+    const tokens = (text: string) => cascadeTokens(parse(text).tokens);
+    expect(tokens(':root { --space-4: 1rem } :root { --space-4: 2rem }')).toEqual({ space: { '4': '2rem' } });
+    expect(tokens(':root { --space-4: 1rem } @layer theme { :root { --space-4: 2rem } }')).toEqual({ space: { '4': '1rem' } });
+    expect(tokens('@layer reset, theme; @layer theme { :root { --space-4: 2rem } } @layer reset { :root { --space-4: 1rem } }')).toEqual({ space: { '4': '2rem' } });
+    expect(cascadeTokens([...parse(':root { --space-4: 1rem }').tokens, ...parseStyles('@layer theme { :root { --space-4: 2rem } }', null, { file: 'b.css', resolveImport: () => { throw new Error('none'); } }).tokens])).toEqual({ space: { '4': '1rem' } });
+  });
+
+  it.each(['--Space-4', '--space-Big', '--space--x', '--space-', '--sp_ace-4'])('rejects the unrepresentable token name %s', (name) => {
+    expect(() => parse(`:root { ${name}: 1px }`)).toThrow(`Unsupported CSS token name ${name}`);
+  });
+
+  it('treats @keyframes and @property as source-only (Ruling E)', () => {
+    const parsed = parse('@property --enter-opacity { syntax: "*"; inherits: false; } @keyframes spin { to { transform: rotate(360deg) } } @layer utilities { @keyframes ping { 75%, 100% { opacity: 0 } } } .a { animation: var(--animate-spin) }');
+    expect(parsed.sourceOnly).toBe(3);
+    expect(parsed.rules).toHaveLength(1);
+  });
+
+  it('keeps animation longhands after the shorthand, and still rejects a shorthand that resets earlier longhands', () => {
+    expect(style('.a { animation: var(--animate-spin); animation-duration: 2s }').base).toEqual({ animation: 'var(--animate-spin)', 'animation-duration': '2s' });
+    expect(style('.a { animation: var(--animate-spin) } p.a { animation-duration: 2s }').base).toEqual({ animation: 'var(--animate-spin)', 'animation-duration': '2s' });
+    expect(() => style('.a { animation-duration: 2s; animation: var(--animate-spin) }')).toThrow('Unsupported CSS mixed shorthand and longhand: animation');
+    expect(() => style('.a { animation-duration: 2s } p.a { animation: var(--animate-spin) }')).toThrow('Unsupported CSS mixed shorthand and longhand: animation');
+    expect(() => style('.a { all: unset; color: red }')).toThrow('Unsupported CSS mixed shorthand and longhand: all');
   });
 
   it('matches structural selectors against the source tree', () => {
@@ -120,7 +154,8 @@ describe('stylesheet parsing', () => {
     ['.a:nth-child(2) { color: red }', 'Unsupported CSS selector :nth-child'],
     ['.a:not(:hover) { color: red }', 'Unsupported CSS selector :not() with a state pseudo-class'],
     ['@media screen and (max-width: 1023px) { .a { color: red } }', 'Unsupported CSS at-rule @media'],
-    ['@keyframes spin { from { color: red } }', 'Unsupported CSS at-rule @keyframes'],
+    ['@font-face { font-family: X; src: url(x.woff2) }', 'Unsupported CSS at-rule @font-face'],
+    ['@-webkit-keyframes spin { from { color: red } }', 'Unsupported CSS at-rule @-webkit-keyframes'],
   ])('rejects %s', (text, message) => {
     expect(() => parse(text)).toThrow(message);
   });

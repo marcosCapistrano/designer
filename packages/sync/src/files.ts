@@ -1,4 +1,6 @@
-import { applyOp, canonicalStringify, decodeOpLog, encodeOpLog, parseDoc, serializeDoc, type DesignDoc, type Result } from '@hub/design-model';
+import { applyOp, canonicalStringify, decodeOpLog, encodeOpLog, parseDoc, serializeDoc, type DesignDoc, type Result, type Tokens } from '@hub/design-model';
+import { mergeTokens } from './tokens.js';
+import type { TokenSource } from './types.js';
 import type { SyncBaseline, SyncState } from './synchronize.js';
 import { choicesProblem } from './choices.js';
 import { createHash } from 'node:crypto';
@@ -7,6 +9,18 @@ const SHA = /^[a-f0-9]{64}$/;
 const object = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value);
 const path = (value: unknown): value is string => typeof value === 'string' && !value.includes('\\') && !value.includes('\0') && value.split('/').every((part) => part !== '' && part !== '.' && part !== '..');
 function fail(error: string): Result<SyncState> { return { ok: false, error }; }
+const tokenSources = (value: unknown): value is TokenSource[] => Array.isArray(value) && value.every((token) => object(token) && Object.keys(token).length === 4 && ['group', 'name', 'value', 'file'].every((key) => typeof token[key] === 'string') && path(token['file']));
+
+/** The document tokens a stored baseline defines, merged over its routes. */
+export function baselineTokens(baseline: SyncBaseline): Tokens {
+  const tokens: Tokens = {};
+  const origins = new Map<string, TokenSource>();
+  for (const page of Object.values(baseline.pages)) {
+    const conflict = mergeTokens(tokens, origins, page.tokens ?? []);
+    if (conflict) throw new Error(conflict.message);
+  }
+  return tokens;
+}
 
 /** The canonical design files, with source baselines and the pending log stored alongside them. */
 export function serializeSyncState(state: SyncState): Record<string, string> {
@@ -44,6 +58,7 @@ export function parseSyncState(files: Record<string, string>): Result<SyncState>
     if (base['choicesHash'] !== undefined && (typeof base['choicesHash'] !== 'string' || !SHA.test(base['choicesHash']) || base['choicesHash'] !== createHash('sha256').update(canonicalStringify(metadata['choices'] ?? {})).digest('hex'))) return fail('Preview choices do not match the cached baseline');
     if (base['adaptersHash'] !== undefined && (typeof base['adaptersHash'] !== 'string' || !SHA.test(base['adaptersHash']))) return fail('Invalid adapters hash');
     const clean: DesignDoc = { meta: { version: 1, seq: 0 }, pages: {}, components: {}, tokens: {} };
+    const tokenOrigins = new Map<string, TokenSource>();
     for (const [route, value] of Object.entries(base['pages'])) {
       if (!route.startsWith('/') || !object(value) || !object(value['entry']) || !object(value['page']) || !object(value['hashes'])) return fail(`Invalid baseline for ${route}`);
       const entry = value['entry'];
@@ -61,6 +76,11 @@ export function parseSyncState(files: Record<string, string>): Result<SyncState>
           if (!path(name) || name.includes('/')) return fail('Invalid baseline component name');
           componentFiles[`components/${name}.json`] = canonicalStringify(definition);
         }
+      }
+      if (value['tokens'] !== undefined) {
+        if (!tokenSources(value['tokens'])) return fail(`Invalid baseline tokens for ${route}`);
+        const conflict = mergeTokens(clean.tokens, tokenOrigins, value['tokens']);
+        if (conflict) return fail(`Baseline ${route}: ${conflict.message}`);
       }
       const parsed = parseDoc({ 'meta.json': canonicalStringify(clean.meta), 'tokens.json': '{}', [`pages/${page['id']}.json`]: canonicalStringify(page), ...componentFiles });
       if (!parsed.ok) return fail(`Baseline ${route}: ${parsed.error}`);

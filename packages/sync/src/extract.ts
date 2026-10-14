@@ -1,7 +1,8 @@
 import ts from '@typescript/typescript6';
 import { canonicalStringify, validateDoc, type ComponentDef, type DesignDoc, type DesignNode, type ElementNode, type InstanceNode, type NodeStyle, type StyleMap } from '@hub/design-model';
-import { applyStyles, CssError, parseStyles, type Rule } from './css.js';
-import type { ExtractOptions, ExtractResult, PreviewNode, RouteEntry, SourceDiagnostic, SourceProject } from './types.js';
+import { applyStyles, CssError, parseStyles, winningTokens, type Rule, type Token } from './css.js';
+import { mergeTokens } from './tokens.js';
+import type { ExtractOptions, ExtractResult, PreviewNode, RouteEntry, SourceDiagnostic, SourceProject, TokenSource } from './types.js';
 import { choiceKey, choicesProblem, PreviewRequired } from './choices.js';
 import { ADAPTERS_FILE, adaptersIssue, findAdapter, ignoresStyle, type Adapter } from './adapters.js';
 
@@ -98,6 +99,8 @@ interface Occurrence { instance: InstanceNode; component: string; label: string 
 export function extractPages(project: SourceProject, entries: RouteEntry[], options: ExtractOptions = {}): ExtractResult {
   const doc: DesignDoc = { meta: { version: 1, seq: 0 }, pages: {}, components: {}, tokens: {} };
   const dependencies: Record<string, string[]> = {};
+  const routeTokens: Record<string, TokenSource[]> = {};
+  const tokenOrigins = new Map<string, TokenSource>();
   const diagnostics: SourceDiagnostic[] = [];
   const choiceError = options.choices ? choicesProblem(options.choices) : null;
   if (choiceError) return { ok: false, diagnostics: [{ file: '', message: choiceError }] };
@@ -119,6 +122,7 @@ export function extractPages(project: SourceProject, entries: RouteEntry[], opti
       const loadedStyles = new Set<string>();
       const modules = new Map<string, Module>();
       const rules: Rule[] = [];
+      const tokens: Token[] = [];
       const inline = new Map<string, StyleMap>();
       const stack: string[] = [];
       const namespace = stableId(entry.route);
@@ -183,14 +187,16 @@ export function extractPages(project: SourceProject, entries: RouteEntry[], opti
                 currentFile = cssFile;
                 loadedStyles.add(cssFile);
                 // A stylesheet reached from both TSX and @import is bundled once, at its first occurrence.
-                rules.push(...parseStyles(project.files[cssFile]!, scope, { file: cssFile, layers, resolveImport(spec, from) {
+                const parsed = parseStyles(project.files[cssFile]!, scope, { file: cssFile, layers, resolveImport(spec, from) {
                   const imported = resolveFile(project, from, spec);
                   if (!imported.endsWith('.css') || imported.endsWith('.module.css')) throw new Error(`Unsupported CSS @import ${spec}`);
                   if (ignoresStyle(project.adapters, imported)) return { file: imported, text: '' };
                   files.add(imported);
                   if (loadedStyles.has(imported)) return { file: imported, text: '' };
                   loadedStyles.add(imported); return { file: imported, text: project.files[imported]! };
-                } }).rules);
+                } });
+                rules.push(...parsed.rules);
+                tokens.push(...parsed.tokens);
                 currentFile = file;
               }
               if (statement.importClause?.name) {
@@ -684,11 +690,17 @@ export function extractPages(project: SourceProject, entries: RouteEntry[], opti
         if (existing && canonicalStringify(existing) !== canonicalStringify(definition)) throw new Error(`Shared component ${name} has route-dependent props or CSS; provide an explicit preview adapter`);
         doc.components[name] = definition;
       }
+      // Ruling D: a page's tokens are the cascade over its stylesheets; routes must agree on every value.
+      const resolved = winningTokens(tokens).map(({ group, name, value, file }): TokenSource => ({ group, name, value, file }))
+        .sort((a, b) => a.group < b.group ? -1 : a.group > b.group ? 1 : a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
+      const conflict = mergeTokens(doc.tokens, tokenOrigins, resolved);
+      if (conflict) throw new CssError(conflict.file, conflict.message);
       doc.pages[id] = { id, name: entry.route, route: entry.route, root };
       dependencies[id] = [...files].sort();
+      routeTokens[id] = resolved;
     } catch (error) { diagnostics.push({ file: error instanceof PreviewRequired ? error.gap.file : error instanceof CssError ? error.file : currentFile, message: error instanceof Error ? error.message : 'Extraction failed', ...(error instanceof PreviewRequired ? { gap: error.gap } : {}) }); }
   }
   if (diagnostics.length) return { ok: false, diagnostics };
   const invalid = validateDoc(doc);
-  return invalid ? { ok: false, diagnostics: [{ file: '', message: invalid }] } : { ok: true, doc, dependencies };
+  return invalid ? { ok: false, diagnostics: [{ file: '', message: invalid }] } : { ok: true, doc, dependencies, tokens: routeTokens };
 }

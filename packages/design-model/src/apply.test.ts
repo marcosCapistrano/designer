@@ -3,6 +3,7 @@ import { applyOp, applyOpInternal, validateOp, validateOpInternal } from './appl
 import { canonicalStringify } from './canonical.js';
 import { sampleDoc } from './fixtures.js';
 import { findNode } from './tree.js';
+import { exportPage } from './export.js';
 import type { DesignDoc, DesignNode, NodeStyle, Op, Page } from './types.js';
 
 function applied(doc: DesignDoc, op: Op): DesignDoc {
@@ -200,11 +201,23 @@ describe('setToken', () => {
     expect(next.tokens).toEqual({ color: { primary: '#3366ff' }, constructor: { x: '1' } });
   });
 
+  test('accepts token names that start with a digit or contain an underscore, and exports them as --group-name', () => {
+    const one = applied(sampleDoc(), { op: 'setToken', group: 'space', name: '0_5', value: '0.125rem' });
+    const two = applied(one, { op: 'setToken', group: 'container', name: '2xl', value: '42rem' });
+    expect(two.tokens).toMatchObject({ space: { '0_5': '0.125rem' }, container: { '2xl': '42rem' } });
+    const exported = exportPage(two, Object.keys(two.pages)[0]!);
+    expect(exported.ok && exported.value.css).toContain('--container-2xl:42rem;--space-0_5:0.125rem;');
+  });
+
   test.each([
     ['Color', 'primary'],
     ['color', 'Primary'],
     ['color', 'primary name'],
     ['', 'x'],
+    ['space', '-x'],
+    ['space', ''],
+    ['space_x', '1'],
+    ['1space', 'x'],
   ])('rejects token group %j and name %j', (group, name) => {
     const error = rejected(sampleDoc(), { op: 'setToken', group, name, value: '1px' });
     expect(error).toContain('Invalid token name');

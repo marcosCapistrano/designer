@@ -13,7 +13,9 @@ export interface SourceDiagnostic { file: string; message: string; gap?: SourceG
 export interface PreviewNode { tag: string; attrs?: Record<string, string>; style?: StyleMap; children?: (PreviewNode | string)[] }
 export type PreviewChoice = ({ kind: 'value'; value: string | number | boolean | null | Record<string, unknown> | unknown[] } | { kind: 'nodes'; nodes: (PreviewNode | string)[] }) & { source?: { file: string; expression: string } };
 export type PreviewChoices = Record<string, PreviewChoice>;
+/** A resolved `:root` token `--group-name` and the stylesheet whose declaration won the cascade. */
+export interface TokenSource { group: string; name: string; value: string; file: string }
 export interface ExtractOptions { sharedComponents?: boolean; choices?: PreviewChoices }
 export type ExtractResult =
-  | { ok: true; doc: DesignDoc; dependencies: Record<string, string[]> }
+  | { ok: true; doc: DesignDoc; dependencies: Record<string, string[]>; tokens: Record<string, TokenSource[]> }
   | { ok: false; diagnostics: SourceDiagnostic[] };
