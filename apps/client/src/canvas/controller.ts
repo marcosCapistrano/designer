@@ -116,6 +116,8 @@ export class CanvasController {
   private marquee: Rect | null = null;
   /** Bumped by every tap, box select and relayout; a stale async result is dropped. */
   private selectToken = 0;
+  /** Bumped by every setManifest; a hit-map load started under an older manifest must not touch the selection. */
+  private manifestGen = 0;
 
   private framesPainted = 0;
   private tilesDrawn = 0;
@@ -130,6 +132,7 @@ export class CanvasController {
   setManifest(m: RenderManifest): void {
     if (this.manifest === null) this.needsFit = true;
     this.manifest = m;
+    const gen = ++this.manifestGen;
     this.relayout();
 
     const sel = this.selected;
@@ -137,13 +140,16 @@ export class CanvasController {
       const frame = this.findFrame(sel.pageId, sel.device);
       const hash = frame ? renderHash(frame) : null;
       if (frame && hash !== null) {
+        // Both handlers ignore a load that a later manifest has superseded, so a
+        // stale rejection cannot clear a selection that a newer manifest kept.
         void this.deps.hitMaps.load(hash).then(
           () => {
+            if (gen !== this.manifestGen) return;
             this.overlayDirty = true;
             this.schedule();
           },
           () => {
-            if (this.selected === sel) this.select(null);
+            if (gen === this.manifestGen && this.selected === sel) this.select(null);
           },
         );
       } else {
