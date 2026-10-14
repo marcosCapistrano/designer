@@ -6,20 +6,24 @@ import { useEffect, useRef, useState } from 'preact/hooks';
 import type { JSX } from 'preact';
 import { DEVICES, DEVICE_LABEL } from '@hub/protocol';
 import type { Device, NodeSelection } from '@hub/protocol';
-import { CanvasController } from './controller.js';
-import type { ControllerStats } from './controller.js';
+import type { CanvasController, ControllerStats } from './controller.js';
 import type { BlobCache } from './cache.js';
-import { liveKeys } from './cache.js';
 import type { Camera } from './geom.js';
 import type { PointerIn, Tool, WheelIn } from './gestures.js';
 import type { Frame } from './layout.js';
-import { HitMapStore } from './hitmaps.js';
-import { TileLoader } from './loader.js';
+import { COLORS } from './painter.js';
 import type { LoaderStats } from './loader.js';
+import { createCanvasRuntime } from './runtime.js';
 import type { TileSource } from './source.js';
 
 export interface CanvasViewProps {
   source: TileSource;
+  /**
+   * Must serve exactly one manifest's tiles and hit maps. Once the manifest loads,
+   * the view deletes everything in the cache that the manifest does not reference,
+   * so two apps sharing a cache would erase each other's tiles. Give each app its
+   * own, with `createIdbCache(name)`.
+   */
   cache: BlobCache;
   onSelect?: (s: NodeSelection | null) => void;
   debug?: boolean;
@@ -58,13 +62,11 @@ function buttonStyle(pressed: boolean): string {
     : 'font:inherit;padding:6px 10px;border:1px solid #dadce0;border-radius:6px;background:#fff;color:#202124;cursor:pointer';
 }
 
-function errorMessage(e: unknown): string {
-  return e instanceof Error ? e.message : String(e);
-}
-
 export function CanvasView({ source, cache, onSelect, debug = false }: CanvasViewProps): JSX.Element {
   const rootRef = useRef<HTMLDivElement>(null);
+  const layersRef = useRef<HTMLDivElement>(null);
   const baseRef = useRef<HTMLCanvasElement>(null);
+  const spareRef = useRef<HTMLCanvasElement>(null);
   const overlayRef = useRef<HTMLCanvasElement>(null);
   const controllerRef = useRef<CanvasController | null>(null);
   const [visible, setVisible] = useState<Set<Device>>(() => new Set(DEVICES));
@@ -86,29 +88,40 @@ export function CanvasView({ source, cache, onSelect, debug = false }: CanvasVie
 
   useEffect(() => {
     const root = rootRef.current;
+    const layers = layersRef.current;
     const baseCanvas = baseRef.current;
+    const spareCanvas = spareRef.current;
     const overlayCanvas = overlayRef.current;
-    if (!root || !baseCanvas || !overlayCanvas) return;
+    if (!root || !layers || !baseCanvas || !spareCanvas || !overlayCanvas) return;
     const base = baseCanvas.getContext('2d', { alpha: false });
+    const spare = spareCanvas.getContext('2d', { alpha: false });
     const overlay = overlayCanvas.getContext('2d');
-    if (!base || !overlay) return;
+    if (!base || !spare || !overlay) return;
 
-    let disposed = false;
-    const loader = new TileLoader({
+    const runtime = createCanvasRuntime({
+      base,
+      baseBack: {
+        ctx: spare,
+        // Only the shown canvas is composited; the hidden one costs the page nothing.
+        present: (shown) => {
+          const hidden = shown === base ? spareCanvas : baseCanvas;
+          shown.canvas.style.visibility = 'visible';
+          hidden.style.visibility = 'hidden';
+        },
+      },
+      overlay,
+      // The layers sit in one box, so a zoom preview is a single style write for the compositor.
+      setLayerTransform: (t) => {
+        layers.style.transform = t === null ? '' : `translate(${t.x}px,${t.y}px) scale(${t.scale})`;
+      },
       source,
       cache,
-      onLoad: (key, x, y) => controller.tileLoaded(key, x, y),
-    });
-    const hitMaps = new HitMapStore(source, cache);
-    const controller = new CanvasController({
-      base,
-      overlay,
-      tiles: loader,
-      hitMaps,
       requestFrame: (cb) => requestAnimationFrame(() => cb()),
       now: () => performance.now(),
       onSelect,
+      onError: setError,
     });
+    const { controller, loader } = runtime;
     controllerRef.current = controller;
 
     const sizeToRoot = (): void => {
@@ -117,18 +130,6 @@ export function CanvasView({ source, cache, onSelect, debug = false }: CanvasVie
     const observer = new ResizeObserver(sizeToRoot);
     observer.observe(root);
     sizeToRoot();
-
-    source.manifest().then(
-      (m) => {
-        if (disposed) return;
-        controller.setManifest(m);
-        void cache.gc(liveKeys(m));
-      },
-      (e: unknown) => {
-        if (!disposed) setError(`Could not load the render manifest: ${errorMessage(e)}`);
-      },
-    );
-    const unsubscribe = source.subscribe((m) => controller.setManifest(m));
 
     const onPointer =
       (kind: PointerIn['kind']) =>
@@ -168,7 +169,19 @@ export function CanvasView({ source, cache, onSelect, debug = false }: CanvasVie
     root.addEventListener('pointermove', onMove);
     root.addEventListener('pointerup', onUp);
     root.addEventListener('pointercancel', onCancel);
+    // A lost capture with no pointer-up would leave a ghost contact in the tracker. The event also
+    // follows every normal pointer-up, where the tracker no longer holds the id and ignores it, so
+    // this cancels that one pointer rather than resetting a finger that is still down.
+    root.addEventListener('lostpointercapture', onCancel);
     root.addEventListener('wheel', onWheel, { passive: false });
+
+    // Pointer-ups are not delivered while the window is unfocused or the tab is hidden.
+    const resetGestures = (): void => controller.resetGestures();
+    const onVisibility = (): void => {
+      if (document.visibilityState === 'hidden') controller.resetGestures();
+    };
+    window.addEventListener('blur', resetGestures);
+    document.addEventListener('visibilitychange', onVisibility);
 
     if (debug) {
       window.__hubCanvas = {
@@ -183,23 +196,36 @@ export function CanvasView({ source, cache, onSelect, debug = false }: CanvasVie
     }
 
     return () => {
-      disposed = true;
+      runtime.dispose();
       root.removeEventListener('pointerdown', onDown);
       root.removeEventListener('pointermove', onMove);
       root.removeEventListener('pointerup', onUp);
       root.removeEventListener('pointercancel', onCancel);
+      root.removeEventListener('lostpointercapture', onCancel);
+      window.removeEventListener('blur', resetGestures);
+      document.removeEventListener('visibilitychange', onVisibility);
       root.removeEventListener('wheel', onWheel);
       observer.disconnect();
-      unsubscribe();
       controllerRef.current = null;
       if (debug) delete window.__hubCanvas;
     };
   }, []);
 
   return (
-    <div ref={rootRef} data-testid="canvas" style="position:absolute;inset:0;touch-action:none;user-select:none">
-      <canvas ref={baseRef} style="position:absolute;inset:0;width:100%;height:100%" />
-      <canvas ref={overlayRef} style="position:absolute;inset:0;width:100%;height:100%;pointer-events:none" />
+    <div
+      ref={rootRef}
+      data-testid="canvas"
+      style={`position:absolute;inset:0;touch-action:none;user-select:none;background:${COLORS.bg}`}
+    >
+      <div ref={layersRef} style="position:absolute;inset:0;transform-origin:0 0">
+        <canvas ref={baseRef} data-testid="canvas-base" style="position:absolute;inset:0;width:100%;height:100%" />
+        <canvas
+          ref={spareRef}
+          data-testid="canvas-base"
+          style="position:absolute;inset:0;width:100%;height:100%;visibility:hidden"
+        />
+        <canvas ref={overlayRef} style="position:absolute;inset:0;width:100%;height:100%;pointer-events:none" />
+      </div>
       {error !== null && (
         <div data-testid="canvas-error" style={ERROR_STYLE}>
           {error}

@@ -1,5 +1,13 @@
 import { canonicalLine, canonicalStringify } from './canonical.js';
-import { isPlainObject, nodeProblem, opProblem, RESERVED_KEYS } from './shape.js';
+import {
+  componentFieldsProblem,
+  isPlainObject,
+  nodeProblem,
+  opProblem,
+  pageFieldsProblem,
+  tokensProblem,
+} from './shape.js';
+import { RESERVED_KEYS } from './rules.js';
 import { type Container, walkDoc } from './tree.js';
 import type { ComponentDef, DesignDoc, Op, Page, Result, Tokens } from './types.js';
 import { validateDoc } from './validate.js';
@@ -30,6 +38,7 @@ export function serializeDoc(doc: DesignDoc): Record<string, string> {
 // Checks the meta, tokens, page and component files, and every node in them, before the
 // duplicate-id scan. Malformed input returns an error and never throws.
 export function parseDoc(files: Record<string, string>): Result<DesignDoc> {
+  if (!isPlainObject(files)) return { ok: false, error: 'files must be an object' };
   const meta = readJsonFile(files, META);
   if (!meta.ok) return meta;
   if (!isPlainObject(meta.value)) return { ok: false, error: `${META}: expected an object` };
@@ -41,7 +50,8 @@ export function parseDoc(files: Record<string, string>): Result<DesignDoc> {
 
   const tokens = readJsonFile(files, TOKENS);
   if (!tokens.ok) return tokens;
-  if (!isPlainObject(tokens.value)) return { ok: false, error: `${TOKENS}: expected an object` };
+  const tokensIssue = tokensProblem(tokens.value);
+  if (tokensIssue !== null) return { ok: false, error: `${TOKENS}: ${tokensIssue}` };
 
   const pages: Record<string, Page> = {};
   const components: Record<string, ComponentDef> = {};
@@ -53,11 +63,11 @@ export function parseDoc(files: Record<string, string>): Result<DesignDoc> {
     const key = match[1] ?? '';
     if (RESERVED_KEYS.has(key)) return { ok: false, error: `${file}: "${key}" is a reserved name` };
     if (pageFile !== null) {
-      const page = readEntry<Page>(files, file, 'id', key);
+      const page = readEntry<Page>(files, file, 'id', key, pageFieldsProblem);
       if (!page.ok) return page;
       pages[key] = page.value;
     } else {
-      const component = readEntry<ComponentDef>(files, file, 'name', key);
+      const component = readEntry<ComponentDef>(files, file, 'name', key, componentFieldsProblem);
       if (!component.ok) return component;
       components[key] = component.value;
     }
@@ -90,13 +100,14 @@ function isIgnored(file: string): boolean {
   return IGNORED_FILES.has(file) || file.startsWith(IGNORED_PREFIX);
 }
 
-// A page or component file must hold an object whose id (or name) equals the file name,
-// and whose root is a well-formed element node.
+// A page or component file must hold an object whose id (or name) equals the file name, whose other
+// fields pass `fields`, and whose root is a well-formed element node.
 function readEntry<T>(
   files: Record<string, string>,
   name: string,
   field: 'id' | 'name',
   expected: string,
+  fields: (value: unknown) => string | null,
 ): Result<T> {
   const read = readJsonFile(files, name);
   if (!read.ok) return read;
@@ -105,6 +116,8 @@ function readEntry<T>(
   if (value[field] !== expected) {
     return { ok: false, error: `${name}: ${field} must be "${expected}" to match the file name` };
   }
+  const fieldsIssue = fields(value);
+  if (fieldsIssue !== null) return { ok: false, error: `${name}: ${fieldsIssue}` };
   const root = value['root'];
   if (!isPlainObject(root) || root['kind'] !== 'element') {
     return { ok: false, error: `${name}: root must be an element node` };

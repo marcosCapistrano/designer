@@ -26,12 +26,20 @@ import { GestureTracker, wheelAction } from './gestures.js';
 import type { GestureAction, PointerIn, Tool, WheelIn } from './gestures.js';
 import { paintOverlay } from './overlay.js';
 import { BasePainter } from './painter.js';
-import type { PaintStats } from './painter.js';
+import type { BackBuffer, PaintInput, PaintStats } from './painter.js';
 import { pickZoom, visibleTiles } from './tiles.js';
 
 export interface ControllerDeps {
   base: CanvasRenderingContext2D;
+  /** A second base canvas for ping-pong blits (see BasePainter); without it a pan blits the canvas onto itself. */
+  baseBack?: BackBuffer;
   overlay: CanvasRenderingContext2D;
+  /**
+   * Shows the painted base and overlay layers moved and scaled, or as painted for null. With it,
+   * a zoom gesture scales the last painted image on the compositor and repaints once the camera
+   * settles, instead of repainting every frame; without it every frame repaints.
+   */
+  setLayerTransform?: (t: LayerTransform | null) => void;
   tiles: { get(key: string, x: number, y: number): TileImage | undefined; request(wants: readonly TileWant[]): void };
   hitMaps: { get(hash: string): readonly HitBox[] | undefined; load(hash: string): Promise<readonly HitBox[]> };
   requestFrame: (cb: () => void) => void;
@@ -39,14 +47,31 @@ export interface ControllerDeps {
   onSelect?: (s: NodeSelection | null) => void;
 }
 
+/** Where the painted layers are shown: translate by (x, y) CSS px, then scale about the layer origin. */
+export interface LayerTransform {
+  x: number;
+  y: number;
+  scale: number;
+}
+
 export interface ControllerStats {
+  /** Frames the controller ran: each either painted the base layer or, in 'preview', moved it. */
   framesPainted: number;
   tilesDrawn: number;
-  lastMode: PaintStats['mode'] | null;
+  lastMode: PaintStats['mode'] | 'preview' | null;
+  /** Frames that moved the painted layers with a transform instead of repainting them. */
+  previewFrames: number;
 }
 
 /** Zoom changes are painted unsmoothed until the camera has been still this long. */
 export const SETTLE_MS = 150;
+/**
+ * The painted image stands in for a zoom gesture only within this scale ratio (one tile level
+ * either way); a larger change repaints so the preview never gets too coarse or leaves too much
+ * of the viewport uncovered.
+ */
+export const PREVIEW_MIN_RATIO = 0.5;
+export const PREVIEW_MAX_RATIO = 2;
 /** Tiles are prefetched this far beyond each viewport edge, as a fraction of the viewport. */
 export const PREFETCH_MARGIN = 0.25;
 
@@ -108,6 +133,8 @@ export class CanvasController {
   private viewSize: Size = { w: 0, h: 0 };
   private dpr = 1;
   private needsFit = false;
+  /** An explicit camera was set, so the first manifest must not fit over it. */
+  private cameraSet = false;
   private lastZoom = -Infinity;
 
   private scheduled = false;
@@ -121,16 +148,19 @@ export class CanvasController {
 
   private framesPainted = 0;
   private tilesDrawn = 0;
-  private lastMode: PaintStats['mode'] | null = null;
+  private lastMode: ControllerStats['lastMode'] = null;
+  private previewFrames = 0;
+  /** The layers currently carry a transform that the next real paint must clear. */
+  private previewing = false;
 
   constructor(deps: ControllerDeps) {
     this.deps = deps;
-    this.painter = new BasePainter(deps.base, deps.tiles);
+    this.painter = new BasePainter(deps.base, deps.tiles, deps.baseBack);
     this.gestures = new GestureTracker(() => this.toolValue);
   }
 
   setManifest(m: RenderManifest): void {
-    if (this.manifest === null) this.needsFit = true;
+    if (this.manifest === null && !this.cameraSet) this.needsFit = true;
     this.manifest = m;
     const gen = ++this.manifestGen;
     this.relayout();
@@ -160,8 +190,10 @@ export class CanvasController {
   }
 
   resize(w: number, h: number, dpr: number): void {
-    // Both layers share the device-pixel size so the overlay lines up with the base.
-    for (const ctx of [this.deps.base, this.deps.overlay]) {
+    // Every layer shares the device-pixel size so the overlay lines up with the base.
+    const layers = [this.deps.base, this.deps.overlay];
+    if (this.deps.baseBack) layers.push(this.deps.baseBack.ctx);
+    for (const ctx of layers) {
       ctx.canvas.width = Math.round(w * dpr);
       ctx.canvas.height = Math.round(h * dpr);
     }
@@ -191,12 +223,20 @@ export class CanvasController {
     return this.toolValue;
   }
 
+  /** Forgets in-progress gestures whose pointer-ups were lost (window blur, tab hidden). */
+  resetGestures(): void {
+    for (const action of this.gestures.reset()) this.apply(action);
+  }
+
   get camera(): Camera {
     return this.cam;
   }
 
   setCamera(c: Camera): void {
     this.cam = { x: c.x, y: c.y, scale: clampScale(c.scale) };
+    // An explicit camera wins over the deferred first-page fit, whichever came first.
+    this.needsFit = false;
+    this.cameraSet = true;
     this.schedule();
   }
 
@@ -296,14 +336,29 @@ export class CanvasController {
 
     const zoom = pickZoom(this.cam.scale, this.dpr);
     const smoothing = this.deps.now() - this.lastZoom >= SETTLE_MS;
-    const stats = this.painter.paint({
+    const input: PaintInput = {
       camera: this.cam,
       viewport: this.viewSize,
       dpr: this.dpr,
       frames: this.layout,
       zoom,
       smoothing,
-    });
+    };
+    // While zooming, the last painted image is scaled on the compositor; the repaint comes at settle.
+    const preview = smoothing ? null : this.previewOf(input);
+    let stats: PaintStats;
+    if (preview !== null) {
+      this.deps.setLayerTransform?.(preview);
+      this.previewing = true;
+      this.previewFrames++;
+      stats = { mode: 'none', blit: false, regions: 0, tilesDrawn: 0, missing: 0 };
+    } else {
+      stats = this.painter.paint(input);
+      if (this.previewing) {
+        this.deps.setLayerTransform?.(null);
+        this.previewing = false;
+      }
+    }
 
     const overlayShown = this.selected !== null || this.marquee !== null;
     if (this.overlayDirty || (stats.mode !== 'none' && overlayShown)) {
@@ -316,6 +371,8 @@ export class CanvasController {
       this.overlayDirty = false;
     }
 
+    // Priority order: the loader keeps only the first maxImages ids, so what is on
+    // screen comes first, then the coarse stand-ins, then the prefetch margin.
     const area = viewRect(this.cam, this.viewSize);
     this.deps.tiles.request([
       ...visibleTiles(this.layout, area, zoom),
@@ -325,12 +382,35 @@ export class CanvasController {
 
     this.framesPainted++;
     this.tilesDrawn += stats.tilesDrawn;
-    this.lastMode = stats.mode;
+    this.lastMode = preview !== null ? 'preview' : stats.mode;
     if (!smoothing) this.schedule();
   }
 
   stats(): ControllerStats {
-    return { framesPainted: this.framesPainted, tilesDrawn: this.tilesDrawn, lastMode: this.lastMode };
+    return {
+      framesPainted: this.framesPainted,
+      tilesDrawn: this.tilesDrawn,
+      lastMode: this.lastMode,
+      previewFrames: this.previewFrames,
+    };
+  }
+
+  /**
+   * The transform that shows the last painted image at the current camera, or null when this frame
+   * must repaint: no transform sink, the overlay needs repainting at the current camera, the image
+   * cannot stand in, or the scale moved past the preview range.
+   */
+  private previewOf(input: PaintInput): LayerTransform | null {
+    if (!this.deps.setLayerTransform || this.overlayDirty) return null;
+    const painted = this.painter.previewOf(input);
+    if (painted === null) return null;
+    const ratio = this.cam.scale / painted.scale;
+    if (ratio < PREVIEW_MIN_RATIO || ratio > PREVIEW_MAX_RATIO) return null;
+    return {
+      x: (painted.x - this.cam.x) * this.cam.scale,
+      y: (painted.y - this.cam.y) * this.cam.scale,
+      scale: ratio,
+    };
   }
 
   private schedule(): void {

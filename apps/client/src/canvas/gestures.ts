@@ -73,19 +73,32 @@ export class GestureTracker {
     return this.lift(ev, ev.kind === 'cancel');
   }
 
-  private reset(): void {
+  /**
+   * Forgets every contact, for when their pointer-ups were lost (window blur,
+   * tab hidden). Returns the cancel of a marquee in progress so the caller can
+   * clear it.
+   */
+  reset(): GestureAction[] {
+    const s = this.state;
+    const out = s.mode === 'marquee' ? [marquee('cancel', s.start, s.last)] : [];
+    this.clear();
+    return out;
+  }
+
+  private clear(): void {
     this.contacts.clear();
     this.state = { mode: 'idle' };
   }
 
   private down(ev: PointerIn): GestureAction[] {
-    if (this.contacts.has(ev.id)) return [];
+    // A down for an id we still hold means its up was lost (a mouse always has the same id): start over.
+    const dropped = this.contacts.has(ev.id) ? this.reset() : [];
     const s = this.state;
     if (s.mode === 'idle') {
       const drag = ev.button === 0 && (this.getTool() === 'select' || ev.pointerType === 'pen') ? 'marquee' : 'pan';
       this.contacts.set(ev.id, { x: ev.x, y: ev.y, pointerType: ev.pointerType });
       this.state = { mode: 'pending', id: ev.id, start: { x: ev.x, y: ev.y }, button: ev.button, drag };
-      return [];
+      return dropped;
     }
     // A third pointer, or a second pointer that is not touch, is ignored.
     if (s.mode === 'pinch' || ev.pointerType !== 'touch') return [];
@@ -145,20 +158,20 @@ export class GestureTracker {
     const s = this.state;
     switch (s.mode) {
       case 'pending':
-        this.reset();
+        this.clear();
         return !cancel && s.button === 0 ? [{ type: 'tap', x: s.start.x, y: s.start.y }] : [];
       case 'pan':
-        this.reset();
+        this.clear();
         return [];
       case 'marquee':
-        this.reset();
+        this.clear();
         return cancel ? [marquee('cancel', s.start, s.last)] : [marquee('end', s.start, ev)];
       case 'pinch': {
         this.contacts.delete(ev.id);
         const rest = s.ids[0] === ev.id ? s.ids[1] : s.ids[0];
         const p = this.contacts.get(rest);
         if (!p) {
-          this.reset();
+          this.clear();
           return [];
         }
         this.state = { mode: 'pan', id: rest, last: { x: p.x, y: p.y } };
