@@ -1,5 +1,6 @@
 import {
   type CheckRun,
+  type CheckSuite,
   type CiStatus,
   type GitHub,
   type MergeOutcome,
@@ -8,7 +9,12 @@ import {
   summarizeChecks,
 } from './github.js';
 
-type StoredPr = PrInfo & { title: string; body: string };
+type StoredPr = PrInfo & { title: string; body: string; repo: string };
+
+/** The repo as the fake keys it: pull requests belong to one repo, as on GitHub. */
+function repoKey(r: RepoRef): string {
+  return `${r.owner}/${r.repo}`;
+}
 
 function toInfo(pr: PrInfo): PrInfo {
   return {
@@ -27,6 +33,10 @@ function copyRuns(runs: readonly CheckRun[]): CheckRun[] {
   return runs.map((run) => ({ name: run.name, status: run.status, conclusion: run.conclusion }));
 }
 
+function copySuites(suites: readonly CheckSuite[]): CheckSuite[] {
+  return suites.map((suite) => ({ status: suite.status, conclusion: suite.conclusion, runCount: suite.runCount }));
+}
+
 /** In-memory GitHub for tests. The test drives PR head moves, checks and merges on GitHub's side. */
 export class FakeGitHub implements GitHub {
   readonly prs = new Map<number, StoredPr>();
@@ -35,6 +45,7 @@ export class FakeGitHub implements GitHub {
 
   private readonly autoGreenAfter: number | undefined;
   private readonly checks = new Map<string, CheckRun[]>();
+  private readonly suites = new Map<string, CheckSuite[]>();
   private readonly checkCalls = new Map<string, number>();
   private nextNumber = 1;
 
@@ -42,16 +53,18 @@ export class FakeGitHub implements GitHub {
     this.autoGreenAfter = opts.autoGreenAfter;
   }
 
-  async findOpenPr(_r: RepoRef, branch: string): Promise<PrInfo | null> {
+  async findOpenPr(r: RepoRef, branch: string): Promise<PrInfo | null> {
     this.calls.push('findOpenPr');
-    const pr = [...this.prs.values()].find((candidate) => candidate.headRef === branch && candidate.state === 'open');
+    const pr = [...this.prs.values()].find(
+      (candidate) => candidate.repo === repoKey(r) && candidate.headRef === branch && candidate.state === 'open',
+    );
     return pr ? toInfo(pr) : null;
   }
 
   async createPr(r: RepoRef, p: { head: string; base: string; title: string; body: string }): Promise<PrInfo> {
     this.calls.push('createPr');
     const existing = [...this.prs.values()].find(
-      (candidate) => candidate.headRef === p.head && candidate.state === 'open',
+      (candidate) => candidate.repo === repoKey(r) && candidate.headRef === p.head && candidate.state === 'open',
     );
     if (existing) throw new Error(`A pull request already exists for ${p.head}`);
     const number = this.nextNumber;
@@ -67,28 +80,26 @@ export class FakeGitHub implements GitHub {
       baseRef: p.base,
       title: p.title,
       body: p.body,
+      repo: repoKey(r),
     };
     this.prs.set(number, pr);
     return toInfo(pr);
   }
 
-  async getPr(_r: RepoRef, n: number): Promise<PrInfo> {
+  async getPr(r: RepoRef, n: number): Promise<PrInfo> {
     this.calls.push('getPr');
-    const pr = this.prs.get(n);
-    if (!pr) throw new Error('Not Found');
-    return toInfo(pr);
+    return toInfo(this.prIn(r, n));
   }
 
   async checkStatus(_r: RepoRef, sha: string): Promise<CiStatus> {
     this.calls.push('checkStatus');
     const checks = this.runsFor(sha);
-    return { state: summarizeChecks(checks), checks };
+    return { state: summarizeChecks(checks, this.suites.get(sha) ?? []), checks };
   }
 
-  async merge(_r: RepoRef, n: number, sha: string): Promise<MergeOutcome> {
+  async merge(r: RepoRef, n: number, sha: string): Promise<MergeOutcome> {
     this.calls.push('merge');
-    const pr = this.prs.get(n);
-    if (!pr) throw new Error('Not Found');
+    const pr = this.prIn(r, n);
     if (pr.state !== 'open') return { merged: false, sha: null, message: 'Pull request is not open' };
     if (sha !== pr.headSha) {
       return { merged: false, sha: null, message: 'Head branch was modified. Review and try the merge again.' };
@@ -103,6 +114,11 @@ export class FakeGitHub implements GitHub {
   /** Sets the check runs for a sha. Explicit runs win, including an explicit empty list. */
   setChecks(sha: string, runs: CheckRun[]): void {
     this.checks.set(sha, copyRuns(runs));
+  }
+
+  /** Sets the check suites for a sha (default: none). A suite that is not completed holds the state pending. */
+  setSuites(sha: string, suites: CheckSuite[]): void {
+    this.suites.set(sha, copySuites(suites));
   }
 
   /** Moves a PR's head, as a pushing caller would. */
@@ -120,6 +136,13 @@ export class FakeGitHub implements GitHub {
 
   closePr(n: number): void {
     this.requirePr(n).state = 'closed';
+  }
+
+  /** The PR as GitHub answers for a repo: one that belongs to another repo is Not Found. */
+  private prIn(r: RepoRef, n: number): StoredPr {
+    const pr = this.prs.get(n);
+    if (!pr || pr.repo !== repoKey(r)) throw new Error('Not Found');
+    return pr;
   }
 
   private requirePr(n: number): StoredPr {

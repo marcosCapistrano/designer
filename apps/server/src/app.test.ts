@@ -173,6 +173,13 @@ describe('hub app', () => {
     expect(await res.json()).toEqual({ error: 'busy' });
   });
 
+  it('a merge that cannot reach GitHub is a 502 with its own message', async () => {
+    build.merge.mockRejectedValue(new BuildError('Could not reach GitHub.', 502));
+    const res = await post('/api/apps/demo/build/tasks/7/merge', await cookie());
+    expect(res.status).toBe(502);
+    expect(await res.json()).toEqual({ error: 'Could not reach GitHub.' });
+  });
+
   it('other errors are a generic 500 and never leak', async () => {
     const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     try {

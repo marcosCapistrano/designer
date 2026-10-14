@@ -1,14 +1,24 @@
 import type { BuildTask, CiState } from '@hub/protocol';
-import { type CiStatus, FAILED_CONCLUSIONS, type GitHub, type PrInfo, type RepoRef } from '../github/github.js';
+import {
+  type CiStatus,
+  FAILED_CONCLUSIONS,
+  type GitHub,
+  type MergeOutcome,
+  type PrInfo,
+  type RepoRef,
+} from '../github/github.js';
 import { addBuildMessage, type BuildDeps, publishTask, repoRefFor } from './deps.js';
 import type { BuildStore } from './store.js';
 
-/** A Build action refused for a reason the HTTP layer reports with `status`. */
+/** A Build action refused for a reason the HTTP layer reports with `status` (502: GitHub could not be reached). */
 export class BuildError extends Error {
-  constructor(message: string, readonly status: 400 | 404 | 409) {
+  constructor(message: string, readonly status: 400 | 404 | 409 | 502) {
     super(message);
   }
 }
+
+/** What the tablet is told when GitHub does not answer a read or a merge. The cause goes to the log. */
+const GITHUB_UNREACHABLE = 'Could not reach GitHub.';
 
 /**
  * Consecutive polls that find a task's CI still pending on one head before the poller stops
@@ -119,11 +129,15 @@ export async function refreshCi(deps: BuildDeps, taskId: number): Promise<BuildT
     return task;
   }
 
-  if (remote.kind === 'merged') return recordMergedOnGitHub(deps, task, n, remote.pr.mergeSha);
-  if (remote.kind === 'closed') return recordClosed(deps, task, n);
+  // The reads took time. A merge, a close or another refresh may have changed the task meanwhile, so what is
+  // written below is judged against the task as it is now, not as it was before the await.
+  const current = deps.store.task(taskId);
+  if (current === null || current.status !== 'review') return current;
+  if (remote.kind === 'merged') return recordMergedOnGitHub(deps, current, n, remote.pr.mergeSha);
+  if (remote.kind === 'closed') return recordClosed(deps, current, n);
   const { pr, ci } = remote;
-  const updated = storeCi(deps, task, ci.state, pr.headSha);
-  if (ci.state !== task.ci) announceCi(deps, task, ci);
+  const updated = storeCi(deps, current, ci.state, pr.headSha);
+  if (ci.state !== current.ci) announceCi(deps, current, ci);
   return updated;
 }
 
@@ -174,7 +188,13 @@ export async function mergeTask(deps: BuildDeps, app: string, taskId: number, ru
   const ref = await repoFor(deps, app);
   if (!ref) throw new BuildError('This app has no GitHub remote.', 409);
 
-  const remote = await readRemote(github, ref, n);
+  let remote: Remote;
+  try {
+    remote = await readRemote(github, ref, n);
+  } catch (err) {
+    console.warn(`Merge read for task ${taskId} failed: ${errorText(err)}`);
+    throw new BuildError(GITHUB_UNREACHABLE, 502);
+  }
   if (remote.kind === 'merged') return recordMergedOnGitHub(deps, task, n, remote.pr.mergeSha);
   if (remote.kind === 'closed') {
     recordClosed(deps, task, n);
@@ -188,7 +208,13 @@ export async function mergeTask(deps: BuildDeps, app: string, taskId: number, ru
     throw new BuildError(`CI is ${state}; merge needs green CI.`, 409);
   }
 
-  const out = await github.merge(ref, n, pr.headSha);
+  let out: MergeOutcome;
+  try {
+    out = await github.merge(ref, n, pr.headSha);
+  } catch (err) {
+    console.warn(`Merge of task ${taskId} failed: ${errorText(err)}`);
+    throw new BuildError(GITHUB_UNREACHABLE, 502);
+  }
   if (!out.merged || out.sha === null) throw new BuildError(`GitHub refused the merge: ${out.message}`, 409);
   // A poll may have recorded this merge while the merge was in flight; record and announce it once.
   const current = deps.store.task(task.id);
