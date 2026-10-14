@@ -18,8 +18,8 @@ interface Camera {
 
 interface PhaseResult {
   times: number[];
-  before: { camera: Camera; painted: number };
-  after: { camera: Camera; painted: number };
+  before: { camera: Camera; painted: number; previewed: number };
+  after: { camera: Camera; painted: number; previewed: number };
   minScale: number;
   maxScale: number;
 }
@@ -49,7 +49,7 @@ function line(name: string, s: Summary, r: PhaseResult): string {
   return (
     `[perf] ${name}: ${s.frames} frames, median ${s.medianMs.toFixed(1)} ms = ${s.fps.toFixed(0)} fps, ` +
     `p90 ${s.p90Ms.toFixed(1)} ms, max ${s.maxMs.toFixed(1)} ms; camera ${cam(c0)} -> ${cam(c1)}; ` +
-    `framesPainted ${r.before.painted} -> ${r.after.painted}`
+    `framesPainted ${r.before.painted} -> ${r.after.painted} (previewed ${r.before.previewed} -> ${r.after.previewed})`
   );
 }
 
@@ -61,7 +61,7 @@ function line(name: string, s: Summary, r: PhaseResult): string {
 function runPhase(page: Page, init: string, step: string): Promise<PhaseResult> {
   return page.evaluate<PhaseResult>(`new Promise(resolve => {
     const hub = window.__hubCanvas;
-    const snap = () => ({ camera: { ...hub.camera() }, painted: hub.stats().framesPainted });
+    const snap = () => ({ camera: { ...hub.camera() }, painted: hub.stats().framesPainted, previewed: hub.stats().previewFrames });
     const before = snap();
     let minScale = before.camera.scale; let maxScale = before.camera.scale;
     const times = []; const start = performance.now(); let last = start;
