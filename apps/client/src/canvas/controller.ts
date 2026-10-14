@@ -108,6 +108,8 @@ export class CanvasController {
   private viewSize: Size = { w: 0, h: 0 };
   private dpr = 1;
   private needsFit = false;
+  /** An explicit camera was set, so the first manifest must not fit over it. */
+  private cameraSet = false;
   private lastZoom = -Infinity;
 
   private scheduled = false;
@@ -130,7 +132,7 @@ export class CanvasController {
   }
 
   setManifest(m: RenderManifest): void {
-    if (this.manifest === null) this.needsFit = true;
+    if (this.manifest === null && !this.cameraSet) this.needsFit = true;
     this.manifest = m;
     const gen = ++this.manifestGen;
     this.relayout();
@@ -191,12 +193,20 @@ export class CanvasController {
     return this.toolValue;
   }
 
+  /** Forgets in-progress gestures whose pointer-ups were lost (window blur, tab hidden). */
+  resetGestures(): void {
+    for (const action of this.gestures.reset()) this.apply(action);
+  }
+
   get camera(): Camera {
     return this.cam;
   }
 
   setCamera(c: Camera): void {
     this.cam = { x: c.x, y: c.y, scale: clampScale(c.scale) };
+    // An explicit camera wins over the deferred first-page fit, whichever came first.
+    this.needsFit = false;
+    this.cameraSet = true;
     this.schedule();
   }
 
@@ -316,6 +326,8 @@ export class CanvasController {
       this.overlayDirty = false;
     }
 
+    // Priority order: the loader keeps only the first maxImages ids, so what is on
+    // screen comes first, then the coarse stand-ins, then the prefetch margin.
     const area = viewRect(this.cam, this.viewSize);
     this.deps.tiles.request([
       ...visibleTiles(this.layout, area, zoom),

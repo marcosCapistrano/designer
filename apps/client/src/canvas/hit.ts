@@ -29,7 +29,9 @@ export function hitTest(map: readonly HitBox[], p: Point): string | null {
 
 // Boxes fully inside r, minus any box enclosed by an earlier box in the map.
 // Dropping against earlier boxes (kept or not) gives the same result as
-// dropping only against kept ones, since enclosure is transitive.
+// dropping only against kept ones, since enclosure is transitive. The scan runs
+// from the nearest earlier box backwards (a box's ancestors tend to sit near it
+// in paint order); the result does not depend on the scan direction.
 export function boxSelect(map: readonly HitBox[], r: Rect): string[] {
   const inside: HitBox[] = [];
   for (const b of map) {
@@ -42,7 +44,7 @@ export function boxSelect(map: readonly HitBox[], r: Rect): string[] {
     const box = inside[i];
     if (!box) continue;
     let covered = false;
-    for (let j = 0; j < i && !covered; j++) {
+    for (let j = i - 1; j >= 0 && !covered; j--) {
       const earlier = inside[j];
       if (earlier && encloses(earlier, box)) covered = true;
     }
