@@ -66,8 +66,6 @@ export interface RenderDocResult {
 
 interface QueuedJob {
   entry: string;
-  pageId: string;
-  device: Device;
   job: RenderJob;
   prevRender: PageRender | undefined;
 }
@@ -118,7 +116,7 @@ export async function renderDoc(
         reused.push(entry);
         continue;
       }
-      queued.push({ entry, pageId: page.id, device, job: { pageId: page.id, device, html, css }, prevRender });
+      queued.push({ entry, job: { pageId: page.id, device, html, css }, prevRender });
     }
   }
 
@@ -130,16 +128,23 @@ export async function renderDoc(
       results.set(q.entry, out.render);
       rendered.push(q.entry);
     } catch (err) {
-      results.set(q.entry, failedRender(q.device, q.prevRender, messageOf(err)));
+      results.set(q.entry, failedRender(q.job.device, q.prevRender, messageOf(err)));
       failed.push(q.entry);
     }
   });
 
   const manifestPages: ManifestPage[] = pages.map((page) => {
+    const prev = prevByPage.get(page.id);
     const renders: Partial<Record<Device, PageRender>> = {};
-    for (const device of devices) {
-      const render = results.get(entryOf(page.id, device));
-      if (render) renders[device] = render;
+    for (const device of DEVICES) {
+      if (devices.includes(device)) {
+        const render = results.get(entryOf(page.id, device));
+        if (render) renders[device] = render;
+      } else {
+        // Devices this call did not render keep their previous render, error included.
+        const carried = prev?.renders[device];
+        if (carried) renders[device] = copyRender(carried);
+      }
     }
     return { pageId: page.id, name: page.name, route: page.route, renders };
   });
@@ -156,21 +161,31 @@ function entryOf(pageId: string, device: Device): string {
   return `${pageId}@${device}`;
 }
 
+// A copy with its own levels array, so a new manifest never shares mutable state with prev.
+function copyRender(render: PageRender): PageRender {
+  return { ...render, levels: render.levels.map((level) => ({ ...level })) };
+}
+
 // Keeps the last good render's levels and hash; a page never rendered gets an empty placeholder.
 function failedRender(device: Device, prev: PageRender | undefined, error: string): PageRender {
-  if (prev) return { ...prev, error };
+  if (prev) return { ...copyRender(prev), error };
   return { device, hash: '', width: DEVICE_WIDTH[device], height: 0, levels: [], error };
 }
 
 function withoutError(render: PageRender): PageRender {
-  const copy = { ...render };
+  const copy = copyRender(render);
   delete copy.error;
   return copy;
 }
 
+// A store that cannot answer counts as a miss, so the device re-renders instead of failing the call.
 async function hasAllLevels(store: TileStore, render: PageRender): Promise<boolean> {
   for (const level of render.levels) {
-    if (!(await store.hasLevel(level.key))) return false;
+    try {
+      if (!(await store.hasLevel(level.key))) return false;
+    } catch {
+      return false;
+    }
   }
   return true;
 }
