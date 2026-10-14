@@ -1,0 +1,125 @@
+import { createHash } from 'node:crypto';
+import { Hono } from 'hono';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { openDb, type Db } from '../db.js';
+import { LoginLimiter } from './limiter.js';
+import { hashPassphrase } from './passphrase.js';
+import { authRoutes } from './routes.js';
+import { SESSION_TTL_MS, SessionStore, readCookie, requireAuth } from './sessions.js';
+
+const PASS = 'correct horse battery staple';
+const HASH = hashPassphrase(PASS, Buffer.alloc(16, 1));
+
+let db: Db;
+let sessions: SessionStore;
+let app: Hono;
+
+beforeEach(() => {
+  db = openDb(':memory:');
+  sessions = new SessionStore(db);
+  app = new Hono();
+  app.route('/api', authRoutes({ sessions, limiter: new LoginLimiter(), passphraseHash: HASH }));
+  app.use('/api/secret', requireAuth(sessions));
+  app.get('/api/secret', (c) => c.json({ ok: true }));
+});
+
+afterEach(() => {
+  db.close();
+});
+
+async function login(passphrase: string): Promise<Response> {
+  return app.request('/api/login', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ passphrase }),
+  });
+}
+
+function tokenFrom(res: Response): string {
+  const header = res.headers.get('set-cookie') ?? '';
+  const match = /hub_session=([^;]+)/.exec(header);
+  if (!match?.[1]) throw new Error(`no session cookie in set-cookie: ${header}`);
+  return match[1];
+}
+
+describe('auth routes', () => {
+  it('login sets an httpOnly strict secure cookie', async () => {
+    const res = await login(PASS);
+    expect(res.status).toBe(204);
+    const cookie = res.headers.get('set-cookie') ?? '';
+    expect(cookie).toContain('hub_session=');
+    expect(cookie).toContain('HttpOnly');
+    expect(cookie).toContain('Secure');
+    expect(cookie).toContain('SameSite=Strict');
+    expect(cookie).toContain('Path=/');
+    expect(cookie).toContain('Max-Age=2592000');
+  });
+
+  it('cookie opens protected routes', async () => {
+    const token = tokenFrom(await login(PASS));
+    const ok = await app.request('/api/secret', { headers: { cookie: `hub_session=${token}` } });
+    expect(ok.status).toBe(200);
+    const denied = await app.request('/api/secret');
+    expect(denied.status).toBe(401);
+    expect(await denied.json()).toEqual({ error: 'Not logged in' });
+  });
+
+  it('wrong passphrase is 401', async () => {
+    const res = await login('wrong passphrase entirely');
+    expect(res.status).toBe(401);
+    expect(await res.json()).toEqual({ error: 'Wrong passphrase' });
+  });
+
+  it('sixth attempt is rate limited', async () => {
+    for (let i = 0; i < 5; i += 1) {
+      expect((await login('nope')).status).toBe(401);
+    }
+    const res = await login(PASS);
+    expect(res.status).toBe(429);
+    expect(await res.json()).toEqual({ error: 'Too many attempts. Try again in 15 minutes.' });
+  });
+
+  it('logout revokes the session', async () => {
+    const token = tokenFrom(await login(PASS));
+    const cookie = `hub_session=${token}`;
+    expect((await app.request('/api/secret', { headers: { cookie } })).status).toBe(200);
+    const out = await app.request('/api/logout', { method: 'POST', headers: { cookie } });
+    expect(out.status).toBe(204);
+    expect((await app.request('/api/secret', { headers: { cookie } })).status).toBe(401);
+  });
+
+  it('expired sessions are rejected', () => {
+    let now = 0;
+    const store = new SessionStore(db, () => now);
+    const token = store.create();
+    now = SESSION_TTL_MS - 1;
+    expect(store.valid(token)).toBe(true);
+    now = SESSION_TTL_MS;
+    expect(store.valid(token)).toBe(false);
+    expect(store.purgeExpired()).toBe(1);
+  });
+
+  it('tokens are stored hashed', () => {
+    const token = sessions.create();
+    const rows = db.prepare('SELECT token_hash FROM auth_sessions').all() as { token_hash: string }[];
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.token_hash).toBe(createHash('sha256').update(token).digest('hex'));
+    expect(rows[0]?.token_hash).not.toBe(token);
+  });
+
+  it('readCookie parses a header', () => {
+    expect(readCookie('a=1; hub_session=xyz; b=2', 'hub_session')).toBe('xyz');
+    expect(readCookie('a=1; b=2', 'hub_session')).toBeUndefined();
+    expect(readCookie(undefined, 'hub_session')).toBeUndefined();
+  });
+
+  it('session reports login state', async () => {
+    const before = await app.request('/api/session');
+    expect(before.status).toBe(401);
+    expect(await before.json()).toEqual({ error: 'Not logged in' });
+    const token = tokenFrom(await login(PASS));
+    const after = await app.request('/api/session', { headers: { cookie: `hub_session=${token}` } });
+    expect(after.status).toBe(200);
+    expect(await after.json()).toEqual({ ok: true });
+  });
+});
