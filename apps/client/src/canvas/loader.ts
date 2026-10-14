@@ -73,6 +73,7 @@ export class TileLoader {
   private readonly inFlight = new Set<string>();
   private readonly failed = new Map<string, number>();
   private idleWaiters: Array<() => void> = [];
+  private disposed = false;
 
   constructor(opts: LoaderOptions) {
     this.source = opts.source;
@@ -100,6 +101,7 @@ export class TileLoader {
    * first `maxImages` distinct ids are wanted; the rest are dropped.
    */
   request(wants: readonly TileWant[]): void {
+    if (this.disposed) return;
     const wanted = new Set<string>();
     const queue: Job[] = [];
     const now = this.now();
@@ -115,6 +117,20 @@ export class TileLoader {
     }
     this.wanted = wanted;
     this.queue = queue;
+    this.pump();
+  }
+
+  /**
+   * Stops loading and releases every decoded image. Loads still in flight are
+   * left to finish, but their results are closed instead of stored, and onLoad
+   * is never called again. The loader cannot be used afterwards.
+   */
+  dispose(): void {
+    this.disposed = true;
+    this.queue = [];
+    this.wanted = new Set();
+    for (const image of this.images.values()) image.close();
+    this.images.clear();
     this.pump();
   }
 
@@ -154,12 +170,18 @@ export class TileLoader {
     const { id, key, x, y } = job;
     try {
       const cached = await this.cache.get(id);
+      if (this.disposed) return;
       let image: TileImage;
       if (cached !== undefined) {
         image = await this.decode(cached);
       } else {
         const blob = await this.source.tile(key, x, y);
+        if (this.disposed) return;
         [image] = await Promise.all([this.decode(blob), this.cache.put(id, blob)]);
+      }
+      if (this.disposed) {
+        image.close();
+        return;
       }
       const kept = this.insert(id, image);
       this.failed.delete(id);

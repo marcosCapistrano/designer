@@ -266,4 +266,138 @@ describe('TileLoader', () => {
     expect(loader.stats().images).toBe(1);
     expect(loader.get('a', 0, 0)).toBeDefined();
   });
+
+  describe('dispose', () => {
+    /** A decode that remembers every image it produced, so a test can check which were closed. */
+    function trackingDecode() {
+      const made: Array<{ id: string; width: number; height: number; close: ReturnType<typeof vi.fn> }> = [];
+      const fn = async (b: Blob) => {
+        const image = { id: await b.text(), width: 512, height: 512, close: vi.fn() };
+        made.push(image);
+        return image;
+      };
+      return { fn, made };
+    }
+
+    it('closes every resident image and forgets them', async () => {
+      const { cache } = mapCache();
+      const d = trackingDecode();
+      const loader = new TileLoader({ source: instantSource(), cache, onLoad: vi.fn(), decode: d.fn });
+      loader.request([0, 1, 2].map((x) => ({ key: 'k', x, y: 0 })));
+      await loader.whenIdle();
+      expect(d.made).toHaveLength(3);
+
+      loader.dispose();
+
+      for (const image of d.made) expect(image.close).toHaveBeenCalledTimes(1);
+      expect(loader.get('k', 0, 0)).toBeUndefined();
+      expect(loader.stats()).toMatchObject({ images: 0, queued: 0 });
+    });
+
+    it('drops queued loads', async () => {
+      const { cache } = mapCache();
+      const { source, calls } = deferredSource();
+      const loader = new TileLoader({ source, cache, onLoad: vi.fn(), decode, maxInFlight: 1 });
+      loader.request([0, 1, 2].map((x) => ({ key: 'k', x, y: 0 })));
+      await tick();
+      expect(calls).toHaveLength(1);
+
+      loader.dispose();
+      calls[0]!.resolve(new Blob(['k/0_0']));
+      await loader.whenIdle();
+      await tick();
+
+      expect(source.tile).toHaveBeenCalledTimes(1);
+    });
+
+    it('closes a tile that finishes decoding after dispose and does not call onLoad', async () => {
+      const { cache } = mapCache();
+      const { source, calls } = deferredSource();
+      const d = trackingDecode();
+      const onLoad = vi.fn();
+      const loader = new TileLoader({ source, cache, onLoad, decode: d.fn });
+      loader.request([{ key: 'k', x: 0, y: 0 }]);
+      await tick();
+
+      loader.dispose();
+      calls[0]!.resolve(new Blob(['k/0_0']));
+      await loader.whenIdle();
+
+      expect(d.made.length).toBeLessThanOrEqual(1);
+      for (const image of d.made) expect(image.close).toHaveBeenCalledTimes(1);
+      expect(loader.stats().images).toBe(0);
+      expect(onLoad).not.toHaveBeenCalled();
+    });
+
+    it('closes an image whose decode is still pending at dispose', async () => {
+      const { cache } = mapCache([['k/0_0', new Blob(['k/0_0'])]]);
+      let finish: () => void = () => {};
+      const image = { width: 512, height: 512, close: vi.fn() };
+      const slowDecode = () =>
+        new Promise<typeof image>((resolve) => {
+          finish = () => resolve(image);
+        });
+      const onLoad = vi.fn();
+      const loader = new TileLoader({ source: instantSource(), cache, onLoad, decode: slowDecode });
+      loader.request([{ key: 'k', x: 0, y: 0 }]);
+      await tick();
+
+      loader.dispose();
+      finish();
+      await loader.whenIdle();
+
+      expect(image.close).toHaveBeenCalledTimes(1);
+      expect(loader.get('k', 0, 0)).toBeUndefined();
+      expect(onLoad).not.toHaveBeenCalled();
+    });
+
+    it('does not fetch from the source for a cache read that returns after dispose', async () => {
+      let release: (b: Blob | undefined) => void = () => {};
+      const cache: BlobCache = {
+        get: () =>
+          new Promise<Blob | undefined>((resolve) => {
+            release = resolve;
+          }),
+        put: async () => {},
+        gc: async () => 0,
+      };
+      const source = instantSource();
+      const loader = new TileLoader({ source, cache, onLoad: vi.fn(), decode });
+      loader.request([{ key: 'k', x: 0, y: 0 }]);
+      await tick();
+
+      loader.dispose();
+      release(undefined);
+      await loader.whenIdle();
+
+      expect(source.tile).not.toHaveBeenCalled();
+    });
+
+    it('request after dispose loads nothing', async () => {
+      const { cache } = mapCache();
+      const source = instantSource();
+      const loader = new TileLoader({ source, cache, onLoad: vi.fn(), decode });
+      loader.dispose();
+
+      loader.request([{ key: 'k', x: 0, y: 0 }]);
+      await loader.whenIdle();
+
+      expect(source.tile).not.toHaveBeenCalled();
+      expect(loader.stats()).toMatchObject({ images: 0, queued: 0, inFlight: 0 });
+    });
+
+    it('whenIdle still resolves once the in-flight loads finish', async () => {
+      const { cache } = mapCache();
+      const { source, calls } = deferredSource();
+      const loader = new TileLoader({ source, cache, onLoad: vi.fn(), decode });
+      loader.request([{ key: 'k', x: 0, y: 0 }]);
+      await tick();
+      const idle = loader.whenIdle();
+
+      loader.dispose();
+      calls[0]!.reject(new Error('aborted'));
+
+      await expect(idle).resolves.toBeUndefined();
+    });
+  });
 });
