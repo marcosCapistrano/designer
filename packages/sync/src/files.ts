@@ -8,7 +8,7 @@ function fail(error: string): Result<SyncState> { return { ok: false, error }; }
 
 /** The canonical design files, with source baselines and the pending log stored alongside them. */
 export function serializeSyncState(state: SyncState): Record<string, string> {
-  const files = { ...serializeDoc(state.doc), 'sync.json': canonicalStringify({ version: 1, baseline: state.baseline }), 'changes.jsonl': encodeOpLog(state.pending) };
+  const files = { ...serializeDoc(state.doc), 'sync.json': canonicalStringify({ version: 1, baseline: state.baseline, ...(state.batchLengths ? { batchLengths: state.batchLengths } : {}), ...(state.redo ? { redo: state.redo } : {}) }), 'changes.jsonl': encodeOpLog(state.pending) };
   const checked = parseSyncState(files);
   if (!checked.ok) throw new Error(checked.error);
   return files;
@@ -25,6 +25,17 @@ export function parseSyncState(files: Record<string, string>): Result<SyncState>
     if (!log.ok) return log;
     const metadata: unknown = JSON.parse(files['sync.json']!);
     if (!object(metadata) || metadata['version'] !== 1 || !object(metadata['baseline'])) return fail('Invalid sync snapshot version or baseline');
+    const batches = metadata['batchLengths'];
+    if (batches !== undefined && (!Array.isArray(batches) || !batches.every((length) => Number.isSafeInteger(length) && length > 0) || batches.reduce((sum: number, length: number) => sum + length, 0) !== log.value.length)) return fail('Invalid edit batch boundaries');
+    const redo = metadata['redo'];
+    if (redo !== undefined) {
+      if (!Array.isArray(redo)) return fail('Invalid redo history');
+      for (const batch of redo) {
+        if (!Array.isArray(batch) || !batch.length) return fail('Invalid redo batch');
+        const parsed = decodeOpLog(batch.map((op) => JSON.stringify(op)).join('\n'));
+        if (!parsed.ok) return fail(parsed.error);
+      }
+    }
     const base = metadata['baseline'];
     if (!Number.isSafeInteger(base['version']) || (base['version'] as number) < 1 || typeof base['sourcePathsHash'] !== 'string' || !SHA.test(base['sourcePathsHash']) || !object(base['pages'])) return fail('Invalid baseline metadata');
     const clean: DesignDoc = { meta: { version: 1, seq: 0 }, pages: {}, components: {}, tokens: {} };
@@ -64,6 +75,6 @@ export function parseSyncState(files: Record<string, string>): Result<SyncState>
     }
     replayed.meta.seq = document.value.meta.seq;
     if (canonicalStringify(replayed) !== canonicalStringify(document.value)) return fail('Document does not match baseline plus pending operations');
-    return { ok: true, value: { baseline: base as unknown as SyncBaseline, doc: document.value, pending: log.value } };
+    return { ok: true, value: { baseline: base as unknown as SyncBaseline, doc: document.value, pending: log.value, ...(batches ? { batchLengths: batches as number[] } : {}), ...(redo ? { redo: redo as SyncState['redo'] } : {}) } };
   } catch (error) { return fail(error instanceof Error ? error.message : 'Invalid sync snapshot'); }
 }

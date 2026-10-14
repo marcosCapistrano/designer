@@ -1,4 +1,6 @@
 import { expect, test } from '@playwright/test';
+import { fitRect, worldToScreen } from '../src/canvas/geom.js';
+import { layoutBounds, layoutFrames } from '../src/canvas/layout.js';
 test('authenticated import renders pages, reuses baseline and preserves design on source diagnostics', async ({ page }) => {
   await page.goto('/');
   await page.getByTestId('passphrase').fill('hub-dev-passphrase');
@@ -19,4 +21,49 @@ test('authenticated import renders pages, reuses baseline and preserves design o
   await page.getByRole('button', { name: 'Import pages' }).click();
   await expect(page.getByRole('alert')).toContainText('previous design and edits are preserved');
   expect((await (await page.request.get('/api/apps/demo/design')).json()).pages).toHaveLength(1);
+});
+
+test('tap editing supports immediate instance edits, undo/redo and shared previews before Apply', async ({ page }) => {
+  await page.goto('/');
+  await page.getByTestId('passphrase').fill('hub-dev-passphrase');
+  await page.getByTestId('login-submit').click();
+  await page.getByTestId('app-demo').click();
+  await page.getByTestId('tab-design').click();
+  await page.getByRole('button', { name: 'Import pages' }).click();
+  await expect(page.getByRole('status')).toContainText('Imported');
+  const selectButton = async () => {
+    const manifest = await (await page.request.get('/api/apps/demo/render/manifest.json')).json();
+    const boxes = await (await page.request.get(`/api/apps/demo/render/hitmaps/${manifest.pages[0].renders.base.hash}.json`)).json();
+    const box = boxes[boxes.length - 1];
+    const canvas = page.getByTestId('canvas').first();
+    const bounds = await canvas.boundingBox();
+    if (!bounds) throw new Error('No canvas');
+    const camera = fitRect(layoutBounds(layoutFrames(manifest, new Set(['base', 'tablet', 'mobile']))), { w: bounds.width, h: bounds.height }, 40);
+    const point = worldToScreen(camera, { x: box.x + box.w / 2, y: box.y + box.h / 2 });
+    await page.getByTestId('tool-select').first().click();
+    await canvas.click({ position: point });
+    await expect(page.getByRole('combobox', { name: 'Edit target' })).toBeVisible();
+  };
+  await selectButton();
+  await page.getByLabel('Value (Desktop)', { exact: true }).fill('red');
+  await page.getByRole('button', { name: 'Set style', exact: true }).click();
+  await expect(page.getByRole('status')).toContainText('Design updated.');
+  expect((await (await page.request.get('/api/apps/demo/design')).json()).pending).toBe(1);
+  await page.getByRole('button', { name: 'Undo', exact: true }).click();
+  await expect.poll(async () => (await (await page.request.get('/api/apps/demo/design')).json()).pending).toBe(0);
+  await expect(page.getByRole('button', { name: 'Redo', exact: true })).toBeEnabled();
+  await page.getByRole('button', { name: 'Redo', exact: true }).click();
+  await expect.poll(async () => (await (await page.request.get('/api/apps/demo/design')).json()).pending).toBe(1);
+  await expect(page.getByRole('button', { name: 'Undo', exact: true })).toBeEnabled();
+  await selectButton();
+  await page.getByRole('combobox', { name: 'Edit target' }).selectOption({ label: 'Shared component · button' });
+  await page.getByLabel('Value (Desktop)', { exact: true }).fill('blue');
+  const before = await (await page.request.get('/api/apps/demo/render/manifest.json')).text();
+  await page.getByRole('button', { name: 'Set style', exact: true }).click();
+  await expect(page.getByRole('region', { name: 'Edit preview' })).toBeVisible();
+  expect((await (await page.request.get('/api/apps/demo/design')).json()).pending).toBe(1);
+  expect(await (await page.request.get('/api/apps/demo/render/manifest.json')).text()).toBe(before);
+  await page.getByRole('button', { name: 'Apply changes', exact: true }).click();
+  await expect(page.getByRole('region', { name: 'Edit preview' })).toHaveCount(0);
+  expect((await (await page.request.get('/api/apps/demo/design')).json()).pending).toBe(2);
 });

@@ -8,6 +8,7 @@ import type {
   StopResponse,
   TaskResponse,
   ImportRequest, ImportResponse, DesignSummary,
+  NodeSelection, DesignSelection, DesignEditResult,
 } from '@hub/protocol';
 
 /** A non-OK API response. `message` is the server's `error` text when it sent one. */
@@ -99,6 +100,21 @@ export class ApiClient {
   }
   retryPreview(app: string): Promise<{ warnings: string[] }> {
     return this.json(`${appPath(app)}/design/render`, { method: 'POST' });
+  }
+  designSelection(app: string, selection: NodeSelection): Promise<DesignSelection> {
+    return this.json(`${appPath(app)}/design/selection`, { method: 'POST', body: selection });
+  }
+  editDesign(app: string, revision: string, ops: unknown[], selection?: NodeSelection): Promise<DesignEditResult> {
+    return this.json(`${appPath(app)}/design/edits`, { method: 'POST', body: { revision, ops, selection } });
+  }
+  applyDesign(app: string, id: string): Promise<DesignEditResult> {
+    return this.json(`${appPath(app)}/design/apply`, { method: 'POST', body: { id } });
+  }
+  cancelDesign(app: string, id: string): Promise<unknown> {
+    return this.json(`${appPath(app)}/design/cancel`, { method: 'POST', body: { id } });
+  }
+  designHistory(app: string, revision: string, action: 'undo' | 'redo'): Promise<DesignEditResult> {
+    return this.json(`${appPath(app)}/design/history`, { method: 'POST', body: { revision, action } });
   }
 
   buildState(app: string, after?: number): Promise<BuildState> {

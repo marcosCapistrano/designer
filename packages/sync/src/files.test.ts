@@ -48,6 +48,15 @@ describe('sync snapshot decoder', () => {
     expect(parseSyncState({ ...files, 'changes.jsonl': '{broken' }).ok).toBe(false);
     expect(parseSyncState({ ...files, 'changes.jsonl': '{"op":"removeNode","node":"vanished"}\n' }).ok).toBe(false);
   });
+  it('rejects inconsistent undo batch boundaries and internal operations in redo history', () => {
+    const files = serializeSyncState(fixture());
+    const metadata = JSON.parse(files['sync.json']!);
+    metadata.batchLengths = [2];
+    expect(parseSyncState({ ...files, 'sync.json': JSON.stringify(metadata) })).toMatchObject({ ok: false, error: expect.stringContaining('boundaries') });
+    metadata.batchLengths = [1];
+    metadata.redo = [[{ op: 'restore', seq: 0, entries: [] }]];
+    expect(parseSyncState({ ...files, 'sync.json': JSON.stringify(metadata) }).ok).toBe(false);
+  });
 });
 
 describe('atomic single-writer snapshot storage', () => {

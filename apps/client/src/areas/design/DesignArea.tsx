@@ -1,12 +1,13 @@
-import { useEffect, useState } from 'preact/hooks';
+import { useCallback, useEffect, useState } from 'preact/hooks';
 import type { JSX } from 'preact';
-import type { ImportResponse } from '@hub/protocol';
+import type { ImportResponse, NodeSelection } from '@hub/protocol';
 import type { ApiClient } from '../../net/api.js';
 import type { WsClient } from '../../net/ws.js';
 import type { BlobCache } from '../../canvas/cache.js';
 import type { TileSource } from '../../canvas/source.js';
 import { CanvasView } from '../../canvas/index.js';
 import './design.css';
+import { EditorPanel } from './EditorPanel.js';
 
 export interface DesignAreaProps { app: string; api: ApiClient; ws: WsClient; source: TileSource; cache: BlobCache }
 export function DesignArea({ app, api, ws, source, cache }: DesignAreaProps): JSX.Element {
@@ -20,6 +21,10 @@ export function DesignArea({ app, api, ws, source, cache }: DesignAreaProps): JS
   const [result, setResult] = useState<ImportResponse | null>(null);
   const [note, setNote] = useState<string | null>(null);
   const [previewVersion, setPreviewVersion] = useState(0);
+  const [selection, setSelection] = useState<NodeSelection | null>(null);
+  const [revision, setRevision] = useState<string | null>(null);
+  const edited = useCallback((next: string, warnings: string[]) => { setRevision(next); setNote(warnings.join(' ') || 'Design updated.'); setPreviewVersion((value) => value + 1); setSelection(null); }, []);
+  useEffect(() => { let active = true; void api.designSummary(app).then((summary) => { if (active) setRevision((current) => current ?? summary.revision); }).catch(() => {}); return () => { active = false; }; }, [app, api]);
   useEffect(() => {
     let active = true;
     const off = ws.on((message) => { if (message.type === 'build.task' && message.app === app) setBuilding(message.running); });
@@ -31,7 +36,7 @@ export function DesignArea({ app, api, ws, source, cache }: DesignAreaProps): JS
     try {
       const out = await api.importPages(app, mode === 'next' ? { mode, ...(appDir.trim() ? { appDir: appDir.trim() } : {}) } : { mode, entries: [{ route: route.trim(), file: file.trim() }] });
       setResult(out);
-      if (out.ok) { setNote(`Imported ${out.rebuilt.length} pages; reused ${out.reused.length}.${out.removed.length ? ` Removed ${out.removed.length} source routes.` : ''}`); setPreviewVersion((value) => value + 1); }
+      if (out.ok) { setRevision(out.revision); setSelection(null); setNote(`Imported ${out.rebuilt.length} pages; reused ${out.reused.length}.${out.removed.length ? ` Removed ${out.removed.length} source routes.` : ''}`); setPreviewVersion((value) => value + 1); }
     } catch (error) { setError(error instanceof Error ? error.message : 'Import failed.'); }
     finally { setBusy(false); }
   };
@@ -59,6 +64,8 @@ export function DesignArea({ app, api, ws, source, cache }: DesignAreaProps): JS
       {result.kind === 'source' ? <ul>{result.diagnostics.map((diagnostic, index) => <li key={index}>{diagnostic.file && `${diagnostic.file}: `}{diagnostic.message}</li>)}</ul> : <ul>{result.conflicts.map((conflict) => <li key={conflict.index}>Edit {conflict.index + 1}: {conflict.message}</li>)}<li>{result.blocked.length} later edits are blocked.</li></ul>}
     </div>}
     {result?.ok && result.warnings.length > 0 && <p class="design-status" role="alert">{result.warnings.join(' ')}</p>}
-    <div class="design-canvas"><CanvasView key={previewVersion} source={source} cache={cache} /></div>
+    <div class="design-workspace"><div class="design-canvas"><CanvasView key={previewVersion} source={source} cache={cache} onSelect={setSelection} /></div>
+      <EditorPanel app={app} api={api} source={source} selection={selection} revision={revision} disabled={busy || building} onApplied={edited} />
+    </div>
   </div>;
 }
