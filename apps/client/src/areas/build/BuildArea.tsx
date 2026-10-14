@@ -41,6 +41,8 @@ export function BuildArea({ app, api, ws }: BuildAreaProps): JSX.Element {
   const generation = useRef(0);
   const listRef = useRef<HTMLDivElement>(null);
   const stickRef = useRef(true);
+  /** The app the state above belongs to. The effect resets that state only when this changes. */
+  const stateApp = useRef(app);
 
   /** Applies `fn` to the latest view. viewRef tracks the state, so back-to-back updates never read a stale view. */
   const update = useCallback((fn: (v: BuildView) => BuildView): void => {
@@ -53,12 +55,18 @@ export function BuildArea({ app, api, ws }: BuildAreaProps): JSX.Element {
     const gen = generation.current;
     const live = (): boolean => generation.current === gen;
 
-    viewRef.current = EMPTY_VIEW;
-    setView(EMPTY_VIEW);
-    setDraft('');
-    setSending(false);
-    setError(null);
-    stickRef.current = true;
+    // Effects run after the first paint, so on mount the state is already empty and the user may already
+    // have typed: resetting then would erase the draft. Reset only when the app really changed.
+    // This relies on `api` and `ws` being stable (memoized in App): a rerun for the same app does not reset.
+    if (stateApp.current !== app) {
+      stateApp.current = app;
+      viewRef.current = EMPTY_VIEW;
+      setView(EMPTY_VIEW);
+      setDraft('');
+      setSending(false);
+      setError(null);
+      stickRef.current = true;
+    }
 
     /** Applies the server's state for `after`. With a cursor, keeps paging while the pages come back full. */
     const fetchFrom = async (after: number | undefined): Promise<void> => {
