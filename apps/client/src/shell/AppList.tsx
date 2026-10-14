@@ -70,6 +70,11 @@ export function AppList({ api, ws }: AppListProps): JSX.Element {
           {error}
         </p>
       )}
+      {apps === null && error === null && (
+        <p data-testid="apps-loading" class="app-note">
+          Loading apps…
+        </p>
+      )}
       <ul data-testid="app-list" class="app-list">
         {(apps ?? []).map((app) => (
           <li key={app.name}>

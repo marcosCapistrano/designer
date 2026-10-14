@@ -74,7 +74,10 @@ test("design tab shows the app's canvas", async ({ page }) => {
   // The canvas reports a failed manifest load as canvas-error, so wait for that load before checking it is absent.
   const manifest = page.waitForResponse((r) => /\/render\/manifest\.json/.test(r.url()));
   await page.getByTestId('tab-design').click();
-  expect((await manifest).ok()).toBe(true);
+  const response = await manifest;
+  expect(response.ok()).toBe(true);
+  // The response event fires on the headers; the canvas can only fail on the body, so wait for the body too.
+  expect(await response.json()).toMatchObject({ pages: expect.any(Array) });
   await expect(page.getByTestId('canvas')).toBeVisible();
   await expect(page.getByTestId('canvas-error')).toHaveCount(0);
 });
