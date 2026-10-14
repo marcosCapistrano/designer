@@ -144,7 +144,19 @@ export function CanvasView({ source, cache, onSelect, debug = false }: CanvasVie
     root.addEventListener('pointermove', onMove);
     root.addEventListener('pointerup', onUp);
     root.addEventListener('pointercancel', onCancel);
+    // A lost capture with no pointer-up would leave a ghost contact in the tracker. The event also
+    // follows every normal pointer-up, where the tracker no longer holds the id and ignores it, so
+    // this cancels that one pointer rather than resetting a finger that is still down.
+    root.addEventListener('lostpointercapture', onCancel);
     root.addEventListener('wheel', onWheel, { passive: false });
+
+    // Pointer-ups are not delivered while the window is unfocused or the tab is hidden.
+    const resetGestures = (): void => controller.resetGestures();
+    const onVisibility = (): void => {
+      if (document.visibilityState === 'hidden') controller.resetGestures();
+    };
+    window.addEventListener('blur', resetGestures);
+    document.addEventListener('visibilitychange', onVisibility);
 
     if (debug) {
       window.__hubCanvas = {
@@ -164,6 +176,9 @@ export function CanvasView({ source, cache, onSelect, debug = false }: CanvasVie
       root.removeEventListener('pointermove', onMove);
       root.removeEventListener('pointerup', onUp);
       root.removeEventListener('pointercancel', onCancel);
+      root.removeEventListener('lostpointercapture', onCancel);
+      window.removeEventListener('blur', resetGestures);
+      document.removeEventListener('visibilitychange', onVisibility);
       root.removeEventListener('wheel', onWheel);
       observer.disconnect();
       controllerRef.current = null;

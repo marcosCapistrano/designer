@@ -128,4 +128,88 @@ describe('GestureTracker', () => {
       dy: -48,
     });
   });
+
+  describe('lost pointer-ups', () => {
+    const cancel = (id: number, x: number, y: number, pointerType: PointerIn['pointerType'] = 'touch') =>
+      P(id, 'cancel', x, y, pointerType);
+
+    it('reset drops a ghost contact, so the next touch pans instead of pinching', () => {
+      const t = new GestureTracker(() => 'pan');
+      t.handle(down(1, 100, 100));
+      expect(t.handle(move(1, 130, 100))).toEqual([{ type: 'pan', dx: 30, dy: 0 }]);
+      // The pointer-up for finger 1 never arrives.
+      expect(t.reset()).toEqual([]);
+
+      expect(t.handle(down(2, 400, 400))).toEqual([]);
+      expect(t.handle(move(2, 420, 400))).toEqual([{ type: 'pan', dx: 20, dy: 0 }]);
+    });
+
+    it('reset when idle does nothing, and the tracker still works', () => {
+      const t = new GestureTracker(() => 'pan');
+      expect(t.reset()).toEqual([]);
+      t.handle(down(1, 5, 5));
+      expect(t.handle(up(1, 5, 5))).toEqual([{ type: 'tap', x: 5, y: 5 }]);
+    });
+
+    it('reset during a marquee returns its cancel, so the overlay can clear it', () => {
+      const t = new GestureTracker(() => 'select');
+      t.handle(down(1, 0, 0));
+      t.handle(move(1, 40, 30));
+      expect(t.reset()).toEqual([{ type: 'marquee', phase: 'cancel', x0: 0, y0: 0, x1: 40, y1: 30 }]);
+      expect(t.handle(up(1, 40, 30))).toEqual([]);
+    });
+
+    it('a down for an id the tracker already holds starts over (a mouse whose up was lost)', () => {
+      const t = new GestureTracker(() => 'pan');
+      t.handle(down(1, 10, 10, 'mouse'));
+      expect(t.handle(move(1, 50, 10, 'mouse'))).toEqual([{ type: 'pan', dx: 40, dy: 0 }]);
+
+      expect(t.handle(down(1, 200, 200, 'mouse'))).toEqual([]);
+      expect(t.handle(move(1, 230, 200, 'mouse'))).toEqual([{ type: 'pan', dx: 30, dy: 0 }]);
+    });
+
+    it('a repeated down without movement is a tap at the new position', () => {
+      const t = new GestureTracker(() => 'pan');
+      t.handle(down(1, 10, 10, 'mouse'));
+      t.handle(move(1, 50, 10, 'mouse'));
+      t.handle(down(1, 200, 200, 'mouse'));
+      expect(t.handle(up(1, 200, 200, 'mouse'))).toEqual([{ type: 'tap', x: 200, y: 200 }]);
+    });
+
+    it('a repeated down during a pinch drops the other contact too', () => {
+      const t = new GestureTracker(() => 'pan');
+      t.handle(down(1, 100, 100));
+      t.handle(down(2, 200, 100));
+      // Finger 2 lifted without an up, then touched again.
+      expect(t.handle(down(2, 300, 300))).toEqual([]);
+      expect(t.handle(move(2, 340, 300))).toEqual([{ type: 'pan', dx: 40, dy: 0 }]);
+      expect(t.handle(move(1, 110, 100))).toEqual([]);
+    });
+
+    it('a repeated down during a marquee cancels it', () => {
+      const t = new GestureTracker(() => 'select');
+      t.handle(down(1, 0, 0, 'mouse'));
+      t.handle(move(1, 40, 30, 'mouse'));
+      expect(t.handle(down(1, 90, 90, 'mouse'))).toEqual([
+        { type: 'marquee', phase: 'cancel', x0: 0, y0: 0, x1: 40, y1: 30 },
+      ]);
+    });
+
+    it('cancelling one pinch finger leaves the other panning', () => {
+      const t = new GestureTracker(() => 'pan');
+      t.handle(down(1, 100, 100));
+      t.handle(down(2, 200, 100));
+      expect(t.handle(cancel(2, 200, 100))).toEqual([]);
+      expect(t.handle(move(1, 110, 100))).toEqual([{ type: 'pan', dx: 10, dy: 0 }]);
+    });
+
+    it('a cancel for a pointer that already lifted is ignored', () => {
+      const t = new GestureTracker(() => 'pan');
+      t.handle(down(1, 100, 100));
+      t.handle(down(2, 200, 100));
+      t.handle(up(2, 200, 100));
+      expect(t.handle(cancel(2, 200, 100))).toEqual([]);
+      expect(t.handle(move(1, 110, 100))).toEqual([{ type: 'pan', dx: 10, dy: 0 }]);
+    });
+  });
 });

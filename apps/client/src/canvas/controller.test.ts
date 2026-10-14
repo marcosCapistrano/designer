@@ -347,6 +347,55 @@ describe('CanvasController', () => {
     expect(q.length).toBe(0);
   });
 
+  it('resetGestures drops a ghost contact, so the next one-finger drag pans instead of zooming', () => {
+    const { c } = ready();
+    const at = (id: number, kind: PointerIn['kind'], x: number, y: number): PointerIn => ({
+      id,
+      kind,
+      x,
+      y,
+      pointerType: 'touch',
+      button: 0,
+    });
+    c.pointer(at(1, 'down', 100, 100));
+    c.pointer(at(1, 'move', 120, 100));
+    // The pointer-up of finger 1 is lost; the window loses focus.
+    c.resetGestures();
+
+    const before = c.camera;
+    c.pointer(at(2, 'down', 300, 300));
+    c.pointer(at(2, 'move', 320, 300));
+    expect(c.camera.scale).toBe(before.scale);
+    expect(c.camera.x).toBe(before.x - 20 / before.scale);
+  });
+
+  it('resetGestures clears a marquee in progress', async () => {
+    const { c, flush, overlay } = ready();
+    c.setTool('select');
+    const at = (kind: PointerIn['kind'], x: number, y: number): PointerIn => ({
+      id: 1,
+      kind,
+      x,
+      y,
+      pointerType: 'touch',
+      button: 0,
+    });
+    c.pointer(at('down', 0, 0));
+    c.pointer(at('move', 200, 100));
+    flush();
+    expect(overlay.calls.some((call) => call.m === 'strokeRect')).toBe(true);
+    overlay.calls.length = 0;
+
+    c.resetGestures();
+    flush();
+    // The overlay was repainted without the marquee, and the late pointer-up selects nothing.
+    expect(overlay.calls.some((call) => call.m === 'clearRect')).toBe(true);
+    expect(overlay.calls.filter((call) => call.m === 'strokeRect')).toEqual([]);
+    c.pointer(at('up', 200, 100));
+    await settle();
+    expect(c.selection).toBeNull();
+  });
+
   it('a camera set after the manifest but before the first frame survives the deferred fit', () => {
     const { c, flush } = harness();
     c.resize(800, 600, 1);

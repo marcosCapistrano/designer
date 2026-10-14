@@ -193,6 +193,11 @@ export class CanvasController {
     return this.toolValue;
   }
 
+  /** Forgets in-progress gestures whose pointer-ups were lost (window blur, tab hidden). */
+  resetGestures(): void {
+    for (const action of this.gestures.reset()) this.apply(action);
+  }
+
   get camera(): Camera {
     return this.cam;
   }
