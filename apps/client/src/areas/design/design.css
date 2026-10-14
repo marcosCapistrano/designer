@@ -5,3 +5,12 @@
 .design-import button { min-height: 44px; }
 .design-status { padding: 8px 16px; margin: 0; max-height: 180px; overflow: auto; }
 .design-canvas { flex: 1; min-height: 240px; position: relative; }
+.design-workspace { display: flex; flex: 1; min-height: 0; }
+.design-editor { width: 290px; flex-shrink: 0; padding: 12px; overflow: auto; border-left: 1px solid #ddd; }
+.design-editor label { display: flex; flex-direction: column; gap: 4px; margin: 8px 0; font-size: 13px; }
+.design-editor input, .design-editor select { box-sizing: border-box; width: 100%; min-height: 44px; font: inherit; padding: 8px; border: 1px solid #aaa; border-radius: 6px; }
+.design-editor-actions { display: flex; gap: 8px; }
+.design-editor h2 { font-size: 16px; }
+.design-editor p, .design-editor li { font-size: 13px; line-height: 1.5; }
+.design-preview-canvas { position: relative; height: 300px; margin: 12px 0; }
+@media (max-width: 760px) { .design-workspace { flex-direction: column; overflow: auto; } .design-canvas { min-height: 360px; } .design-editor { width: auto; max-height: 320px; border-left: 0; border-top: 1px solid #ddd; } }

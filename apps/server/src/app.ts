@@ -17,6 +17,8 @@ import type { BuildService } from './build/service.js';
 import { renderRoutes } from './design/render-files.js';
 import { syncRoutes } from './sync/routes.js';
 import type { SyncService } from './sync/service.js';
+import type { DesignEditing } from './design/editing.js';
+import { designRoutes } from './design/routes.js';
 
 export interface AppDeps {
   sessions: SessionStore;
@@ -25,6 +27,7 @@ export interface AppDeps {
   registry: AppRegistry;
   build: BuildService;
   sync?: SyncService;
+  editing?: DesignEditing;
   dataDir: string;
   /** The built client. When unset the hub serves only /api. */
   clientDir?: string | null;
@@ -152,6 +155,7 @@ export function createApp(deps: AppDeps): Hono {
   app.route('/api/apps', buildRoutes(build, hasApp));
   app.route('/api/apps', renderRoutes({ dataDir, hasApp }));
   if (deps.sync) app.route('/api/apps', syncRoutes(deps.sync));
+  if (deps.editing) app.route('/api/apps', designRoutes(deps.editing));
   app.all('/api/*', (c) => c.json({ error: 'Not found' }, 404));
 
   if (clientDir) app.use('/*', clientFiles(clientDir));

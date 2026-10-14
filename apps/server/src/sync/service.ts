@@ -25,6 +25,8 @@ export class SyncService {
   private readonly pool = new BrowserPool();
   constructor(private readonly deps: SyncDeps) {}
   async close(): Promise<void> { await this.pool.close(); }
+  async load(app: string) { await this.entry(app); return this.store(app).load(); }
+  async save(app: string, state: import('@hub/sync').SyncState, revision: string) { await this.entry(app); return this.store(app).save(state, revision); }
   private store(app: string): SyncStore {
     let store = this.stores.get(app);
     if (!store) { store = this.deps.store?.(app) ?? new FsSyncStore(join(this.deps.dataDir, 'design', app)); this.stores.set(app, store); }
@@ -59,17 +61,19 @@ export class SyncService {
       return { ok: true, revision, rebuilt: prepared.rebuilt, reused: prepared.reused, removed: prepared.removed, ...preview };
     });
   }
-  private async preview(app: string, doc: DesignDoc): Promise<{ manifest: RenderManifest | null; warnings: string[] }> {
+  async preview(app: string, doc: DesignDoc, publish = true): Promise<{ manifest: RenderManifest | null; warnings: string[] }> {
     try {
       if (this.deps.render) {
         const out = await this.deps.render(app, doc);
-        this.deps.hub.broadcast({ type: 'render.ready', app, manifest: out.manifest });
+        if (publish) this.deps.hub.broadcast({ type: 'render.ready', app, manifest: out.manifest });
         return out;
       }
       const store = new FsTileStore(renderDir(this.deps.dataDir, app));
       const out = await renderDoc(this.pool, doc, { devices: ['base', 'tablet', 'mobile'], prev: await store.readManifest(), store });
-      await store.writeManifest(out.manifest);
-      this.deps.hub.broadcast({ type: 'render.ready', app, manifest: out.manifest });
+      if (publish) {
+        await store.writeManifest(out.manifest);
+        this.deps.hub.broadcast({ type: 'render.ready', app, manifest: out.manifest });
+      }
       return { manifest: out.manifest, warnings: out.failed.map((key) => `Preview failed for ${key}; the last good image is retained.`) };
     } catch { return { manifest: null, warnings: ['Design saved. Preview could not be updated; retry the preview.'] }; }
   }

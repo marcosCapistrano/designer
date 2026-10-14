@@ -11,6 +11,7 @@ import { type RunCommand, runCommand as defaultRunCommand } from './build/comman
 import { BuildService } from './build/service.js';
 import { BuildStore } from './build/store.js';
 import { SyncService } from './sync/service.js';
+import { DesignEditing } from './design/editing.js';
 import type { ClaudeRunner } from './claude/runner.js';
 import type { HubConfig } from './config.js';
 import { openDb } from './db.js';
@@ -89,6 +90,7 @@ export async function startHub(opts: HubOptions): Promise<RunningHub> {
     });
     const interrupted = build.recover();
     const sync = new SyncService({ registry, build, hub, dataDir: config.dataDir });
+    const editing = new DesignEditing(sync, build, now);
     if (interrupted > 0) log(`Marked ${interrupted} interrupted build task(s) as failed`);
 
     // Assigned once the WebSocket server exists; the app is built first because the server needs its fetch.
@@ -100,6 +102,7 @@ export async function startHub(opts: HubOptions): Promise<RunningHub> {
       registry,
       build,
       sync,
+      editing,
       dataDir: config.dataDir,
       clientDir: opts.clientDir,
       now,

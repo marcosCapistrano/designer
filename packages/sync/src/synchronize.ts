@@ -22,6 +22,8 @@ export interface SyncState {
   baseline: SyncBaseline;
   doc: DesignDoc;
   pending: Op[];
+  batchLengths?: number[];
+  redo?: Op[][];
 }
 export interface SyncConflict { index: number; op: Op; message: string }
 export type SyncResult =
@@ -95,5 +97,5 @@ export function synchronizePages(input: {
   if (previous && canonicalStringify(replayed) !== canonicalStringify(previous.doc)) replayed.meta.seq++;
   const replayInvalid = validateDoc(replayed);
   if (replayInvalid) return sourceFailure(replayInvalid);
-  return { ok: true, state: { baseline, doc: replayed, pending }, rebuilt, reused, removed };
+  return { ok: true, state: { baseline, doc: replayed, pending, ...(previous?.batchLengths ? { batchLengths: [...previous.batchLengths] } : {}), ...(previous?.redo ? { redo: [] } : {}) }, rebuilt, reused, removed };
 }
