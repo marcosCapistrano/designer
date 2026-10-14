@@ -160,12 +160,29 @@ describe('path segments never reach outside the render dir', () => {
     expect(hasApp).not.toHaveBeenCalled();
   });
 
+  it('answers 404, not 500, for a tile name too long for the filesystem', async () => {
+    const app = server();
+    const digits = '9'.repeat(300);
+    for (const tile of [`${digits}_0.webp`, `0_${digits}.webp`, `${digits}_${digits}.webp`]) {
+      const res = await app.request(`/api/apps/demo/render/tiles/${K}/${tile}`);
+      expect(res.status, tile.slice(0, 20)).toBe(404);
+      expect(await res.json()).toEqual({ error: 'Not found' });
+    }
+  });
+
+  it('serves tiles with several-digit coordinates', async () => {
+    const dir = renderDir(dataDir, 'demo');
+    writeFileSync(join(dir, tilePath(K, 12, 345)), TILE);
+    const res = await server().request(`/api/apps/demo/render/tiles/${K}/12_345.webp`);
+    expect(res.status).toBe(200);
+  });
+
   it('never serves files outside the render dir', async () => {
     const dir = renderDir(dataDir, 'demo');
     // Targets that a traversal would reach if the segments were joined unchecked.
     writeFileSync(join(dataDir, 'renders', `${K}.json`), 'SECRET-HITMAP');
     writeFileSync(join(dir, 'tiles', '0_0.webp'), 'SECRET-TILE');
-    writeFileSync(join(dataDir, 'secret.txt'), 'SECRET-DATA');
+    writeFileSync(join(dataDir, 'renders', 'secret.txt'), 'SECRET-DATA');
     const app = server();
     for (const path of [
       `/api/apps/demo/render/hitmaps/..%2F..%2F${K}.json`,

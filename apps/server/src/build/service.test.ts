@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import type { BuildTask, BuildTaskStatus, ServerMsg } from '@hub/protocol';
+import type { BuildState, BuildTask, BuildTaskStatus, ServerMsg } from '@hub/protocol';
 import type { AppManifest } from '@hub/protocol/manifest';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AppEntry } from '../apps/registry.js';
@@ -1320,14 +1320,16 @@ describe('BuildService CI refresh', () => {
 
     const poll = s.svc.pollCi();
     await vi.waitFor(() => expect(reads).toHaveBeenCalledWith(expect.anything(), 2));
-    const sent = await Promise.race([
-      s.svc.send('demo', 'More work').then(() => 'sent'),
-      new Promise<string>((resolve) => setTimeout(() => resolve('waiting for the poll'), 1500)),
-    ]);
+    // A flag, not a timed race: the send must finish while the poll is still hung, however slow the machine is.
+    let sent = false;
+    const sending = s.svc.send('demo', 'More work').then(() => {
+      sent = true;
+    });
+    await vi.waitFor(() => expect(sent).toBe(true), { timeout: 10_000 });
     const snapshot = await s.svc.state('demo');
 
-    expect(sent).toBe('sent');
     expect(snapshot.running).toBe(true);
+    await sending;
     hang.resolve();
     await poll;
     await s.svc.idle('demo');
@@ -1353,16 +1355,41 @@ describe('BuildService CI refresh', () => {
     // The poll refreshes demo first, then hangs on the other app.
     const poll = s.svc.pollCi();
     await vi.waitFor(() => expect(reads).toHaveBeenCalledWith(expect.anything(), 2));
-    const snapshot = await Promise.race([
-      s.svc.state('demo'),
-      new Promise<null>((resolve) => setTimeout(() => resolve(null), 1500)),
-    ]);
+    // A flag, not a timed race: state() must answer while the poll is still hung, however slow the machine is.
+    let snapshot: BuildState | null = null;
+    const reading = s.svc.state('demo').then((answer) => {
+      snapshot = answer;
+    });
+    await vi.waitFor(() => expect(snapshot).not.toBeNull(), { timeout: 10_000 });
 
-    // CI is still pending, so state() reads GitHub itself while the poll is stuck on the other app.
-    expect(snapshot?.task).toMatchObject({ id: task.id, status: 'review', ci: 'pending' });
-    expect(reads.mock.calls.filter(([, n]) => n === 1).length).toBeGreaterThanOrEqual(2);
+    // CI is still pending, so state() reads GitHub itself while the poll is stuck on the other app:
+    // one read from the poll, one from state().
+    expect((snapshot as BuildState | null)?.task).toMatchObject({ id: task.id, status: 'review', ci: 'pending' });
+    expect(reads.mock.calls.filter(([, n]) => n === 1)).toHaveLength(2);
+    await reading;
     hang.resolve();
     await poll;
+  });
+
+  it('a refresh that fails leaves no flight behind, so the next call reads GitHub again', async () => {
+    const s = setup();
+    const task = await run(s);
+    s.github.setChecks('head-1', GREEN);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    // The flight itself rejects (the store throws before any read); refreshCi's own errors are caught inside it.
+    vi.spyOn(s.store, 'task').mockImplementationOnce(() => {
+      throw new Error('database is locked');
+    });
+
+    const failed = await s.svc.state('demo');
+
+    expect(failed.task?.ci).toBe('pending');
+    expect(warn).toHaveBeenCalledWith('Build state refresh for demo failed: database is locked');
+
+    const retried = await s.svc.state('demo');
+
+    expect(retried.task?.ci).toBe('success');
+    expect(s.store.task(task.id)?.ci).toBe('success');
   });
 
   it('a send that refreshes the task keeps state() from reading GitHub, and reads once', async () => {

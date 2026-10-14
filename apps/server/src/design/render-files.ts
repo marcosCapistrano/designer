@@ -9,7 +9,9 @@ export const EMPTY_MANIFEST: RenderManifest = { version: 1, pages: [] };
 
 // Anchored and strict: a URL segment that matches none of these never reaches the filesystem.
 const KEY_RE = /^[0-9a-f]{64}$/;
-const TILE_RE = /^\d+_\d+\.webp$/;
+// A tile column or row is at most a few digits (a 16000 px page is 32 rows of 512 px); the bound also keeps a
+// huge digit run from becoming a file name longer than the filesystem allows, which would be a 500, not a 404.
+const TILE_RE = /^\d{1,5}_\d{1,5}\.webp$/;
 const HITMAP_RE = /^[0-9a-f]{64}\.json$/;
 const IMMUTABLE = 'private, max-age=31536000, immutable';
 
