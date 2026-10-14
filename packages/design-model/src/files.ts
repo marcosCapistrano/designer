@@ -2,6 +2,7 @@ import { canonicalLine, canonicalStringify } from './canonical.js';
 import { isPlainObject, nodeProblem, opProblem, RESERVED_KEYS } from './shape.js';
 import { type Container, walkDoc } from './tree.js';
 import type { ComponentDef, DesignDoc, Op, Page, Result, Tokens } from './types.js';
+import { validateDoc } from './validate.js';
 
 const META = 'meta.json';
 const TOKENS = 'tokens.json';
@@ -69,7 +70,10 @@ export function parseDoc(files: Record<string, string>): Result<DesignDoc> {
     tokens: tokens.value as Tokens,
   };
   const duplicate = duplicateIdError(doc);
-  return duplicate === null ? { ok: true, value: doc } : { ok: false, error: duplicate };
+  if (duplicate !== null) return { ok: false, error: duplicate };
+  // The rules the ops enforce, checked on the whole doc, so a loaded doc can be edited safely.
+  const invalid = validateDoc(doc);
+  return invalid === null ? { ok: true, value: doc } : { ok: false, error: invalid };
 }
 
 function readJsonFile(files: Record<string, string>, name: string): Result<unknown> {
