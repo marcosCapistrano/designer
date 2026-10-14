@@ -1,6 +1,9 @@
 import { relative, sep } from 'node:path';
 import { serveStatic } from '@hono/node-server/serve-static';
 import { Hono } from 'hono';
+import { bodyLimit } from 'hono/body-limit';
+import { csrf } from 'hono/csrf';
+import { HTTPException } from 'hono/http-exception';
 import { secureHeaders } from 'hono/secure-headers';
 import type { AppRegistry } from './apps/registry.js';
 import { appsRoutes } from './apps/routes.js';
@@ -35,15 +38,35 @@ function cacheControl(clientDir: string, path: string): string {
   return relative(clientDir, path).split(sep)[0] === 'assets' ? IMMUTABLE : 'no-cache';
 }
 
-function errorText(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
-}
+/** Largest request body any /api route reads. Chat messages are capped far below this by the Build service. */
+const MAX_BODY_BYTES = 256 * 1024;
+/** Longest error message written to the log. */
+const MAX_LOGGED_MESSAGE_CHARS = 500;
 
 export function createApp(deps: AppDeps): Hono {
   const { sessions, registry, build, dataDir, clientDir } = deps;
   const app = new Hono();
 
   app.use('*', secureHeaders());
+  // Hono hands only Error instances to app.onError. A rejection with anything else (a string, say) would skip
+  // it and skip the headers above, so it becomes an Error here. This sits inside secureHeaders on purpose:
+  // an error that unwinds past secureHeaders would leave its response without the security headers.
+  app.use('*', async (c, next) => {
+    try {
+      await next();
+    } catch (e) {
+      throw e instanceof Error ? e : new Error(String(e));
+    }
+  });
+  // SameSite=Strict is per site, and staging apps on the same tailnet domain share the hub's site, so a page
+  // there could drive these routes with the session cookie. csrf() refuses form-typed or bodyless writes
+  // unless the browser says Sec-Fetch-Site: same-origin (or sends our own Origin). It runs before the
+  // body limit so a forged request is rejected before its body is read.
+  app.use('/api/*', csrf());
+  app.use(
+    '/api/*',
+    bodyLimit({ maxSize: MAX_BODY_BYTES, onError: (c) => c.json({ error: 'Request too large' }, 413) }),
+  );
 
   app.get('/api/health', (c) => c.json({ ok: true }));
   app.route(
@@ -80,9 +103,13 @@ export function createApp(deps: AppDeps): Hono {
   }
 
   app.onError((err, c) => {
+    // csrf() and friends throw HTTPException with the response they want sent; do not turn it into a 500.
+    if (err instanceof HTTPException) return err.getResponse();
     if (err instanceof BuildError) return c.json({ error: err.message }, err.status);
-    // The message only: a stack trace or an upstream error object could carry request details or tokens.
-    console.error(`Unhandled error on ${c.req.method} ${c.req.path}: ${errorText(err)}`);
+    // The message only, never the stack or the error object: they could carry request details or tokens.
+    // JSON.stringify escapes newlines, so a message cannot forge a log line; the message is cut at 500 chars.
+    const message = JSON.stringify(err.message.slice(0, MAX_LOGGED_MESSAGE_CHARS));
+    console.error(`Unhandled error on ${c.req.method} ${JSON.stringify(c.req.path)}: ${message}`);
     return c.json({ error: 'Internal error' }, 500);
   });
 
