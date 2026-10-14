@@ -5,7 +5,7 @@ import {
   type Device,
   type HitBox,
 } from '@hub/protocol';
-import type { Page } from 'playwright';
+import type { Frame, Page } from 'playwright';
 import { buildDocument } from './html.js';
 
 export interface CaptureJob {
@@ -40,11 +40,51 @@ export const HIT_MAP_SCRIPT = `(() => {
   return out;
 })()`;
 
-/** Renders one page at one device width and returns a full-page PNG plus its hit map. */
+/** Matches a refresh that is scheduled but may not have fired when the load event does. */
+const PENDING_REFRESH_SCRIPT = 'document.querySelector(\'meta[http-equiv="refresh" i]\') !== null';
+
+const CONTEXT_DESTROYED = /Execution context was destroyed/;
+
+const NAVIGATED = 'Page navigated during capture';
+
+/**
+ * Renders one page at one device width and returns a full-page PNG plus its hit map.
+ *
+ * Throws an Error starting "Page navigated during capture" when the main frame navigates (for
+ * example through `<meta http-equiv=refresh>`), so the outcome never depends on a timing race.
+ * A refresh that has not fired yet is detected in the DOM instead of waited for.
+ */
 export async function capturePage(page: Page, job: CaptureJob): Promise<Capture> {
+  const mainFrame = page.mainFrame();
+  let navigatedTo: string | null = null;
+  const onNavigated = (frame: Frame): void => {
+    if (frame === mainFrame) navigatedTo ??= frame.url();
+  };
+  page.on('framenavigated', onNavigated);
+  const failIfNavigated = (): void => {
+    if (navigatedTo !== null) throw new Error(`${NAVIGATED} (to ${navigatedTo})`);
+  };
+  try {
+    return await captureLoaded(page, job, failIfNavigated);
+  } catch (err) {
+    // A navigation destroys the execution context, and that rejection can arrive before the
+    // framenavigated event does, so the message counts as evidence of a navigation too.
+    failIfNavigated();
+    if (err instanceof Error && CONTEXT_DESTROYED.test(err.message)) {
+      throw new Error(`${NAVIGATED} (execution context destroyed)`, { cause: err });
+    }
+    throw err;
+  } finally {
+    page.off('framenavigated', onNavigated);
+  }
+}
+
+async function captureLoaded(page: Page, job: CaptureJob, failIfNavigated: () => void): Promise<Capture> {
   const d = job.device;
   await page.setViewportSize({ width: DEVICE_WIDTH[d], height: DEVICE_VIEWPORT_HEIGHT[d] });
   await page.setContent(buildDocument(job.html, job.css, d), { waitUntil: 'load' });
+  failIfNavigated();
+  if (await page.evaluate(PENDING_REFRESH_SCRIPT)) throw new Error(`${NAVIGATED} (pending <meta http-equiv="refresh">)`);
   await page.evaluate('document.fonts.ready.then(() => true)');
 
   const full = Number(
@@ -68,6 +108,7 @@ export async function capturePage(page: Page, job: CaptureJob): Promise<Capture>
     animations: 'disabled',
     caret: 'hide',
   });
+  failIfNavigated();
 
   return { png, width, height, hitMap };
 }

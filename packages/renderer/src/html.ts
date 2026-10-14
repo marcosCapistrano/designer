@@ -19,10 +19,22 @@ export function cssForDevice(css: string, device: Device): string {
     .join('\n');
 }
 
+/**
+ * Defense in depth for untrusted exported markup: only inline styles and data: images and fonts
+ * may load, and frame-src 'none' stops an iframe from fetching a URL. The network is also aborted
+ * at the context level and JS is off, so a blocked frame still commits Chromium's chrome-error
+ * document, which is empty with JS off. First in head, it governs everything after it, including
+ * both style elements. It does not stop `<meta http-equiv=refresh>`; capturePage handles that.
+ */
+export const CSP_META =
+  '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; img-src data:; style-src \'unsafe-inline\'; font-src data:; frame-src \'none\'">';
+
 export function buildDocument(html: string, css: string, device: Device): string {
   const safeCss = css.replace(/<\/style/gi, '<\\/style');
   return (
-    '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=' +
+    '<!doctype html><html><head>' +
+    CSP_META +
+    '<meta charset="utf-8"><meta name="viewport" content="width=' +
     DEVICE_WIDTH[device] +
     '"><style>' +
     BASE_CSS +
