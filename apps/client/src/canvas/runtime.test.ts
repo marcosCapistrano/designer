@@ -271,3 +271,30 @@ describe('createCanvasRuntime dispose', () => {
     expect(h.requestFrame.mock.calls.length).toBe(framesBefore);
   });
 });
+
+describe('createCanvasRuntime layers', () => {
+  it('hands the back buffer and the layer transform to the controller', async () => {
+    const back = fakeCtx();
+    const present = vi.fn();
+    const show = vi.fn();
+    const h = harness({ baseBack: { ctx: back.ctx, present }, setLayerTransform: show });
+    h.resolveManifest(manifestOf('a'));
+    await settle();
+    const c = h.rt.controller;
+    c.resize(800, 600, 1);
+    c.setCamera({ x: 0, y: 0, scale: 0.5 });
+    h.runFrames();
+
+    c.panBy(10, 0);
+    h.runFrames();
+    expect(present).toHaveBeenCalledTimes(1);
+    expect(present).toHaveBeenCalledWith(back.ctx);
+    expect(back.ctx.canvas.width).toBe(800);
+
+    c.zoomAt(100, 100, 1.2);
+    h.runFrames();
+    expect(show).toHaveBeenCalledTimes(1);
+    expect(show.mock.calls[0]![0]).toMatchObject({ scale: expect.closeTo(1.2, 10) });
+    h.rt.dispose();
+  });
+});

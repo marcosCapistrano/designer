@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { Zoom } from '@hub/protocol';
 import { BasePainter, type PaintInput } from './painter.js';
 import { fakeCtx, img, type Call } from './test-utils.js';
@@ -237,5 +237,149 @@ describe('BasePainter', () => {
     failing = false;
     // Without a full repaint this would blit the already-shifted canvas a second time.
     expect(painter.paint(input(frames, { camera: { x: 20, y: 0, scale: 0.5 } }))).toMatchObject({ mode: 'full' });
+  });
+});
+
+describe('BasePainter with a back buffer', () => {
+  function pair() {
+    const front = fakeCtx();
+    const back = fakeCtx();
+    const present = vi.fn();
+    return { front, back, present, buffer: { ctx: back.ctx, present } };
+  }
+  const selfDraws = (calls: Call[], canvas: unknown) => calls.filter(c => c.m === 'drawImage' && c.a[0] === canvas);
+
+  it('paints the first frame on the shown canvas and does not present', () => {
+    const { front, back, present, buffer } = pair();
+    const painter = new BasePainter(front.ctx, tilesOf('k/0_0'), buffer);
+    painter.paint(input([frame()]));
+    expect(front.calls.filter(c => c.m === 'fillRect').length).toBeGreaterThan(0);
+    expect(back.calls).toEqual([]);
+    expect(present).not.toHaveBeenCalled();
+  });
+
+  it('a pan blits the shown canvas into the other one, repaints the strip there and shows it', () => {
+    const { front, back, present, buffer } = pair();
+    const painter = new BasePainter(front.ctx, tilesOf('k/0_0'), buffer);
+    const frames = [frame()];
+    painter.paint(input(frames, { camera: { x: 400, y: 0, scale: 0.5 } }));
+    front.calls.length = 0;
+    const stats = painter.paint(input(frames, { camera: { x: 380, y: 0, scale: 0.5 } }));
+    expect(stats).toMatchObject({ mode: 'partial', blit: true, regions: 1 });
+    const blit = back.calls.find(c => c.m === 'drawImage');
+    expect(blit?.a.slice(0, 3)).toEqual([front.ctx.canvas, 10, 0]);
+    expect(back.calls.filter(c => c.m === 'rect').map(c => c.a)).toEqual([[0, 0, 10, 600]]);
+    expect(draws(back.calls)).toContainEqual(['k/0_0', -190, 0, 512, 512]);
+    // The canvas that was shown is only read.
+    expect(front.calls.filter(c => c.m !== 'setTransform')).toEqual([]);
+    expect(present).toHaveBeenCalledTimes(1);
+    expect(present).toHaveBeenCalledWith(back.ctx);
+  });
+
+  it('successive pans alternate between the two canvases and never draw a canvas onto itself', () => {
+    const { front, back, present, buffer } = pair();
+    const painter = new BasePainter(front.ctx, tilesOf(), buffer);
+    const frames = [frame()];
+    painter.paint(input(frames, { camera: { x: 400, y: 0, scale: 0.5 } }));
+    painter.paint(input(frames, { camera: { x: 380, y: 0, scale: 0.5 } }));
+    painter.paint(input(frames, { camera: { x: 360, y: 0, scale: 0.5 } }));
+    painter.paint(input(frames, { camera: { x: 340, y: 0, scale: 0.5 } }));
+    expect(present.mock.calls.map(c => c[0])).toEqual([back.ctx, front.ctx, back.ctx]);
+    expect(selfDraws(front.calls, front.ctx.canvas)).toEqual([]);
+    expect(selfDraws(back.calls, back.ctx.canvas)).toEqual([]);
+    // Each blit reads the canvas the previous frame ended on.
+    expect(selfDraws(back.calls, front.ctx.canvas)).toHaveLength(2);
+    expect(selfDraws(front.calls, back.ctx.canvas)).toHaveLength(1);
+  });
+
+  it('a paint without a blit stays on the shown canvas', () => {
+    const { front, back, present, buffer } = pair();
+    const painter = new BasePainter(front.ctx, tilesOf(), buffer);
+    const frames = [frame()];
+    painter.paint(input(frames));
+    painter.invalidateWorld({ x: 0, y: 0, w: 100, h: 100 });
+    front.calls.length = 0;
+    expect(painter.paint(input(frames))).toMatchObject({ mode: 'partial', blit: false });
+    expect(front.calls.filter(c => c.m === 'rect').map(c => c.a)).toEqual([[0, 0, 50, 50]]);
+    expect(back.calls).toEqual([]);
+    expect(present).not.toHaveBeenCalled();
+  });
+
+  it('a pan with a dirty rect repaints it in the canvas that is shown next', () => {
+    const { front, back, buffer } = pair();
+    const painter = new BasePainter(front.ctx, tilesOf(), buffer);
+    const frames = [frame()];
+    painter.paint(input(frames, { camera: { x: 400, y: 0, scale: 0.5 } }));
+    painter.invalidateWorld({ x: 500, y: 100, w: 100, h: 100 });
+    painter.paint(input(frames, { camera: { x: 380, y: 0, scale: 0.5 } }));
+    expect(back.calls.filter(c => c.m === 'rect').map(c => c.a)).toEqual([[0, 0, 10, 600], [60, 50, 50, 50]]);
+  });
+
+  it('a full repaint paints the shown canvas', () => {
+    const { front, back, present, buffer } = pair();
+    const painter = new BasePainter(front.ctx, tilesOf(), buffer);
+    const frames = [frame()];
+    painter.paint(input(frames));
+    front.calls.length = 0;
+    expect(painter.paint(input(frames, { camera: { x: 0, y: 0, scale: 0.6 } }))).toMatchObject({ mode: 'full' });
+    expect(front.calls.some(c => c.m === 'fillRect')).toBe(true);
+    expect(back.calls).toEqual([]);
+    expect(present).not.toHaveBeenCalled();
+  });
+
+  it('a paint that throws after the blit leaves the shown canvas as it was and repaints it fully next', () => {
+    const { front, back, present, buffer } = pair();
+    const loaded = tilesOf('k/0_0', 'k/1_0');
+    let failing = false;
+    const tiles = {
+      get: (k: string, x: number, y: number) => {
+        if (failing) throw new Error('boom');
+        return loaded.get(k, x, y);
+      },
+    };
+    const painter = new BasePainter(front.ctx, tiles, buffer);
+    const frames = [frame({ w: 2000 })];
+    painter.paint(input(frames));
+    front.calls.length = 0;
+    failing = true;
+    expect(() => painter.paint(input(frames, { camera: { x: 20, y: 0, scale: 0.5 } }))).toThrow('boom');
+    expect(present).not.toHaveBeenCalled();
+    expect(front.calls.filter(c => c.m !== 'setTransform')).toEqual([]);
+    failing = false;
+    back.calls.length = 0;
+    expect(painter.paint(input(frames, { camera: { x: 20, y: 0, scale: 0.5 } }))).toMatchObject({ mode: 'full' });
+    expect(front.calls.some(c => c.m === 'fillRect')).toBe(true);
+    expect(back.calls).toEqual([]);
+  });
+});
+
+describe('BasePainter.previewOf', () => {
+  it('is null before the first paint', () => {
+    const { ctx } = fakeCtx();
+    expect(new BasePainter(ctx, tilesOf()).previewOf(input([frame()]))).toBeNull();
+  });
+
+  it('returns the snapped camera of the painted image, whatever the new camera, zoom or smoothing', () => {
+    const { ctx } = fakeCtx();
+    const painter = new BasePainter(ctx, tilesOf());
+    const frames = [frame()];
+    painter.paint(input(frames, { camera: { x: 100.2, y: 50, scale: 0.5 } }));
+    expect(painter.previewOf(input(frames, { camera: { x: 700, y: 90, scale: 0.9 }, zoom: 1, smoothing: false })))
+      .toEqual({ x: 100, y: 50, scale: 0.5 });
+  });
+
+  it('is null once the painted image no longer matches', () => {
+    const { ctx } = fakeCtx();
+    const painter = new BasePainter(ctx, tilesOf());
+    const frames = [frame()];
+    painter.paint(input(frames));
+    expect(painter.previewOf(input([frame()]))).toBeNull();
+    expect(painter.previewOf(input(frames, { dpr: 2 }))).toBeNull();
+    ctx.canvas.width = 640;
+    expect(painter.previewOf(input(frames))).toBeNull();
+    painter.paint(input(frames));
+    expect(painter.previewOf(input(frames))).not.toBeNull();
+    painter.invalidate();
+    expect(painter.previewOf(input(frames))).toBeNull();
   });
 });

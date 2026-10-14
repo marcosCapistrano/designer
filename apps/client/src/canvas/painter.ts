@@ -109,6 +109,20 @@ export class BasePainter {
     this.tiles = tiles;
   }
 
+  /**
+   * The snapped camera of the image on the canvas when that image can stand in for a paint of
+   * `input` after a pure move and scale of the canvas (a CSS transform), else null: the canvas was
+   * resized or cleared, or the frames or dpr changed, so its content no longer matches.
+   */
+  previewOf(input: PaintInput): Camera | null {
+    const last = this.last;
+    if (last === null || this.invalidated) return null;
+    const { canvas } = this.front;
+    if (canvas.width !== last.width || canvas.height !== last.height) return null;
+    if (input.dpr !== last.dpr || input.frames !== last.frames) return null;
+    return last.cam;
+  }
+
   /** The next paint repaints the whole canvas. */
   invalidate(): void {
     this.invalidated = true;

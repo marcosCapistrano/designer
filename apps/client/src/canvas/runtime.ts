@@ -7,14 +7,20 @@ import type { NodeSelection, RenderManifest } from '@hub/protocol';
 import type { BlobCache } from './cache.js';
 import { liveKeys } from './cache.js';
 import { CanvasController } from './controller.js';
+import type { LayerTransform } from './controller.js';
 import { HitMapStore } from './hitmaps.js';
 import { TileLoader } from './loader.js';
 import type { LoaderOptions } from './loader.js';
+import type { BackBuffer } from './painter.js';
 import type { TileSource } from './source.js';
 
 export interface CanvasRuntimeOptions {
   base: CanvasRenderingContext2D;
+  /** A second base canvas for ping-pong blits (see BasePainter). */
+  baseBack?: BackBuffer;
   overlay: CanvasRenderingContext2D;
+  /** Shows the painted layers moved and scaled while a zoom settles (see ControllerDeps). */
+  setLayerTransform?: (t: LayerTransform | null) => void;
   source: TileSource;
   cache: BlobCache;
   requestFrame: (cb: () => void) => void;
@@ -58,7 +64,9 @@ export function createCanvasRuntime(opts: CanvasRuntimeOptions): CanvasRuntime {
   const hitMaps = new HitMapStore(source, cache);
   const controller = new CanvasController({
     base: opts.base,
+    baseBack: opts.baseBack,
     overlay: opts.overlay,
+    setLayerTransform: opts.setLayerTransform,
     tiles: loader,
     hitMaps,
     requestFrame: (cb) => {
