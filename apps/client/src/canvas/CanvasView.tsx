@@ -215,7 +215,7 @@ export function CanvasView({ source, cache, onSelect, debug = false }: CanvasVie
     <div
       ref={rootRef}
       data-testid="canvas"
-      style={`position:fixed;inset:0;touch-action:none;user-select:none;background:${COLORS.bg}`}
+      style={`position:absolute;inset:0;touch-action:none;user-select:none;background:${COLORS.bg}`}
     >
       <div ref={layersRef} style="position:absolute;inset:0;transform-origin:0 0">
         <canvas ref={baseRef} data-testid="canvas-base" style="position:absolute;inset:0;width:100%;height:100%" />

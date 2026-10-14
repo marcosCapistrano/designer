@@ -57,7 +57,7 @@ function boxOf(boxes: readonly E2EBox[], nodeId: string): E2EBox {
 }
 
 test('shows 50 pages x 3 devices and draws tiles', async ({ page }) => {
-  await page.goto('/?debug=1');
+  await page.goto('/harness.html?debug=1');
   await ready(page);
   expect(await frameCount(page)).toBe(150);
   // The paint that follows the last tile load runs after idle() resolves, so poll.
@@ -66,7 +66,7 @@ test('shows 50 pages x 3 devices and draws tiles', async ({ page }) => {
 });
 
 test('tap selects the node under the pointer', async ({ page }) => {
-  await page.goto('/?debug=1');
+  await page.goto('/harness.html?debug=1');
   await ready(page);
   const cam: Camera = { x: -40, y: -40, scale: 0.5 };
   await setCamera(page, cam);
@@ -79,7 +79,7 @@ test('tap selects the node under the pointer', async ({ page }) => {
 });
 
 test('drag in select tool selects a box', async ({ page }) => {
-  await page.goto('/?debug=1');
+  await page.goto('/harness.html?debug=1');
   await ready(page);
   const cam: Camera = { x: -40, y: -40, scale: 0.5 };
   await setCamera(page, cam);
@@ -96,7 +96,7 @@ test('drag in select tool selects a box', async ({ page }) => {
 });
 
 test('device toggle hides frames', async ({ page }) => {
-  await page.goto('/?debug=1');
+  await page.goto('/harness.html?debug=1');
   await ready(page);
   await page.getByTestId('device-mobile').click();
   await expect.poll(() => frameCount(page)).toBe(100);
@@ -105,7 +105,7 @@ test('device toggle hides frames', async ({ page }) => {
 });
 
 test('reload serves visible tiles from IndexedDB', async ({ page }) => {
-  await page.goto('/?debug=1');
+  await page.goto('/harness.html?debug=1');
   await ready(page);
   const tileRequests: string[] = [];
   page.on('request', (req) => {
@@ -158,7 +158,7 @@ async function showCard(page: Page): Promise<{ inside: [number, number]; outside
 }
 
 test('a card is painted where its hit box says it is', async ({ page }) => {
-  await page.goto('/?debug=1');
+  await page.goto('/harness.html?debug=1');
   await ready(page);
   const { inside, outside, background } = await showCard(page);
   // The tap and box tests take their coordinates from the hit map, so they cannot see tiles drawn
@@ -168,7 +168,7 @@ test('a card is painted where its hit box says it is', async ({ page }) => {
 });
 
 test('a ctrl-wheel zoom is previewed by a transform and settles to the same picture', async ({ page }) => {
-  await page.goto('/?debug=1');
+  await page.goto('/harness.html?debug=1');
   await ready(page);
   const { inside, outside, background } = await showCard(page);
   // Zoom about the card's left edge, so the edge stays at screen x = 120, and look at where the
@@ -197,7 +197,7 @@ test('a ctrl-wheel zoom is previewed by a transform and settles to the same pict
 });
 
 test('tap hits the node under the pointer while a zoom preview is on screen', async ({ page }) => {
-  await page.goto('/?debug=1');
+  await page.goto('/harness.html?debug=1');
   await ready(page);
   const cam: Camera = { x: -40, y: -40, scale: 0.5 };
   await setCamera(page, cam);

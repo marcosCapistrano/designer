@@ -82,7 +82,7 @@ function runPhase(page: Page, init: string, step: string): Promise<PhaseResult> 
 
 test.describe('Tab S6 Lite profile, 4x CPU throttle', () => {
   test.beforeEach(async ({ page }) => {
-    await page.goto('/?debug=1');
+    await page.goto('/harness.html?debug=1');
     await ready(page);
     expect(await page.evaluate<number>('window.__hubCanvas.frames().length')).toBe(150);
     // The profile only means something if the canvas really has the tablet backing store.
