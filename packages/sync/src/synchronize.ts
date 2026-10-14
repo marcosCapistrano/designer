@@ -1,15 +1,16 @@
 import { createHash } from 'node:crypto';
-import { applyOp, canonicalStringify, validateDoc, type DesignDoc, type Op, type Page } from '@hub/design-model';
+import { applyOp, canonicalStringify, validateDoc, type ComponentDef, type DesignDoc, type Op, type Page } from '@hub/design-model';
 import { extractPages } from './extract.js';
 import type { RouteEntry, SourceDiagnostic, SourceProject } from './types.js';
 
 /** Bump whenever extraction semantics change, so cached baselines are rebuilt. */
-export const SYNC_VERSION = 1;
+export const SYNC_VERSION = 2;
 export interface PageBaseline {
   entry: RouteEntry;
   commit: string;
   hashes: Record<string, string>;
   page: Page;
+  components?: Record<string, ComponentDef>;
 }
 export interface SyncBaseline {
   version: number;
@@ -46,6 +47,13 @@ export function synchronizePages(input: {
   const doc: DesignDoc = { meta: { version: 1, seq: 0 }, pages: {}, components: {}, tokens: {} };
   const rebuilt: string[] = [], reused: string[] = [];
   const diagnostics: SourceDiagnostic[] = [];
+  function mergeComponents(components: Record<string, ComponentDef>) {
+    for (const [name, definition] of Object.entries(components)) {
+      const existing = doc.components[name];
+      if (existing && canonicalStringify(existing) !== canonicalStringify(definition)) diagnostics.push({ file: '', message: `Shared component ${name} has route-dependent props or CSS; provide a preview adapter` });
+      else doc.components[name] = structuredClone(definition);
+    }
+  }
   for (const entry of [...entries].sort((a, b) => a.route < b.route ? -1 : a.route > b.route ? 1 : 0)) {
     const saved = previous?.baseline.pages[entry.route];
     const unchanged = saved && previous.baseline.version === SYNC_VERSION
@@ -55,14 +63,16 @@ export function synchronizePages(input: {
     if (unchanged) {
       baseline.pages[entry.route] = structuredClone(saved);
       doc.pages[saved.page.id] = structuredClone(saved.page);
+      mergeComponents(saved.components ?? {});
       reused.push(entry.route);
       continue;
     }
-    const extracted = extractPages(project, [entry]);
+    const extracted = extractPages(project, [entry], { sharedComponents: true });
     if (!extracted.ok) { diagnostics.push(...extracted.diagnostics); continue; }
     const page = Object.values(extracted.doc.pages)[0]!;
     const hashes = Object.fromEntries(extracted.dependencies[page.id]!.map((file) => [file, hash(project.files[file]!)]));
-    baseline.pages[entry.route] = { entry: structuredClone(entry), commit, hashes, page: structuredClone(page) };
+    baseline.pages[entry.route] = { entry: structuredClone(entry), commit, hashes, page: structuredClone(page), components: structuredClone(extracted.doc.components) };
+    mergeComponents(extracted.doc.components);
     doc.pages[page.id] = page;
     rebuilt.push(entry.route);
   }

@@ -38,9 +38,21 @@ export function parseSyncState(files: Record<string, string>): Result<SyncState>
       const page = value['page'];
       if (typeof page['id'] !== 'string' || !path(page['id']) || page['id'].includes('/') || page['route'] !== route || Object.hasOwn(clean.pages, page['id'])) return fail(`Invalid baseline page for ${route}`);
       // Reuse the design-model file decoder for every baseline node and field.
-      const parsed = parseDoc({ 'meta.json': canonicalStringify(clean.meta), 'tokens.json': '{}', [`pages/${page['id']}.json`]: canonicalStringify(page) });
+      const componentFiles: Record<string, string> = {};
+      if (value['components'] !== undefined) {
+        if (!object(value['components'])) return fail(`Invalid baseline components for ${route}`);
+        for (const [name, definition] of Object.entries(value['components'])) {
+          if (!path(name) || name.includes('/')) return fail('Invalid baseline component name');
+          componentFiles[`components/${name}.json`] = canonicalStringify(definition);
+        }
+      }
+      const parsed = parseDoc({ 'meta.json': canonicalStringify(clean.meta), 'tokens.json': '{}', [`pages/${page['id']}.json`]: canonicalStringify(page), ...componentFiles });
       if (!parsed.ok) return fail(`Baseline ${route}: ${parsed.error}`);
       Object.assign(clean.pages, parsed.value.pages);
+      for (const [name, definition] of Object.entries(parsed.value.components)) {
+        if (Object.hasOwn(clean.components, name) && canonicalStringify(clean.components[name]) !== canonicalStringify(definition)) return fail(`Inconsistent baseline component ${name}`);
+        clean.components[name] = definition;
+      }
     }
     const combined = parseDoc(serializeDoc(clean));
     if (!combined.ok) return fail(`Baseline: ${combined.error}`);

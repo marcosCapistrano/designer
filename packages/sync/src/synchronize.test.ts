@@ -94,7 +94,7 @@ describe('incremental source synchronization', () => {
     let previous = initial();
     const button = previous.baseline.pages['/a']!.page.root.children[0]!;
     previous = edit(previous, { op: 'setStyle', node: button.id, device: 'base', prop: 'color', value: 'green' });
-    previous = edit(previous, { op: 'setAttr', node: button.id, name: 'title', value: 'saved' });
+    previous = edit(previous, { op: 'setStyle', node: button.id, device: 'base', prop: 'background', value: 'blue' });
     const snapshot = canonicalStringify(previous);
     const result = sync({ ...files, 'a.tsx': 'export default () => <main />' }, previous);
     expect(result).toMatchObject({ ok: false, kind: 'replay', conflicts: [{ index: 0, op: previous.pending[0], message: expect.any(String) }], blocked: [1] });

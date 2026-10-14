@@ -1,7 +1,7 @@
 import ts from '@typescript/typescript6';
-import { validateDoc, type DesignDoc, type DesignNode, type ElementNode, type StyleMap } from '@hub/design-model';
+import { canonicalStringify, validateDoc, type ComponentDef, type DesignDoc, type DesignNode, type ElementNode, type StyleMap } from '@hub/design-model';
 import { applyStyles, parseStyles } from './css.js';
-import type { ExtractResult, RouteEntry, SourceProject } from './types.js';
+import type { ExtractOptions, ExtractResult, RouteEntry, SourceProject } from './types.js';
 
 // No ambient clock, filesystem or execution: extraction is a pure function of source text.
 function stableId(key: string): string {
@@ -38,10 +38,11 @@ function resolveFile(project: SourceProject, from: string, specifier: string): s
   return matches[0]!;
 }
 
-type Value = string | number | boolean | null | Record<string, unknown> | DesignNode[];
+class PropValue { constructor(readonly name: string) {} }
+type Value = string | number | boolean | null | Record<string, unknown> | DesignNode[] | PropValue;
 interface Module { source: ts.SourceFile; imports: Map<string, { file: string; name: string }>; styles: Map<string, string>; constants: Map<string, ts.Expression> }
 
-export function extractPages(project: SourceProject, entries: RouteEntry[]): ExtractResult {
+export function extractPages(project: SourceProject, entries: RouteEntry[], options: ExtractOptions = {}): ExtractResult {
   const doc: DesignDoc = { meta: { version: 1, seq: 0 }, pages: {}, components: {}, tokens: {} };
   const dependencies: Record<string, string[]> = {};
   const diagnostics: { file: string; message: string }[] = [];
@@ -59,7 +60,12 @@ export function extractPages(project: SourceProject, entries: RouteEntry[]): Ext
       const inline = new Map<string, StyleMap>();
       const stack: string[] = [];
       const namespace = stableId(entry.route);
-      const nodeId = (file: string, path: string) => `s${stableId(`${namespace}:${file}:${path}`)}`;
+      let idNamespace = namespace;
+      let declarations: ComponentDef['props'] | null = null;
+      let requiredProps: Set<string> | null = null;
+      const definitions: Record<string, ComponentDef> = {};
+      const requirements = new Map<string, Set<string>>();
+      const nodeId = (file: string, path: string) => `s${stableId(`${idNamespace}:${file}:${path}`)}`;
       function module(file: string): Module {
         currentFile = file;
         const cached = modules.get(file); if (cached) return cached;
@@ -119,6 +125,7 @@ export function extractPages(project: SourceProject, entries: RouteEntry[]): Ext
             if (scope) return `${scope}__${expression.name.text}`;
           }
           const object = value(expression.expression, mod, env, depth + 1);
+          if (object instanceof PropValue) throw new Error('Object preview props need a saved adapter');
           if (object && typeof object === 'object' && !Array.isArray(object) && Object.hasOwn(object, expression.name.text)) return object[expression.name.text] as Value;
         }
         if (ts.isObjectLiteralExpression(expression)) {
@@ -162,7 +169,16 @@ export function extractPages(project: SourceProject, entries: RouteEntry[]): Ext
             else if (ts.isObjectBindingPattern(parameter.name)) for (const binding of parameter.name.elements) {
               if (!ts.isIdentifier(binding.name) || binding.dotDotDotToken) throw new Error('Unsupported component props');
               const key = binding.propertyName?.getText(mod.source) ?? binding.name.text;
-              if (Object.hasOwn(props, key)) env[binding.name.text] = props[key]!;
+              if (declarations && key !== 'children') {
+                if (!Object.hasOwn(props, key) && !binding.initializer) throw new Error(`Missing preview prop ${key} for ${name}`);
+                if (binding.initializer) requiredProps?.delete(key);
+                else requiredProps?.add(key);
+                const defaultValue = binding.initializer ? value(binding.initializer, mod, env) : '';
+                if (typeof defaultValue !== 'string') throw new Error('Shared component defaults must be strings');
+                declarations[key] = { default: defaultValue };
+                env[binding.name.text] = new PropValue(key);
+              }
+              else if (Object.hasOwn(props, key)) env[binding.name.text] = props[key]!;
               else if (binding.initializer) env[binding.name.text] = value(binding.initializer, mod, env);
               else throw new Error(`Missing preview prop ${key} for ${name}`);
             }
@@ -187,6 +203,8 @@ export function extractPages(project: SourceProject, entries: RouteEntry[]): Ext
         if (ts.isJsxElement(expression) || ts.isJsxSelfClosingElement(expression)) return renderJsx(expression, mod, env, path);
         if (ts.isJsxFragment(expression)) return children(expression.children, mod, env, path);
         const literal = value(expression, mod, env);
+        if (literal instanceof PropValue) return [{ id: nodeId(mod.source.fileName, path), kind: 'text', text: `{{${literal.name}}}` }];
+        if (declarations && typeof literal === 'string' && /\{\{[A-Za-z_][A-Za-z0-9_]*\}\}/.test(literal)) throw new Error('Literal placeholder syntax in shared components needs an adapter');
         if (Array.isArray(literal)) return literal;
         if (literal === null || typeof literal === 'boolean') return [];
         if (typeof literal === 'object') throw new Error('Object is not a JSX child');
@@ -201,6 +219,7 @@ export function extractPages(project: SourceProject, entries: RouteEntry[]): Ext
             const lines = child.text.replace(/\r/g, '').split('\n');
             const text = lines.map((line, i) => { let result = line.replace(/\t/g, ' '); if (i > 0) result = result.trimStart(); if (i < lines.length - 1) result = result.trimEnd(); return result; }).filter((line) => line !== '').join(' ');
             if (!text) continue;
+            if (declarations && /\{\{[A-Za-z_][A-Za-z0-9_]*\}\}/.test(text)) throw new Error('Literal placeholder syntax in shared components needs an adapter');
             output.push({ id: nodeId(mod.source.fileName, `${path}/${index++}`), kind: 'text', text: jsxText(text) });
           } else if (ts.isJsxExpression(child)) {
             if (child.expression) output.push(...renderExpression(child.expression, mod, env, `${path}/${index++}`));
@@ -221,11 +240,41 @@ export function extractPages(project: SourceProject, entries: RouteEntry[]): Ext
           else if (ts.isStringLiteral(attribute.initializer)) props[name] = jsxText(attribute.initializer.text);
           else if (ts.isJsxExpression(attribute.initializer) && attribute.initializer.expression) props[name] = value(attribute.initializer.expression, mod, env);
           else throw new Error('JSX attribute requires a static value');
+          if (declarations && typeof props[name] === 'string' && /\{\{[A-Za-z_][A-Za-z0-9_]*\}\}/.test(props[name])) throw new Error('Literal placeholder syntax in shared components needs an adapter');
         }
         const nodes = ts.isJsxElement(jsx) ? children(jsx.children, mod, env, `${path}/children`) : [];
         if (/^[A-Z]/.test(tag)) {
           props['children'] = nodes;
           const imported = mod.imports.get(tag);
+          if (options.sharedComponents) {
+            if (nodes.length) throw new Error('Shared component children slots need a saved preview adapter');
+            const file = imported ? resolveFile(project, mod.source.fileName, imported.file) : mod.source.fileName;
+            const exportName = imported?.name ?? tag;
+            const component = `C${stableId(`${file}:${exportName}`)}`;
+            const passed: Record<string, string> = {};
+            for (const [key, item] of Object.entries(props)) {
+              if (key === 'children') continue;
+              if (!(typeof item === 'string' || item instanceof PropValue)) throw new Error('Shared component preview props must be strings');
+              passed[key] = item instanceof PropValue ? `{{${item.name}}}` : item;
+            }
+            if (!Object.hasOwn(definitions, component)) {
+              const oldNamespace = idNamespace, oldDeclarations = declarations, oldRequired = requiredProps;
+              idNamespace = component;
+              const declared = Object.fromEntries(Object.keys(passed).map((key) => [key, { default: '' }]));
+              declarations = declared;
+              const required = new Set(Object.keys(passed));
+              requiredProps = required;
+              try {
+                const symbolic = Object.fromEntries(Object.keys(passed).map((key) => [key, new PropValue(key)]));
+                const rendered = renderComponent(file, exportName, { ...symbolic, children: [] }, 'definition');
+                if (rendered.length !== 1 || rendered[0]?.kind !== 'element') throw new Error('Shared components require one element root');
+                definitions[component] = { name: component, props: declared, root: rendered[0] };
+                requirements.set(component, required);
+              } finally { idNamespace = oldNamespace; declarations = oldDeclarations; requiredProps = oldRequired; }
+            }
+            for (const key of requirements.get(component) ?? []) if (!Object.hasOwn(passed, key)) throw new Error(`Missing preview prop ${key} for ${tag}`);
+            return [{ id: nodeId(mod.source.fileName, path), kind: 'instance', component, props: passed, style: { base: {} } }];
+          }
           return imported ? renderComponent(resolveFile(project, mod.source.fileName, imported.file), imported.name, props, `${path}/${tag}`)
             : renderComponent(mod.source.fileName, tag, props, `${path}/${tag}`);
         }
@@ -233,6 +282,11 @@ export function extractPages(project: SourceProject, entries: RouteEntry[]): Ext
         const attrs: Record<string, string> = {};
         const id = nodeId(mod.source.fileName, path);
         for (const [name, literal] of Object.entries(props)) {
+          if (literal instanceof PropValue) {
+            if (name === 'style' || name === 'className') throw new Error('Prop-driven CSS needs a saved preview adapter');
+            attrs[name === 'htmlFor' ? 'for' : name] = `{{${literal.name}}}`;
+            continue;
+          }
           if (name === 'style') {
             if (!literal || typeof literal !== 'object' || Array.isArray(literal)) throw new Error('Inline style must be an object');
             const style: StyleMap = {};
@@ -260,6 +314,12 @@ export function extractPages(project: SourceProject, entries: RouteEntry[]): Ext
         : { id: `s${namespace}`, kind: 'element', tag: 'div', attrs: {}, style: { base: {} }, children: nodes };
       if (root === first) applyStyles(root, rules, inline);
       else for (const node of nodes) if (node.kind === 'element') applyStyles(node, rules, inline);
+      for (const [name, definition] of Object.entries(definitions)) {
+        applyStyles(definition.root, rules, inline);
+        const existing = doc.components[name];
+        if (existing && canonicalStringify(existing) !== canonicalStringify(definition)) throw new Error(`Shared component ${name} has route-dependent props or CSS; provide an explicit preview adapter`);
+        doc.components[name] = definition;
+      }
       doc.pages[id] = { id, name: entry.route, route: entry.route, root };
       dependencies[id] = [...files].sort();
     } catch (error) { diagnostics.push({ file: currentFile, message: error instanceof Error ? error.message : 'Extraction failed' }); }
