@@ -26,9 +26,16 @@ function readVersion(db: Db): number {
 /**
  * Applies every migration past the current PRAGMA user_version, each in its own transaction
  * together with its user_version bump. Returns the final version and rethrows any failure.
+ * A database whose version is past the last migration was written by a newer hub (a downgrade or a
+ * restored backup), so it fails loudly instead of running old code against a newer schema.
  */
 export function migrate(db: Db, migrations: readonly string[] = MIGRATIONS): number {
   const current = readVersion(db);
+  if (current > migrations.length) {
+    throw new Error(
+      `The database is at schema version ${current}, but this hub only knows up to ${migrations.length}. Run the newer hub or restore an older backup.`,
+    );
+  }
   migrations.slice(current).forEach((sql, offset) => {
     const next = current + offset + 1;
     db.transaction(() => {
