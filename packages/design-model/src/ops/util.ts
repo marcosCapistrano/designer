@@ -1,3 +1,4 @@
+import { MAX_DEPTH } from '../shape.js';
 import { findNode, type Container, type Located } from '../tree.js';
 import type { DesignDoc, DesignNode, ElementNode } from '../types.js';
 
@@ -28,10 +29,18 @@ const RESERVED_ATTRS: ReadonlySet<string> = new Set(['style', 'class', 'data-d-i
 
 // Returns the reason an attribute name is not allowed, or null.
 export function validateAttrName(name: string): string | null {
+  // Op logs are decoded without a shape check, so a name can arrive here as another type.
+  if (typeof name !== 'string') return 'Attribute name must be a string';
   if (!ATTR_NAME_PATTERN.test(name) || RESERVED_ATTRS.has(name) || name.startsWith('on')) {
     return `Attribute "${name}" is not allowed`;
   }
   return null;
+}
+
+// A subtree of `height` levels whose root sits at `level` (the page or component root is level 1).
+// Returns the error when its deepest node would be past MAX_DEPTH, or null.
+export function depthError(level: number, height: number): string | null {
+  return level + height - 1 > MAX_DEPTH ? `Node tree deeper than ${MAX_DEPTH} levels` : null;
 }
 
 // Own properties only. Plain indexing would reach Object.prototype for a key such as "constructor".

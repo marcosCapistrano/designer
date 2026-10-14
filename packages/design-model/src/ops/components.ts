@@ -1,6 +1,6 @@
 import { resolveProps, substituteProps } from '../props.js';
 import { validateNodeId } from '../rules.js';
-import { allIds } from '../tree.js';
+import { allIds, depthOf, heightOf } from '../tree.js';
 import type {
   ComponentDef,
   DesignDoc,
@@ -13,6 +13,7 @@ import type { HandlerMap } from './handler.js';
 import { validateSubtree } from './structure.js';
 import {
   cycleError,
+  depthError,
   lookupNode,
   ownValue,
   requireNode,
@@ -103,7 +104,9 @@ export const componentHandlers: HandlerMap = {
       }
       const idProblem = validateNodeId(op.instanceId);
       if (idProblem !== null) return idProblem;
-      return allIds(doc).includes(op.instanceId) ? `Id ${op.instanceId} already exists` : null;
+      if (allIds(doc).includes(op.instanceId)) return `Id ${op.instanceId} already exists`;
+      // The body becomes a component root, so it is level 1 there.
+      return depthError(1, heightOf(node));
     },
     mutate(draft, op) {
       const { node, parent, index } = requireNode(draft, op.node);
@@ -158,7 +161,12 @@ export const componentHandlers: HandlerMap = {
       const unknown = Object.keys(op.idMap).find((key) => !known.has(key));
       if (unknown !== undefined) return `idMap has unknown key ${unknown}`;
       const copy = expand(def, node, op.idMap);
-      return validateSubtree(doc, copy) ?? cycleError(doc, container, [copy]);
+      // The copy takes the instance's level, so the body is measured from there.
+      return (
+        validateSubtree(doc, copy) ??
+        cycleError(doc, container, [copy]) ??
+        depthError(depthOf(doc, op.node), heightOf(copy))
+      );
     },
     mutate(draft, op) {
       const { node, parent, index } = requireNode(draft, op.node);

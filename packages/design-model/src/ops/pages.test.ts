@@ -2,9 +2,12 @@ import { describe, expect, test } from 'vitest';
 import { applyOp, applyOpInternal } from '../apply.js';
 import { canonicalStringify } from '../canonical.js';
 import { sampleDoc } from '../fixtures.js';
+import { nodeProblem } from '../shape.js';
 import type { DesignDoc, DesignNode, ElementNode, Op, Page } from '../types.js';
 
 type DuplicatePage = Extract<Op, { op: 'duplicatePage' }>;
+
+const TOO_DEEP = 'Node tree deeper than 64 levels';
 
 function applied(doc: DesignDoc, op: Op): DesignDoc {
   const result = applyOp(doc, op);
@@ -42,6 +45,15 @@ function element(id: string, children: DesignNode[] = [], tag = 'section'): Elem
 
 function text(id: string, value = 'x'): DesignNode {
   return { id, kind: 'text', text: value };
+}
+
+// A chain of `height` levels: element nodes down to one text leaf. Ids are `${prefix}1` to `${prefix}${height}`.
+function chain(height: number, prefix: string): DesignNode {
+  let node: DesignNode = text(`${prefix}${height}`);
+  for (let level = height - 1; level >= 1; level--) {
+    node = element(`${prefix}${level}`, [node]);
+  }
+  return node;
 }
 
 const pricing: Page = {
@@ -221,6 +233,41 @@ describe('duplicatePage', () => {
     const result = applyOp(doc, homeCopy());
     if (!result.ok) throw new Error(result.error);
     expect(content(undoneBy(result.value.doc, result.value.inverse))).toEqual(content(doc));
+  });
+});
+
+// Every id under `node`, in walk order.
+function idsOf(node: DesignNode): string[] {
+  return node.kind === 'element' ? [node.id, ...node.children.flatMap(idsOf)] : [node.id];
+}
+
+describe('duplicatePage whole-tree depth', () => {
+  // The home root gains a chain of 63 levels, so the root itself is 64 levels tall.
+  function homeWithDeepRoot(): DesignDoc {
+    return applied(sampleDoc(), { op: 'insertNode', parent: 'n1', index: 0, node: chain(63, 'd') });
+  }
+
+  function copyOfHome(doc: DesignDoc): DuplicatePage {
+    const ids = idsOf(pageOf(doc, 'home').root);
+    return {
+      op: 'duplicatePage',
+      source: 'home',
+      page: { id: 'home-b', name: 'Home B', route: '/b' },
+      idMap: Object.fromEntries(ids.map((id, i) => [id, `x${i}`])),
+    };
+  }
+
+  test('applies a copy whose root is exactly 64 levels tall', () => {
+    const doc = homeWithDeepRoot();
+    const next = applied(doc, copyOfHome(doc));
+    expect(nodeProblem(pageOf(next, 'home-b').root)).toBeNull();
+  });
+
+  test('rejects a copy whose root would be 65 levels tall', () => {
+    // The source is already past the limit, which the ops never allow. Only the copy's check can stop it.
+    const doc = sampleDoc();
+    pageOf(doc, 'home').root.children.push(chain(64, 'd'));
+    expect(rejected(doc, copyOfHome(doc))).toBe(TOO_DEEP);
   });
 });
 
