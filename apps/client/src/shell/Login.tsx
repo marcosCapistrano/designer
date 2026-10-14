@@ -1,7 +1,7 @@
 // The passphrase gate, shown while the session is logged out. A correct passphrase makes the
 // server set the session cookie, and onDone then moves the shell into the app.
 
-import { useState } from 'preact/hooks';
+import { useEffect, useRef, useState } from 'preact/hooks';
 import type { JSX } from 'preact';
 import { ApiError } from '../net/api.js';
 import type { ApiClient } from '../net/api.js';
@@ -24,10 +24,16 @@ export function Login({ api, onDone }: LoginProps): JSX.Element {
   const [passphrase, setPassphrase] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  // autofocus only applies to the first page load; this focuses the field every time the form mounts.
+  useEffect(() => {
+    inputRef.current?.focus();
+  }, []);
 
   const submit = async (e: Event): Promise<void> => {
     e.preventDefault();
-    if (busy) return;
+    if (busy || passphrase === '') return;
     setBusy(true);
     setError(null);
     try {
@@ -47,11 +53,14 @@ export function Login({ api, onDone }: LoginProps): JSX.Element {
       <label class="login-label">
         Passphrase
         <input
+          ref={inputRef}
           class="login-input"
           data-testid="passphrase"
+          name="password"
           type="password"
           autocomplete="current-password"
           autofocus
+          required
           value={passphrase}
           onInput={(e) => setPassphrase(e.currentTarget.value)}
         />

@@ -64,10 +64,15 @@ export function AppList({ api, ws }: AppListProps): JSX.Element {
     const offMessage = ws.on((m) => {
       if (m.type === 'build.task') load();
     });
+    // A reconnect may have missed build.task messages, so the list reloads each time the socket opens.
+    const offStatus = ws.onStatus((s) => {
+      if (s === 'open') load();
+    });
 
     return () => {
       live = false;
       offMessage();
+      offStatus();
     };
   }, [api, ws]);
 
