@@ -1,0 +1,22 @@
+import { expect, test } from '@playwright/test';
+test('authenticated import renders pages, reuses baseline and preserves design on source diagnostics', async ({ page }) => {
+  await page.goto('/');
+  await page.getByTestId('passphrase').fill('hub-dev-passphrase');
+  await page.getByTestId('login-submit').click();
+  await page.getByTestId('app-demo').click();
+  await page.getByTestId('tab-design').click();
+  await page.getByRole('button', { name: 'Import pages' }).click();
+  await expect(page.getByRole('status')).toContainText('Imported 1 pages; reused 0.', { timeout: 60_000 });
+  const manifest = await page.request.get('/api/apps/demo/render/manifest.json');
+  const rendered = await manifest.json();
+  expect(rendered.pages).toHaveLength(1);
+  expect(rendered.pages[0].renders.base.levels.length).toBeGreaterThan(0);
+  expect(rendered.pages[0].renders.base.error).toBeUndefined();
+  await page.getByRole('button', { name: 'Import pages' }).click();
+  await expect(page.getByRole('status')).toContainText('Imported 0 pages; reused 1.');
+  await page.getByLabel('Source', { exact: true }).selectOption('react');
+  await page.getByLabel('Entry file').fill('missing.tsx');
+  await page.getByRole('button', { name: 'Import pages' }).click();
+  await expect(page.getByRole('alert')).toContainText('previous design and edits are preserved');
+  expect((await (await page.request.get('/api/apps/demo/design')).json()).pages).toHaveLength(1);
+});

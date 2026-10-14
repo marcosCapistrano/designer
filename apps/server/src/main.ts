@@ -41,7 +41,7 @@ async function main(): Promise<void> {
   const hasClient = existsSync(join(clientDir, 'index.html'));
   if (!hasClient) console.log('Client build not found; run pnpm -F @hub/client build');
 
-  const hub = await startHub({
+  const starting = startHub({
     config,
     // Claude signs in with the subscription token from the config, never an API key, and the token stays out of argv.
     runner: new SdkClaudeRunner({ oauthToken: config.claudeOauthToken }),
@@ -55,7 +55,7 @@ async function main(): Promise<void> {
     if (stopping) return;
     stopping = true;
     try {
-      await hub.close();
+      await (await starting).close();
       process.exit(0);
     } catch (err) {
       console.error(oneLine('Shutdown failed', err));
@@ -64,6 +64,7 @@ async function main(): Promise<void> {
   };
   process.on('SIGINT', () => void stop());
   process.on('SIGTERM', () => void stop());
+  await starting;
 }
 
 process.on('uncaughtException', crashOn('Uncaught exception'));

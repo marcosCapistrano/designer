@@ -128,6 +128,28 @@ function setup(opts: SetupOptions = {}) {
 
 type Setup = ReturnType<typeof setup>;
 
+describe('checkout reservation', () => {
+  it('blocks Build and duplicate imports until the checkout action finishes', async () => {
+    const s = setup();
+    const gate = deferred();
+    const importing = s.svc.withCheckout('demo', () => gate.promise);
+    await expect(s.svc.send('demo', 'Build during import')).rejects.toMatchObject({ status: 409 });
+    await expect(s.svc.withCheckout('demo', async () => {})).rejects.toMatchObject({ status: 409 });
+    expect(s.runner.calls).toHaveLength(0);
+    gate.resolve(); await importing;
+    await s.svc.send('demo', 'Build after import');
+    await s.svc.idle('demo');
+    expect(s.runner.calls).toHaveLength(1);
+  });
+  it('releases failed actions and refuses import while Build owns the checkout', async () => {
+    const s = setup({ scripts: [[untilAborted]] });
+    await expect(s.svc.withCheckout('demo', async () => { throw new Error('failed'); })).rejects.toThrow('failed');
+    await s.svc.send('demo', 'Build');
+    await expect(s.svc.withCheckout('demo', async () => {})).rejects.toMatchObject({ status: 409 });
+    await s.svc.stopAll();
+  });
+});
+
 /** Repo whose methods can be overridden, so a test can make one git step fail or wait. */
 function repoWith(override: (real: GitRepo) => Partial<GitRepo>): (dir: string) => GitRepo {
   return (dir) => {

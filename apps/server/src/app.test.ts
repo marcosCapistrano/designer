@@ -13,6 +13,7 @@ import { SessionStore } from './auth/sessions.js';
 import { createApp } from './app.js';
 import { BuildError } from './build/ci.js';
 import type { BuildService } from './build/service.js';
+import type { SyncService } from './sync/service.js';
 import { openDb, type Db } from './db.js';
 
 const PASS = 'correct horse battery staple';
@@ -52,6 +53,7 @@ const build = {
   merge: vi.fn(),
   close: vi.fn(),
 };
+const sync = { summary: vi.fn(), import: vi.fn(), retryPreview: vi.fn() };
 
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), 'hub-app-'));
@@ -70,6 +72,9 @@ beforeEach(() => {
   build.stop.mockReset().mockReturnValue(true);
   build.merge.mockReset().mockResolvedValue(TASK);
   build.close.mockReset().mockResolvedValue(TASK);
+  sync.summary.mockReset().mockResolvedValue({ imported: false, revision: null, pages: [], pending: 0 });
+  sync.import.mockReset().mockResolvedValue({ ok: false, kind: 'source', diagnostics: [{ file: '', message: 'No routes' }] });
+  sync.retryPreview.mockReset().mockResolvedValue({ manifest: null, warnings: [] });
 
   db = openDb(':memory:');
   app = createApp({
@@ -78,6 +83,7 @@ beforeEach(() => {
     passphraseHash: HASH,
     registry: new AppRegistry(appsDir),
     build: build as unknown as BuildService,
+    sync: sync as unknown as SyncService,
     dataDir,
     clientDir,
   });
@@ -683,5 +689,17 @@ describe('hub app', () => {
   it('sets security headers', async () => {
     const res = await app.request('/api/health');
     expect(res.headers.get('x-content-type-options')).toBe('nosniff');
+  });
+
+  it('requires authentication and same-origin protection for design import', async () => {
+    expect((await app.request('/api/apps/demo/design')).status).toBe(401);
+    expect((await post('/api/apps/demo/design/import', {}, { mode: 'next' })).status).toBe(401);
+    expect(sync.import).not.toHaveBeenCalled();
+    const headers = await cookie();
+    expect((await app.request('/api/apps/demo/design', { headers })).status).toBe(200);
+    expect((await post('/api/apps/demo/design/import', { ...headers, 'content-type': 'application/x-www-form-urlencoded', 'sec-fetch-site': 'cross-site', origin: 'https://other.example' }, { mode: 'next' })).status).toBe(403);
+    expect(sync.import).not.toHaveBeenCalled();
+    expect((await post('/api/apps/demo/design/import', headers, { mode: 'next' })).status).toBe(200);
+    expect(sync.import).toHaveBeenCalledWith('demo', { mode: 'next' });
   });
 });

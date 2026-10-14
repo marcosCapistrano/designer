@@ -7,6 +7,7 @@ import type {
   SendBuildRequest,
   StopResponse,
   TaskResponse,
+  ImportRequest, ImportResponse, DesignSummary,
 } from '@hub/protocol';
 
 /** A non-OK API response. `message` is the server's `error` text when it sent one. */
@@ -90,6 +91,14 @@ export class ApiClient {
 
   apps(): Promise<AppSummary[]> {
     return this.json<AppSummary[]>('/apps');
+  }
+
+  designSummary(app: string): Promise<DesignSummary> { return this.json(`${appPath(app)}/design`); }
+  importPages(app: string, body: ImportRequest): Promise<ImportResponse> {
+    return this.json(`${appPath(app)}/design/import`, { method: 'POST', body });
+  }
+  retryPreview(app: string): Promise<{ warnings: string[] }> {
+    return this.json(`${appPath(app)}/design/render`, { method: 'POST' });
   }
 
   buildState(app: string, after?: number): Promise<BuildState> {
