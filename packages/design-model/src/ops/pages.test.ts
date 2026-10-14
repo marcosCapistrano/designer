@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest';
-import { applyOp } from '../apply.js';
+import { applyOp, applyOpInternal } from '../apply.js';
 import { canonicalStringify } from '../canonical.js';
 import { sampleDoc } from '../fixtures.js';
 import type { DesignDoc, DesignNode, ElementNode, Op, Page } from '../types.js';
@@ -8,6 +8,13 @@ type DuplicatePage = Extract<Op, { op: 'duplicatePage' }>;
 
 function applied(doc: DesignDoc, op: Op): DesignDoc {
   const result = applyOp(doc, op);
+  if (!result.ok) throw new Error(`expected ok, got: ${result.error}`);
+  return result.value.doc;
+}
+
+// Undo applies a restore op, which only the internal path accepts.
+function undoneBy(doc: DesignDoc, inverse: Op): DesignDoc {
+  const result = applyOpInternal(doc, inverse);
   if (!result.ok) throw new Error(`expected ok, got: ${result.error}`);
   return result.value.doc;
 }
@@ -117,7 +124,7 @@ describe('addPage', () => {
     const doc = sampleDoc();
     const result = applyOp(doc, { op: 'addPage', page: pricing });
     if (!result.ok) throw new Error(result.error);
-    expect(content(applied(result.value.doc, result.value.inverse))).toEqual(content(doc));
+    expect(content(undoneBy(result.value.doc, result.value.inverse))).toEqual(content(doc));
   });
 });
 
@@ -208,7 +215,7 @@ describe('duplicatePage', () => {
     const doc = sampleDoc();
     const result = applyOp(doc, homeCopy());
     if (!result.ok) throw new Error(result.error);
-    expect(content(applied(result.value.doc, result.value.inverse))).toEqual(content(doc));
+    expect(content(undoneBy(result.value.doc, result.value.inverse))).toEqual(content(doc));
   });
 });
 
@@ -219,7 +226,7 @@ describe('removePage', () => {
     if (!result.ok) throw new Error(result.error);
     expect(result.value.doc.pages).toEqual({});
 
-    const undone = applied(result.value.doc, result.value.inverse);
+    const undone = undoneBy(result.value.doc, result.value.inverse);
     expect(content(undone)).toEqual(content(doc));
   });
 

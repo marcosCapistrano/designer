@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest';
-import { applyOp, validateOp } from './apply.js';
+import { applyOp, applyOpInternal, validateOp, validateOpInternal } from './apply.js';
 import { canonicalStringify } from './canonical.js';
 import { sampleDoc } from './fixtures.js';
 import { findNode } from './tree.js';
@@ -15,6 +15,19 @@ function rejected(doc: DesignDoc, op: Op): string {
   const result = applyOp(doc, op);
   if (result.ok) throw new Error('expected the op to be rejected');
   return result.error;
+}
+
+// Restore ops (undo's inverses) only reach the internal path.
+function appliedInternal(doc: DesignDoc, op: Op): DesignDoc {
+  const result = applyOpInternal(doc, op);
+  if (!result.ok) throw new Error(`expected ok, got: ${result.error}`);
+  return result.value.doc;
+}
+
+function rejectedInternal(doc: DesignDoc, op: Op): string {
+  const error = validateOpInternal(doc, op);
+  if (error === null) throw new Error('expected the op to be rejected');
+  return error;
 }
 
 function nodeOf(doc: DesignDoc, id: string): DesignNode {
@@ -76,9 +89,9 @@ describe('setStyle', () => {
     expect(error).toContain('cannot be styled');
   });
 
-  test('rejects an unknown device', () => {
+  test('rejects an unknown device as a malformed op', () => {
     const op = { op: 'setStyle', node: 'n3', device: 'desktop', prop: 'padding', value: '4px' } as unknown as Op;
-    expect(rejected(sampleDoc(), op)).toContain('Unknown device');
+    expect(rejected(sampleDoc(), op)).toBe('Malformed op: setStyle.device must be one of base, tablet, mobile');
   });
 });
 
@@ -90,6 +103,15 @@ describe('setText', () => {
 
   test('rejects an element', () => {
     expect(rejected(sampleDoc(), { op: 'setText', node: 'n3', text: 'x' })).toContain('is not a text node');
+  });
+
+  test.each<[string, unknown]>([
+    ['null', null],
+    ['a number', 123],
+    ['a missing text', undefined],
+  ])('rejects %s as a malformed op', (_label, text) => {
+    const op = { op: 'setText', node: 'n4', text } as unknown as Op;
+    expect(rejected(sampleDoc(), op)).toBe('Malformed op: setText.text must be a string');
   });
 });
 
@@ -118,6 +140,18 @@ describe('setAttr', () => {
 
   test('rejects an instance node', () => {
     expect(rejected(sampleDoc(), { op: 'setAttr', node: 'n5', name: 'id', value: 'x' })).toContain('is not an element');
+  });
+
+  test.each<[string, unknown]>([['an object', {}], ['a number', 5]])('rejects %s as a value', (_label, value) => {
+    const op = { op: 'setAttr', node: 'n3', name: 'type', value } as unknown as Op;
+    expect(rejected(sampleDoc(), op)).toBe('Malformed op: setAttr.value must be a string or null');
+  });
+});
+
+describe('setInstanceProp', () => {
+  test('rejects a number as a value', () => {
+    const op = { op: 'setInstanceProp', node: 'n5', prop: 'title', value: 7 } as unknown as Op;
+    expect(rejected(sampleDoc(), op)).toBe('Malformed op: setInstanceProp.value must be a string or null');
   });
 });
 
@@ -180,6 +214,67 @@ describe('setToken', () => {
     const error = rejected(sampleDoc(), { op: 'setToken', group: 'color', name: 'primary', value: '' });
     expect(error).toContain('Invalid value');
   });
+
+  test('reports a number value as malformed, without throwing', () => {
+    const op = { op: 'setToken', group: 'color', name: 'primary', value: 5 } as unknown as Op;
+    expect(validateOp(sampleDoc(), op)).toBe('Malformed op: setToken.value must be a string or null');
+  });
+
+  test('the internal validator reports a number value without throwing', () => {
+    const op = { op: 'setToken', group: 'color', name: 'primary', value: 5 } as unknown as Op;
+    expect(() => validateOpInternal(sampleDoc(), op)).not.toThrow();
+    expect(validateOpInternal(sampleDoc(), op)).not.toBeNull();
+  });
+});
+
+describe('malformed ops', () => {
+  const deep = (levels: number): unknown => {
+    let node: Record<string, unknown> = { id: `n${levels}`, kind: 'element', tag: 'p', attrs: {}, style: { base: {} }, children: [] };
+    for (let level = levels - 1; level >= 1; level--) {
+      node = { id: `n${level}`, kind: 'element', tag: 'p', attrs: {}, style: { base: {} }, children: [node] };
+    }
+    return node;
+  };
+
+  test.each<[string, unknown, string]>([
+    ['an unknown node kind', { id: 'n9', kind: 'banana' }, 'Malformed op: insertNode.node: node n9: kind must be element, text or instance'],
+    ['a text node without text', { id: 'n9', kind: 'text' }, 'Malformed op: insertNode.node: node n9: text must be a string'],
+    ['a numeric node id', { id: 9, kind: 'text', text: 'x' }, 'Malformed op: insertNode.node: node id must be a non-empty string'],
+    ['a 70-level payload', deep(70), 'Malformed op: insertNode.node: Node tree deeper than 64 levels'],
+  ])('insertNode with %s is rejected by applyOp and validateOp', (_label, node, problem) => {
+    const op = { op: 'insertNode', parent: 'n2', index: 0, node } as unknown as Op;
+    expect(rejected(sampleDoc(), op)).toBe(problem);
+    expect(validateOp(sampleDoc(), op)).toBe(problem);
+  });
+});
+
+describe('restore ops are internal', () => {
+  test('applyOp refuses a restore op', () => {
+    expect(rejected(sampleDoc(), restoreOp(9, []))).toBe('restore ops are internal');
+  });
+
+  test('validateOp refuses a restore op', () => {
+    expect(validateOp(sampleDoc(), restoreOp(9, []))).toBe('restore ops are internal');
+  });
+
+  test('the internal path still applies a restore op', () => {
+    expect(appliedInternal(sampleDoc(), restoreOp(9, [])).meta.seq).toBe(9);
+  });
+
+  test('internal restore rejects the entry key __proto__', () => {
+    const op = restoreOp(9, [{ kind: 'tokens', key: '__proto__', value: null }]);
+    expect(rejectedInternal(sampleDoc(), op)).toBe('Restore entry key "__proto__" is reserved');
+  });
+
+  test.each(['constructor', 'prototype'])('internal restore accepts the token group %s', (key) => {
+    const op = restoreOp(9, [{ kind: 'tokens', key, value: null }]);
+    expect(validateOpInternal(sampleDoc(), op)).toBeNull();
+  });
+
+  test('internal restore rejects a reserved page key', () => {
+    const op = restoreOp(9, [{ kind: 'page', key: '__proto__', value: null }]);
+    expect(rejectedInternal(sampleDoc(), op)).toBe('Restore entry key "__proto__" is reserved');
+  });
 });
 
 describe('validation', () => {
@@ -202,7 +297,7 @@ describe('validation', () => {
     const before = canonicalStringify(doc);
     applied(doc, { op: 'setStyle', node: 'n3', device: 'mobile', prop: 'padding', value: '4px' });
     applied(doc, { op: 'setToken', group: 'color', name: 'primary', value: null });
-    applyOp(doc, restoreOp(3, []));
+    applyOpInternal(doc, restoreOp(3, []));
     expect(canonicalStringify(doc)).toBe(before);
   });
 });
@@ -227,7 +322,7 @@ describe('undo', () => {
     if (!result.ok) throw new Error(result.error);
     expect(content(result.value.doc)).not.toEqual(content(doc));
 
-    const undone = applied(result.value.doc, result.value.inverse);
+    const undone = appliedInternal(result.value.doc, result.value.inverse);
     expect(content(undone)).toEqual(content(doc));
   });
 
@@ -236,16 +331,16 @@ describe('undo', () => {
     const result = applyOp(doc, { op: 'setAttr', node: 'n3', name: 'title', value: null });
     if (!result.ok) throw new Error(result.error);
     expect(content(result.value.doc)).toEqual(content(doc));
-    expect(content(applied(result.value.doc, result.value.inverse))).toEqual(content(doc));
+    expect(content(appliedInternal(result.value.doc, result.value.inverse))).toEqual(content(doc));
   });
 
   test('restore entries set and delete records', () => {
     const doc = sampleDoc();
     const page = doc.pages['home'];
     if (!page) throw new Error('fixture is missing the home page');
-    const removed = applied(doc, restoreOp(9, [{ kind: 'page', key: 'home', value: null }]));
+    const removed = appliedInternal(doc, restoreOp(9, [{ kind: 'page', key: 'home', value: null }]));
     expect(removed.pages).toEqual({});
-    const added = applied(removed, restoreOp(9, [{ kind: 'page', key: 'home', value: page }]));
+    const added = appliedInternal(removed, restoreOp(9, [{ kind: 'page', key: 'home', value: page }]));
     expect(content(added)).toEqual(content(doc));
   });
   test('inverse entries are sorted by kind, then key', () => {
@@ -253,11 +348,11 @@ describe('undo', () => {
       id, name: id, route: `/${id}`,
       root: { id: root, kind: 'element', tag: 'main', attrs: {}, style: { base: {} }, children: [] },
     });
-    const seeded = applied(sampleDoc(), restoreOp(9, [
+    const seeded = appliedInternal(sampleDoc(), restoreOp(9, [
       { kind: 'page', key: 'zeta', value: page('zeta', 'n90') },
       { kind: 'page', key: 'alpha', value: page('alpha', 'n91') },
     ]));
-    const result = applyOp(seeded, restoreOp(9, [
+    const result = applyOpInternal(seeded, restoreOp(9, [
       { kind: 'tokens', key: 'color', value: null },
       { kind: 'page', key: 'zeta', value: null },
       { kind: 'component', key: 'Card', value: null },
@@ -290,7 +385,7 @@ describe('restore validation', () => {
       'Duplicate restore entry tokens "color"',
     ],
   ])('rejects %s', (_label, op, expected) => {
-    expect(rejected(sampleDoc(), op)).toContain(expected);
+    expect(rejectedInternal(sampleDoc(), op)).toContain(expected);
   });
 });
 
@@ -300,15 +395,15 @@ describe('seq', () => {
   });
 
   test('restore never lowers seq', () => {
-    expect(applied(sampleDoc(), restoreOp(3, [])).meta.seq).toBe(9);
+    expect(appliedInternal(sampleDoc(), restoreOp(3, [])).meta.seq).toBe(9);
   });
 
   test('restore never lowers seq, even when no node id reaches it', () => {
     const bare: DesignDoc = { meta: { version: 1, seq: 9 }, pages: {}, components: {}, tokens: {} };
-    expect(applied(bare, restoreOp(3, [])).meta.seq).toBe(9);
+    expect(appliedInternal(bare, restoreOp(3, [])).meta.seq).toBe(9);
   });
 
   test('restore raises seq to its own value', () => {
-    expect(applied(sampleDoc(), restoreOp(12, [])).meta.seq).toBe(12);
+    expect(appliedInternal(sampleDoc(), restoreOp(12, [])).meta.seq).toBe(12);
   });
 });

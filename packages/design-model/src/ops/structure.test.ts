@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest';
-import { applyOp } from '../apply.js';
+import { applyOp, applyOpInternal } from '../apply.js';
 import { canonicalStringify } from '../canonical.js';
 import { sampleDoc } from '../fixtures.js';
 import { findNode } from '../tree.js';
@@ -8,6 +8,13 @@ import { validateSubtree } from './structure.js';
 
 function applied(doc: DesignDoc, op: Op): DesignDoc {
   const result = applyOp(doc, op);
+  if (!result.ok) throw new Error(`expected ok, got: ${result.error}`);
+  return result.value.doc;
+}
+
+// Undo applies a restore op, which only the internal path accepts.
+function undoneBy(doc: DesignDoc, inverse: Op): DesignDoc {
+  const result = applyOpInternal(doc, inverse);
   if (!result.ok) throw new Error(`expected ok, got: ${result.error}`);
   return result.value.doc;
 }
@@ -98,7 +105,7 @@ describe('insertNode', () => {
   test('rejects a negative index', () => {
     expect(rejected(sampleDoc(), {
       op: 'insertNode', parent: 'n2', index: -1, node: text('n9'),
-    })).toContain('out of range');
+    })).toBe('Malformed op: insertNode.index must be a non-negative integer');
   });
 
   test('rejects an invalid tag', () => {
@@ -127,7 +134,7 @@ describe('removeNode', () => {
     if (!result.ok) throw new Error(result.error);
     expect(childIds(result.value.doc, 'n2')).toEqual([]);
 
-    const undone = applied(result.value.doc, result.value.inverse);
+    const undone = undoneBy(result.value.doc, result.value.inverse);
     expect(content(undone)).toEqual(content(doc));
   });
 
@@ -262,7 +269,7 @@ describe('wrapNodes', () => {
     const doc = sampleDoc();
     const result = applyOp(doc, { op: 'wrapNodes', nodes: ['n2', 'n5'], wrapper: element('n9') });
     if (!result.ok) throw new Error(result.error);
-    expect(content(applied(result.value.doc, result.value.inverse))).toEqual(content(doc));
+    expect(content(undoneBy(result.value.doc, result.value.inverse))).toEqual(content(doc));
   });
 });
 

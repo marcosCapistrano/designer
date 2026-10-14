@@ -1,22 +1,30 @@
-import { applyOp } from './apply.js';
+import { applyOpInternal } from './apply.js';
+import { opProblem } from './shape.js';
 import { findNode } from './tree.js';
 import type { DesignDoc, Op, Result } from './types.js';
 
 export type BatchResult = { ok: true; doc: DesignDoc } | { ok: false; index: number; error: string };
 
-// Restore ops are produced by undo. Callers may not supply them to a session.
-const RESTORE_REFUSED = 'restore ops are internal';
-
 type Run =
   | { ok: true; doc: DesignDoc; inverse: Op[] }
   | { ok: false; index: number; error: string };
 
+// The first op that is malformed, or that is a restore op (produced by undo, never supplied), or null.
+function refuseOps(ops: Op[]): { index: number; error: string } | null {
+  for (const [index, op] of ops.entries()) {
+    const problem = opProblem(op);
+    if (problem !== null) return { index, error: problem };
+  }
+  return null;
+}
+
 // Runs the ops in order on a copy of doc. The first failing op stops the run, and the input is untouched.
+// Callers check the ops with refuseOps first, except undo and redo, which run restore ops.
 function run(doc: DesignDoc, ops: Op[]): Run {
   let current = structuredClone(doc);
   const inverses: Op[] = [];
   for (const [index, op] of ops.entries()) {
-    const result = applyOp(current, op);
+    const result = applyOpInternal(current, op);
     if (!result.ok) return { ok: false, index, error: result.error };
     current = result.value.doc;
     inverses.push(result.value.inverse);
@@ -26,14 +34,11 @@ function run(doc: DesignDoc, ops: Op[]): Run {
 }
 
 export function applyBatch(doc: DesignDoc, ops: Op[]): Result<{ doc: DesignDoc; inverse: Op[] }> {
+  const refused = refuseOps(ops);
+  if (refused !== null) return { ok: false, error: `op ${refused.index}: ${refused.error}` };
   const result = run(doc, ops);
   if (!result.ok) return { ok: false, error: `op ${result.index}: ${result.error}` };
   return { ok: true, value: { doc: result.doc, inverse: result.inverse } };
-}
-
-function refuseRestore(ops: Op[]): BatchResult | null {
-  const index = ops.findIndex((op) => op.op === 'restore');
-  return index === -1 ? null : { ok: false, index, error: RESTORE_REFUSED };
 }
 
 // The node an op edits, for the kinds that can be edited immediately.
@@ -52,7 +57,7 @@ function immediateTarget(op: Op): string | null {
 
 export function classifyBatch(doc: DesignDoc, ops: Op[]): 'immediate' | 'preview' {
   const [op] = ops;
-  if (ops.length !== 1 || op === undefined) return 'preview';
+  if (ops.length !== 1 || op === undefined || opProblem(op) !== null) return 'preview';
   const node = immediateTarget(op);
   if (node === null) return 'preview';
   return findNode(doc, node)?.container.kind === 'page' ? 'immediate' : 'preview';
@@ -82,8 +87,8 @@ export class DesignSession {
 
   // Atomic: on failure the doc, the history and the redo stack are unchanged.
   apply(ops: Op[]): BatchResult {
-    const refused = refuseRestore(ops);
-    if (refused !== null) return refused;
+    const refused = refuseOps(ops);
+    if (refused !== null) return { ok: false, ...refused };
     if (ops.length === 0) return { ok: true, doc: this.#doc };
     const result = run(this.#doc, ops);
     if (!result.ok) return { ok: false, index: result.index, error: result.error };
@@ -95,8 +100,8 @@ export class DesignSession {
 
   // Same checks as apply, but the session is never changed.
   preview(ops: Op[]): BatchResult {
-    const refused = refuseRestore(ops);
-    if (refused !== null) return refused;
+    const refused = refuseOps(ops);
+    if (refused !== null) return { ok: false, ...refused };
     const result = run(this.#doc, ops);
     if (!result.ok) return { ok: false, index: result.index, error: result.error };
     return { ok: true, doc: result.doc };
