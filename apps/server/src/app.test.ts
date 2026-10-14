@@ -226,6 +226,13 @@ describe('hub app', () => {
     }
   });
 
+  it('stop on an unknown app is 404 and does not reach the service', async () => {
+    const res = await post('/api/apps/nope/build/stop', await cookie());
+    expect(res.status).toBe(404);
+    expect(await res.json()).toEqual({ error: 'Unknown app' });
+    expect(build.stop).not.toHaveBeenCalled();
+  });
+
   describe('request body limit', () => {
     it('login refuses a 300 KB body with 413, with or without a Content-Length', async () => {
       const body = JSON.stringify({ passphrase: BIG });

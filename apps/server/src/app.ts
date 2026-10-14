@@ -129,8 +129,9 @@ export function createApp(deps: AppDeps): Hono {
   // Everything under /api from here on needs a session: apps, build and render routes alike.
   app.use('/api/*', requireAuth(sessions));
   app.route('/api/apps', appsRoutes({ registry, build }));
-  app.route('/api/apps', buildRoutes(build));
-  app.route('/api/apps', renderRoutes({ dataDir, hasApp: async (a) => (await registry.get(a)) !== null }));
+  const hasApp = async (name: string): Promise<boolean> => (await registry.get(name)) !== null;
+  app.route('/api/apps', buildRoutes(build, hasApp));
+  app.route('/api/apps', renderRoutes({ dataDir, hasApp }));
   app.all('/api/*', (c) => c.json({ error: 'Not found' }, 404));
 
   if (clientDir) app.use('/*', clientFiles(clientDir));
