@@ -18,7 +18,7 @@ Validation: 19 importer fixture tests pass; full workspace typecheck passes; ser
 
 ## Remaining tasks
 
-Tasks 1 and 2a are focused PRs, not a completed Design import flow. Continue on the same plan with atomic persistence and external state decoding, shared components and source gaps, then authenticated server/render/canvas integration. Do not resume adhunters-v4 conversion or staging.
+Static import, atomic persistence, shared components, server/render/canvas integration and tap editing are implemented. Continue with subscription-backed Design chat, saved source preview choices/conflict resolution and reviewed Send to Build, then the deferred deployment plan. Do not resume adhunters-v4 conversion or staging.
 
 ## Task 2a — incremental preparation and pending-op replay
 
@@ -72,3 +72,13 @@ Validation: all 30 sync fixture tests pass (11 new incremental/replay cases); fu
 - Persist undo batch boundaries and redo history with the snapshot. Undo rebuilds the clean baseline plus the remaining log; redo restores the exact batch. Every action atomically updates the document/log/history together and re-renders only changed content through the existing hash cache. Source sync clears redo while preserving active pending batches.
 - Validation: 1,199 server tests and 51 importer tests pass; workspace typecheck passes. Both browser Design tests pass, including real tap selection, immediate instance edits, undo/redo and a shared preview whose committed manifest remains unchanged until Apply. The browser test waits for the complete history action before reselecting.
 - Next: subscription-backed Design chat through restricted MCP tools, source preview choices, and Send to Build. Deployment/New app/Adopt remains after those flows, following the existing preflight.
+
+## Design chat — subscription runner and restricted MCP
+
+- PR #11 passed both complete CI runs and was automatically merged. The tap editor, rendered previews and persistent undo/redo are now on main.
+- Added subscription-backed Design chat through the existing ClaudeRunner and Agent SDK, with page reading, node lookup, ID allocation and validated operation-batch MCP tools. Sessions and streamed messages persist in SQLite. Stop aborts the turn; shutdown aborts and drains design turns before closing the model store/renderer/database.
+- Ruling: a restricted turn runs in hub-owned `design-chats/<app>`, never the source checkout; its SDK settings sources are empty and its PreToolUse hook permits only the exact Hub MCP tool names. Every file, shell, subagent, external MCP and other tool is denied, even in bypass mode. The same subscription login is used; no paid API key or source execution.
+- A selected single-property edit can apply immediately. Semantic targets with no selection always produce a preview. The tool accepts at most one successful edit batch per turn; after two invalid attempts it asks for clarification. Completed edits remain saved if the turn is subsequently stopped or reaches a subscription error.
+- Streaming status carries the edit/proposal result, so a reconnect or lost HTTP response does not hide it from the tablet. Chat history deduplicates streamed and loaded messages, and persists across reload. App checkout reservations exclude Build/import during a turn.
+- Browser inspection at 834px prompted a wider tablet breakpoint for the editor, an explicit empty import state and 44px canvas toolbar targets with wrapping on narrow screens.
+- Validation: restricted SDK-hook/MCP tests pass, including denied tools, sessions, selections, proposals, invalid retries and Stop; full server run had 1,204 passing tests before the additional chat-auth fixture. All three Design browser smoke tests pass; JS gzip is about 27 KB; workspace typecheck passes.

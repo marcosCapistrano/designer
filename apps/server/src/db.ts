@@ -20,6 +20,9 @@ CREATE INDEX build_messages_app ON build_messages (app, id);`,
   // The commit the hub last pushed for a task. Unlike head_sha, GitHub's own view of the head never overwrites it,
   // so a push can tell "the branch is as the hub left it" from "someone else pushed to it".
   'ALTER TABLE build_tasks ADD COLUMN pushed_sha TEXT;',
+  `CREATE TABLE design_chats (app TEXT PRIMARY KEY, claude_session_id TEXT);
+CREATE TABLE design_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, app TEXT NOT NULL, kind TEXT NOT NULL, text TEXT NOT NULL, at INTEGER NOT NULL);
+CREATE INDEX design_messages_app ON design_messages(app,id);`,
 ];
 
 function readVersion(db: Db): number {

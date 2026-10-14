@@ -64,8 +64,10 @@ export function DesignArea({ app, api, ws, source, cache }: DesignAreaProps): JS
       {result.kind === 'source' ? <ul>{result.diagnostics.map((diagnostic, index) => <li key={index}>{diagnostic.file && `${diagnostic.file}: `}{diagnostic.message}</li>)}</ul> : <ul>{result.conflicts.map((conflict) => <li key={conflict.index}>Edit {conflict.index + 1}: {conflict.message}</li>)}<li>{result.blocked.length} later edits are blocked.</li></ul>}
     </div>}
     {result?.ok && result.warnings.length > 0 && <p class="design-status" role="alert">{result.warnings.join(' ')}</p>}
-    <div class="design-workspace"><div class="design-canvas"><CanvasView key={previewVersion} source={source} cache={cache} onSelect={setSelection} /></div>
-      <EditorPanel app={app} api={api} source={source} selection={selection} revision={revision} disabled={busy || building} onApplied={edited} />
+    <div class="design-workspace"><div class="design-canvas"><CanvasView key={previewVersion} source={source} cache={cache} onSelect={setSelection} />
+      {!revision && <div class="design-empty">Import your pages to start designing.</div>}
+    </div>
+      <EditorPanel app={app} api={api} ws={ws} source={source} selection={selection} revision={revision} disabled={busy || building} onApplied={edited} />
     </div>
   </div>;
 }

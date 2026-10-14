@@ -17,3 +17,6 @@ export interface DesignTarget {
 export interface DesignSelection { revision: string; targets: DesignTarget[]; selection: NodeSelection }
 export interface DesignProposal { id: string; revision: string; descriptions: string[]; manifest: RenderManifest | null; warnings: string[] }
 export type DesignEditResult = { mode: 'applied'; revision: string; warnings: string[] } | { mode: 'preview'; proposal: DesignProposal };
+export interface DesignMessage { id: number; app: string; kind: 'user' | 'assistant' | 'error'; text: string; at: number }
+export interface DesignChatState { running: boolean; messages: DesignMessage[] }
+export interface DesignChatResult { ok: boolean; text: string; edit: DesignEditResult | null; error?: string }

@@ -23,6 +23,27 @@ test('authenticated import renders pages, reuses baseline and preserves design o
   expect((await (await page.request.get('/api/apps/demo/design')).json()).pages).toHaveLength(1);
 });
 
+test('Design chat streams a proposal, persists messages and waits for Apply', async ({ page }) => {
+  await page.goto('/');
+  await page.getByTestId('passphrase').fill('hub-dev-passphrase');
+  await page.getByTestId('login-submit').click();
+  await page.getByTestId('app-demo').click();
+  await page.getByTestId('tab-design').click();
+  await page.getByRole('button', { name: 'Import pages' }).click();
+  await expect(page.getByRole('status')).toContainText('Imported');
+  const before = (await (await page.request.get('/api/apps/demo/design')).json()).pending;
+  await page.getByLabel('Design request', { exact: true }).fill('Make all buttons purple');
+  await page.getByRole('button', { name: 'Send design request', exact: true }).click();
+  await expect(page.getByRole('log', { name: 'Design messages' })).toContainText('Tap Apply to change it.');
+  await expect(page.getByRole('region', { name: 'Edit preview' })).toBeVisible();
+  expect((await (await page.request.get('/api/apps/demo/design')).json()).pending).toBe(before);
+  await page.getByRole('button', { name: 'Apply changes', exact: true }).click();
+  await expect(page.getByRole('region', { name: 'Edit preview' })).toHaveCount(0);
+  expect((await (await page.request.get('/api/apps/demo/design')).json()).pending).toBe(before + 1);
+  await page.reload();
+  await expect(page.getByRole('log', { name: 'Design messages' })).toContainText('Make all buttons purple');
+});
+
 test('tap editing supports immediate instance edits, undo/redo and shared previews before Apply', async ({ page }) => {
   await page.goto('/');
   await page.getByTestId('passphrase').fill('hub-dev-passphrase');
@@ -31,6 +52,7 @@ test('tap editing supports immediate instance edits, undo/redo and shared previe
   await page.getByTestId('tab-design').click();
   await page.getByRole('button', { name: 'Import pages' }).click();
   await expect(page.getByRole('status')).toContainText('Imported');
+  const initialPending = (await (await page.request.get('/api/apps/demo/design')).json()).pending;
   const selectButton = async () => {
     const manifest = await (await page.request.get('/api/apps/demo/render/manifest.json')).json();
     const boxes = await (await page.request.get(`/api/apps/demo/render/hitmaps/${manifest.pages[0].renders.base.hash}.json`)).json();
@@ -48,12 +70,12 @@ test('tap editing supports immediate instance edits, undo/redo and shared previe
   await page.getByLabel('Value (Desktop)', { exact: true }).fill('red');
   await page.getByRole('button', { name: 'Set style', exact: true }).click();
   await expect(page.getByRole('status')).toContainText('Design updated.');
-  expect((await (await page.request.get('/api/apps/demo/design')).json()).pending).toBe(1);
+  expect((await (await page.request.get('/api/apps/demo/design')).json()).pending).toBe(initialPending + 1);
   await page.getByRole('button', { name: 'Undo', exact: true }).click();
-  await expect.poll(async () => (await (await page.request.get('/api/apps/demo/design')).json()).pending).toBe(0);
+  await expect.poll(async () => (await (await page.request.get('/api/apps/demo/design')).json()).pending).toBe(initialPending);
   await expect(page.getByRole('button', { name: 'Redo', exact: true })).toBeEnabled();
   await page.getByRole('button', { name: 'Redo', exact: true }).click();
-  await expect.poll(async () => (await (await page.request.get('/api/apps/demo/design')).json()).pending).toBe(1);
+  await expect.poll(async () => (await (await page.request.get('/api/apps/demo/design')).json()).pending).toBe(initialPending + 1);
   await expect(page.getByRole('button', { name: 'Undo', exact: true })).toBeEnabled();
   await selectButton();
   await page.getByRole('combobox', { name: 'Edit target' }).selectOption({ label: 'Shared component · button' });
@@ -61,9 +83,9 @@ test('tap editing supports immediate instance edits, undo/redo and shared previe
   const before = await (await page.request.get('/api/apps/demo/render/manifest.json')).text();
   await page.getByRole('button', { name: 'Set style', exact: true }).click();
   await expect(page.getByRole('region', { name: 'Edit preview' })).toBeVisible();
-  expect((await (await page.request.get('/api/apps/demo/design')).json()).pending).toBe(1);
+  expect((await (await page.request.get('/api/apps/demo/design')).json()).pending).toBe(initialPending + 1);
   expect(await (await page.request.get('/api/apps/demo/render/manifest.json')).text()).toBe(before);
   await page.getByRole('button', { name: 'Apply changes', exact: true }).click();
   await expect(page.getByRole('region', { name: 'Edit preview' })).toHaveCount(0);
-  expect((await (await page.request.get('/api/apps/demo/design')).json()).pending).toBe(2);
+  expect((await (await page.request.get('/api/apps/demo/design')).json()).pending).toBe(initialPending + 2);
 });

@@ -9,6 +9,7 @@ import type {
   TaskResponse,
   ImportRequest, ImportResponse, DesignSummary,
   NodeSelection, DesignSelection, DesignEditResult,
+  DesignChatState, DesignChatResult,
 } from '@hub/protocol';
 
 /** A non-OK API response. `message` is the server's `error` text when it sent one. */
@@ -116,6 +117,11 @@ export class ApiClient {
   designHistory(app: string, revision: string, action: 'undo' | 'redo'): Promise<DesignEditResult> {
     return this.json(`${appPath(app)}/design/history`, { method: 'POST', body: { revision, action } });
   }
+  designChat(app: string): Promise<DesignChatState> { return this.json(`${appPath(app)}/design/chat`); }
+  sendDesign(app: string, text: string, selection?: NodeSelection): Promise<DesignChatResult> {
+    return this.json(`${appPath(app)}/design/chat`, { method: 'POST', body: { text, selection } });
+  }
+  stopDesign(app: string): Promise<StopResponse> { return this.json(`${appPath(app)}/design/chat/stop`, { method: 'POST' }); }
 
   buildState(app: string, after?: number): Promise<BuildState> {
     const query = after === undefined ? '' : `?after=${after}`;

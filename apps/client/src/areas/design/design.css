@@ -13,4 +13,11 @@
 .design-editor h2 { font-size: 16px; }
 .design-editor p, .design-editor li { font-size: 13px; line-height: 1.5; }
 .design-preview-canvas { position: relative; height: 300px; margin: 12px 0; }
-@media (max-width: 760px) { .design-workspace { flex-direction: column; overflow: auto; } .design-canvas { min-height: 360px; } .design-editor { width: auto; max-height: 320px; border-left: 0; border-top: 1px solid #ddd; } }
+@media (max-width: 1000px) { .design-workspace { flex-direction: column; overflow: auto; } .design-canvas { min-height: 360px; } .design-editor { width: auto; max-height: 320px; border-left: 0; border-top: 1px solid #ddd; } }
+.design-empty { position: absolute; inset: 0; display: grid; place-items: center; background: #f1f3f4; color: #5f6368; pointer-events: none; padding: 24px; text-align: center; }
+.design-chat { border-top: 1px solid #ddd; margin-top: 16px; padding-top: 12px; }
+.design-chat-messages { max-height: 240px; overflow: auto; }
+.design-message { white-space: pre-wrap; overflow-wrap: anywhere; }
+.design-message-user { font-weight: 600; }
+.design-message-error { color: #a21d27; }
+.design-chat textarea { box-sizing: border-box; width: 100%; min-height: 96px; font: inherit; padding: 8px; border: 1px solid #aaa; border-radius: 6px; }

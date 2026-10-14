@@ -5,15 +5,18 @@ import type { ApiClient } from '../../net/api.js';
 import { CanvasView } from '../../canvas/index.js';
 import { createNullCache } from '../../canvas/cache.js';
 import type { TileSource } from '../../canvas/source.js';
+import type { WsClient } from '../../net/ws.js';
+import { ChatPanel } from './ChatPanel.js';
 
-interface Props { app: string; api: ApiClient; source: TileSource; selection: NodeSelection | null; revision: string | null; disabled: boolean; onApplied: (revision: string, warnings: string[]) => void }
-export function EditorPanel({ app, api, source, selection, revision, disabled, onApplied }: Props): JSX.Element {
+interface Props { app: string; api: ApiClient; ws: WsClient; source: TileSource; selection: NodeSelection | null; revision: string | null; disabled: boolean; onApplied: (revision: string, warnings: string[]) => void }
+export function EditorPanel({ app, api, ws, source, selection, revision, disabled, onApplied }: Props): JSX.Element {
   const [info, setInfo] = useState<DesignSelection | null>(null);
   const [targetId, setTargetId] = useState('');
   const [property, setProperty] = useState('color');
   const [value, setValue] = useState('');
   const [text, setText] = useState('');
   const [busy, setBusy] = useState(false);
+  const [chatBusy, setChatBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [proposal, setProposal] = useState<DesignProposal | null>(null);
   const previewCache = useMemo(() => createNullCache(), []);
@@ -41,7 +44,7 @@ export function EditorPanel({ app, api, source, selection, revision, disabled, o
     finally { setBusy(false); }
   };
   const edit = (ops: unknown[]) => { if (info) void action(() => api.editDesign(app, info.revision, ops, info.selection)); };
-  const locked = disabled || busy;
+  const locked = disabled || busy || chatBusy;
   return <section class="design-editor" aria-label="Element editor">
     <div class="design-editor-actions">
       <button class="shell-button" disabled={locked || !revision} onClick={() => revision && void action(() => api.designHistory(app, revision, 'undo'))}>Undo</button>
@@ -75,5 +78,6 @@ export function EditorPanel({ app, api, source, selection, revision, disabled, o
       <button class="shell-button" disabled={locked} onClick={() => { void api.cancelDesign(app, proposal.id).then(() => setProposal(null)).catch((error) => setError(String(error))); }}>Cancel preview</button>
     </div>}
     {error && <p role="alert">{error}</p>}
+    <ChatPanel app={app} api={api} ws={ws} selection={selection} disabled={disabled || busy} onResult={acceptResult} onBusy={setChatBusy} />
   </section>;
 }

@@ -19,7 +19,7 @@ test('parseClientMsg accepts ping only', () => {
 });
 
 test('lists every server message type', () => {
-  expect(SERVER_MSG_TYPES).toEqual(['render.ready', 'build.message', 'build.task', 'pong']);
+  expect(SERVER_MSG_TYPES).toEqual(['render.ready', 'build.message', 'build.task', 'design.message', 'design.status', 'pong']);
 });
 
 test('open task statuses', () => {
