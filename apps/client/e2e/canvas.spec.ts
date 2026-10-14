@@ -51,7 +51,7 @@ function boxOf(boxes: readonly E2EBox[], nodeId: string): E2EBox {
 }
 
 test('shows 50 pages x 3 devices and draws tiles', async ({ page }) => {
-  await page.goto('/?debug=1');
+  await page.goto('/harness.html?debug=1');
   await ready(page);
   expect(await frameCount(page)).toBe(150);
   // The paint that follows the last tile load runs after idle() resolves, so poll.
@@ -60,7 +60,7 @@ test('shows 50 pages x 3 devices and draws tiles', async ({ page }) => {
 });
 
 test('tap selects the node under the pointer', async ({ page }) => {
-  await page.goto('/?debug=1');
+  await page.goto('/harness.html?debug=1');
   await ready(page);
   const cam: Camera = { x: -40, y: -40, scale: 0.5 };
   await setCamera(page, cam);
@@ -73,7 +73,7 @@ test('tap selects the node under the pointer', async ({ page }) => {
 });
 
 test('drag in select tool selects a box', async ({ page }) => {
-  await page.goto('/?debug=1');
+  await page.goto('/harness.html?debug=1');
   await ready(page);
   const cam: Camera = { x: -40, y: -40, scale: 0.5 };
   await setCamera(page, cam);
@@ -90,7 +90,7 @@ test('drag in select tool selects a box', async ({ page }) => {
 });
 
 test('device toggle hides frames', async ({ page }) => {
-  await page.goto('/?debug=1');
+  await page.goto('/harness.html?debug=1');
   await ready(page);
   await page.getByTestId('device-mobile').click();
   await expect.poll(() => frameCount(page)).toBe(100);
@@ -99,7 +99,7 @@ test('device toggle hides frames', async ({ page }) => {
 });
 
 test('reload serves visible tiles from IndexedDB', async ({ page }) => {
-  await page.goto('/?debug=1');
+  await page.goto('/harness.html?debug=1');
   await ready(page);
   const tileRequests: string[] = [];
   page.on('request', (req) => {
