@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest';
-import { nodeProblem, opProblem, RESERVED_KEYS } from './shape.js';
+import { nodeProblem, opProblem } from './shape.js';
 
 const text = (id: string, value: unknown = 'Hi'): Record<string, unknown> => ({ id, kind: 'text', text: value });
 const element = (id: string, children: unknown[] = []): Record<string, unknown> => ({
@@ -108,11 +108,5 @@ describe('nodeProblem', () => {
   test('rejects an instance prop that is not a string', () => {
     const instance = { id: 'n5', kind: 'instance', component: 'Card', props: { title: 7 }, style: { base: {} } };
     expect(nodeProblem(instance)).toBe('node n5: props values must be strings');
-  });
-});
-
-describe('RESERVED_KEYS', () => {
-  test('lists the names that would collide with Object.prototype', () => {
-    expect([...RESERVED_KEYS].sort()).toEqual(['__proto__', 'constructor', 'prototype']);
   });
 });

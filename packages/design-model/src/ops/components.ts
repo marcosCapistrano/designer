@@ -1,4 +1,4 @@
-import { resolveProps, substituteProps } from '../props.js';
+import { propAttrIssue, resolveProps, substituteProps, withProp } from '../props.js';
 import { validateNodeId } from '../rules.js';
 import { allIds, depthOf, heightOf } from '../tree.js';
 import type {
@@ -135,8 +135,12 @@ export const componentHandlers: HandlerMap = {
       if (node.kind !== 'instance') return `Node ${op.node} is not an instance`;
       const def = ownValue(doc.components, node.component);
       if (def === undefined) return `Component ${node.component} not found`;
-      if (Object.hasOwn(def.props, op.prop)) return null;
-      return `Component ${node.component} has no prop "${op.prop}"`;
+      if (!Object.hasOwn(def.props, op.prop)) {
+        return `Component ${node.component} has no prop "${op.prop}"`;
+      }
+      // A value that ends up in an attribute must pass the attribute rules, with the other props as they are.
+      const props = withProp(node.props, op.prop, op.value);
+      return propAttrIssue(def, resolveProps(def, { ...node, props }));
     },
     mutate(draft, op) {
       const inst = requireInstance(draft, op.node);

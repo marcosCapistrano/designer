@@ -266,6 +266,123 @@ describe('encodeOpLog and decodeOpLog', () => {
   });
 });
 
+// I1/N1: a file that is valid JSON but the wrong shape returns an error, and never throws.
+describe('parseDoc entry shapes', () => {
+  function cardWith(patch: Record<string, unknown>): Record<string, string> {
+    const files = serializeDoc(sampleDoc());
+    files['components/Card.json'] = canonicalStringify({ ...sampleDoc().components['Card'], ...patch });
+    return files;
+  }
+
+  function cardWithout(field: string): Record<string, string> {
+    const files = serializeDoc(sampleDoc());
+    const { [field]: _removed, ...rest } = { ...sampleDoc().components['Card'] } as Record<string, unknown>;
+    files['components/Card.json'] = canonicalStringify(rest);
+    return files;
+  }
+
+  function homeWith(patch: Record<string, unknown>): Record<string, string> {
+    const files = serializeDoc(sampleDoc());
+    files['pages/home.json'] = canonicalStringify({ ...sampleDoc().pages['home'], ...patch });
+    return files;
+  }
+
+  function withTokens(tokens: unknown): Record<string, string> {
+    const files = serializeDoc(sampleDoc());
+    files['tokens.json'] = canonicalStringify(tokens);
+    return files;
+  }
+
+  test('a component without a props object is an error', () => {
+    expect(parseDoc(cardWithout('props'))).toEqual({
+      ok: false,
+      error: 'components/Card.json: props must be an object',
+    });
+  });
+
+  test.each<[string, unknown]>([
+    ['null', null],
+    ['an array', []],
+    ['a string', 'title'],
+    ['a number', 3],
+  ])('a component whose props is %s is an error', (_label, props) => {
+    expect(parseDoc(cardWith({ props }))).toEqual({
+      ok: false,
+      error: 'components/Card.json: props must be an object',
+    });
+  });
+
+  test.each<[string, unknown]>([
+    ['null', null],
+    ['a string', 'x'],
+    ['an object without default', {}],
+    ['a default that is a number', { default: 3 }],
+    ['a default that is null', { default: null }],
+    ['an array', ['x']],
+  ])('a component prop declared as %s is an error', (_label, decl) => {
+    expect(parseDoc(cardWith({ props: { title: decl } }))).toEqual({
+      ok: false,
+      error: 'components/Card.json: props.title must be an object with a string default',
+    });
+  });
+
+  test.each<[string, unknown, string]>([
+    ['a null group', { color: null }, 'tokens.json: token group "color" must be an object of strings'],
+    ['an array group', { color: [] }, 'tokens.json: token group "color" must be an object of strings'],
+    ['a string group', { color: 'red' }, 'tokens.json: token group "color" must be an object of strings'],
+    ['a number value', { color: { primary: 3 } }, 'tokens.json: token group "color" must be an object of strings'],
+    ['a null value', { color: { primary: null } }, 'tokens.json: token group "color" must be an object of strings'],
+  ])('tokens with %s is an error', (_label, tokens, error) => {
+    expect(parseDoc(withTokens(tokens))).toEqual({ ok: false, error });
+  });
+
+  test('tokens that are an array is an error', () => {
+    expect(parseDoc(withTokens([]))).toEqual({ ok: false, error: 'tokens.json: expected an object' });
+  });
+
+  test.each<[string, unknown]>([
+    ['a number', 3],
+    ['null', null],
+    ['an object', {}],
+  ])('a page whose name is %s is an error', (_label, name) => {
+    expect(parseDoc(homeWith({ name }))).toEqual({
+      ok: false,
+      error: 'pages/home.json: name must be a string',
+    });
+  });
+
+  test.each<[string, unknown]>([
+    ['a number', 3],
+    ['null', null],
+    ['an array', ['/']],
+  ])('a page whose route is %s is an error', (_label, route) => {
+    expect(parseDoc(homeWith({ route }))).toEqual({
+      ok: false,
+      error: 'pages/home.json: route must be a string',
+    });
+  });
+
+  test('a page without a name or a route is an error', () => {
+    const files = serializeDoc(sampleDoc());
+    files['pages/home.json'] = canonicalStringify({ id: 'home', root: sampleDoc().pages['home']?.root });
+    expect(parseDoc(files)).toEqual({ ok: false, error: 'pages/home.json: name must be a string' });
+  });
+
+  test.each<[string, unknown]>([['null', null], ['an array', []], ['a string', 'files']])(
+    'a file set that is %s is an error',
+    (_label, files) => {
+      const result = parseDoc(files as Record<string, string>);
+      expect(result.ok).toBe(false);
+    },
+  );
+
+  test('a file whose content is not a string is an error', () => {
+    const files = serializeDoc(sampleDoc()) as Record<string, unknown>;
+    files['pages/home.json'] = 42;
+    expect(parseDoc(files as Record<string, string>).ok).toBe(false);
+  });
+});
+
 describe('parseDoc depth', () => {
   test('rejects a page tree deeper than 64 levels', () => {
     const files = filesWithHomeRoot(chain(65));

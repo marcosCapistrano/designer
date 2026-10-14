@@ -1,4 +1,5 @@
 import { validateStyle } from '../css.js';
+import { propAttrIssue, resolveProps } from '../props.js';
 import {
   validateAttrValue,
   validateNodeId,
@@ -69,7 +70,7 @@ function checkNode(doc: DesignDoc, node: DesignNode, state: IdState): string | n
     for (const prop of Object.keys(node.props)) {
       if (!Object.hasOwn(def.props, prop)) return `Component ${node.component} has no prop "${prop}"`;
     }
-    return checkStyle(node.style);
+    return propAttrIssue(def, resolveProps(def, node)) ?? checkStyle(node.style);
   }
 
   const tagProblem = validateTag(node.tag);

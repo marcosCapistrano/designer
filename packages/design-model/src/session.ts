@@ -18,10 +18,12 @@ function refuseOps(ops: Op[]): { index: number; error: string } | null {
   return null;
 }
 
-// Runs the ops in order on a copy of doc. The first failing op stops the run, and the input is untouched.
+// Runs the ops in order. The first failing op stops the run, and the input is untouched: applyOpInternal
+// copies the doc before it edits it, so the run does not copy it again. Only an empty batch has no op to make
+// that copy, so it is made here, and the doc returned is never the one passed in.
 // Callers check the ops with refuseOps first, except undo and redo, which run restore ops.
 function run(doc: DesignDoc, ops: Op[]): Run {
-  let current = structuredClone(doc);
+  let current = ops.length === 0 ? structuredClone(doc) : doc;
   const inverses: Op[] = [];
   for (const [index, op] of ops.entries()) {
     const result = applyOpInternal(current, op);
@@ -68,7 +70,39 @@ interface Batch {
   inverse: Op[];
 }
 
-// Holds the current doc and its history. `doc` is shared: treat it as read-only.
+// Freezes the value and everything in it, and returns it. A doc is plain JSON data, so walking the
+// object values reaches all of it.
+function deepFreeze<T>(value: T): T {
+  if (typeof value === 'object' && value !== null && !Object.isFrozen(value)) {
+    Object.freeze(value);
+    for (const child of Object.values(value)) deepFreeze(child);
+  }
+  return value;
+}
+
+// The batches already applied, checked like any other ops (a restore op is refused) and copied, or
+// why they cannot be loaded.
+function loadChanges(changes: unknown): Result<Op[][]> {
+  const refuse = (reason: string): Result<Op[][]> => ({ ok: false, error: `DesignSession: ${reason}` });
+  if (!Array.isArray(changes)) return refuse('changes must be an array of batches');
+  for (const [b, batch] of changes.entries()) {
+    if (!Array.isArray(batch)) return refuse(`changes[${b}] must be an array of ops`);
+    for (const [i, op] of batch.entries()) {
+      const problem = opProblem(op);
+      if (problem !== null) return refuse(`changes[${b}][${i}]: ${problem}`);
+    }
+  }
+  try {
+    return { ok: true, value: structuredClone(changes) as Op[][] };
+  } catch {
+    // A well-formed op can still carry an extra field that cannot be copied, such as a function.
+    return refuse('changes must be plain data');
+  }
+}
+
+// Holds the current doc and its history. The doc is frozen: callers read it, and a change to it throws
+// a TypeError, so it can be handed out without a copy. Each edit makes a new doc and leaves the old
+// one as it was. Docs from preview and applyBatch are the caller's own and are not frozen.
 export class DesignSession {
   #doc: DesignDoc;
   readonly #loaded: Op[][];
@@ -76,9 +110,22 @@ export class DesignSession {
   #redo: Batch[] = [];
 
   // `doc` already includes the `changes` batches, which are part of the changelist but cannot be undone.
+  // A constructor cannot return a Result, so it throws a TypeError when `changes` is not an array of
+  // batches of well-formed ops, or holds a restore op. DesignSession.create reports that as an error value.
   constructor(doc: DesignDoc, changes: Op[][] = []) {
-    this.#doc = structuredClone(doc);
-    this.#loaded = structuredClone(changes);
+    const loaded = loadChanges(changes);
+    if (!loaded.ok) throw new TypeError(loaded.error);
+    this.#doc = deepFreeze(structuredClone(doc));
+    this.#loaded = loaded.value;
+  }
+
+  // The same as the constructor, except that bad `changes` come back as an error and nothing is thrown.
+  static create(doc: DesignDoc, changes: Op[][] = []): Result<DesignSession> {
+    try {
+      return { ok: true, value: new DesignSession(doc, changes) };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : 'DesignSession: could not be created' };
+    }
   }
 
   get doc(): DesignDoc {
@@ -94,7 +141,7 @@ export class DesignSession {
     if (!result.ok) return { ok: false, index: result.index, error: result.error };
     this.#undo.push({ ops: structuredClone(ops), inverse: result.inverse });
     this.#redo = [];
-    this.#doc = result.doc;
+    this.#doc = deepFreeze(result.doc);
     return { ok: true, doc: this.#doc };
   }
 
@@ -115,7 +162,7 @@ export class DesignSession {
     if (!result.ok) throw new Error(`undo failed: op ${result.index}: ${result.error}`);
     this.#undo.pop();
     this.#redo.push(batch);
-    this.#doc = result.doc;
+    this.#doc = deepFreeze(result.doc);
     return true;
   }
 
@@ -127,7 +174,7 @@ export class DesignSession {
     if (!result.ok) throw new Error(`redo failed: op ${result.index}: ${result.error}`);
     this.#redo.pop();
     this.#undo.push(batch);
-    this.#doc = result.doc;
+    this.#doc = deepFreeze(result.doc);
     return true;
   }
 

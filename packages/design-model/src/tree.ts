@@ -1,3 +1,4 @@
+import { MAX_SEQUENCE } from './rules.js';
 import type { DesignDoc, DesignNode, ElementNode } from './types.js';
 
 export type Container = { kind: 'page'; key: string } | { kind: 'component'; key: string };
@@ -109,8 +110,6 @@ export function nextSeq(doc: DesignDoc): number {
 }
 
 const MAX_ALLOC = 1000;
-// The largest sequence number a node id may carry. Matches MAX_SEQUENCE in rules.ts.
-const MAX_SEQUENCE = 999999999999999;
 
 // Does not change doc. The caller stores the new seq when it applies the op.
 export function allocIds(doc: DesignDoc, count: number): string[] {

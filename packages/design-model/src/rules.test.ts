@@ -73,6 +73,7 @@ describe('DENIED_TAGS and VOID_TAGS', () => {
     expect(DENIED_TAGS).toEqual(new Set([
       'script', 'style', 'iframe', 'frame', 'frameset', 'object', 'embed', 'applet', 'base', 'meta',
       'link', 'noscript', 'template', 'slot', 'portal', 'title', 'head', 'html', 'body',
+      'xmp', 'plaintext', 'noembed', 'noframes', 'listing',
     ]));
   });
 
@@ -92,7 +93,8 @@ describe('validateTag', () => {
     expect(validateTag('Div')).toBe('Invalid tag "Div"');
   });
 
-  test.each(['script', 'style', 'iframe', 'template', 'title', 'html', 'body'])('denies %s', (tag) => {
+  // These switch the parser into a raw-text mode or hold fallback markup that is parsed by other rules.
+  test.each(['script', 'style', 'iframe', 'template', 'title', 'html', 'body', 'xmp', 'plaintext', 'noembed', 'noframes', 'listing'])('denies %s', (tag) => {
     expect(validateTag(tag)).toBe(`Tag "${tag}" is not allowed`);
   });
 });

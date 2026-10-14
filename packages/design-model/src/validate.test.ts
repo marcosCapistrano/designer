@@ -197,6 +197,87 @@ describe('validateDoc', () => {
   });
 });
 
+// Ruling 21: a component must not contain itself, directly or through other components.
+describe('validateDoc component cycles', () => {
+  function inst(id: string, component: string): InstanceNode {
+    return { id, kind: 'instance', component, props: {}, style: { base: {} } };
+  }
+
+  function component(name: string, rootId: string, children: DesignNode[]): DesignDoc['components'][string] {
+    return {
+      name,
+      props: {},
+      root: { id: rootId, kind: 'element', tag: 'div', attrs: {}, style: { base: {} }, children },
+    };
+  }
+
+  test('rejects a component that contains an instance of itself', () => {
+    const doc = mutableDoc();
+    doc.components['Loop'] = component('Loop', 'n30', [inst('n31', 'Loop')]);
+    expect(validateDoc(doc)).toBe('component Loop: Component cycle at Loop');
+  });
+
+  test('rejects two components that contain each other', () => {
+    const doc = mutableDoc();
+    doc.components['Aa'] = component('Aa', 'n30', [inst('n31', 'Bb')]);
+    doc.components['Bb'] = component('Bb', 'n32', [inst('n33', 'Aa')]);
+    expect(validateDoc(doc)).toBe('component Aa: Component cycle at Aa');
+  });
+
+  test('rejects a cycle of three, found from the component that starts it', () => {
+    const doc = mutableDoc();
+    doc.components['Aa'] = component('Aa', 'n30', [component('x', 'n31', [inst('n32', 'Bb')]).root]);
+    doc.components['Bb'] = component('Bb', 'n33', [inst('n34', 'Cc')]);
+    doc.components['Cc'] = component('Cc', 'n35', [inst('n36', 'Aa')]);
+    expect(validateDoc(doc)).toBe('component Aa: Component cycle at Aa');
+  });
+
+  test('a page that uses a cyclic component is refused', () => {
+    const doc = mutableDoc();
+    doc.components['Loop'] = component('Loop', 'n30', [inst('n31', 'Loop')]);
+    element(doc, 'n2').children.push(inst('n32', 'Loop'));
+    expect(validateDoc(doc)).toContain('Component cycle at Loop');
+  });
+
+  test('parseDoc refuses a cyclic component', () => {
+    const doc = mutableDoc();
+    doc.components['Aa'] = component('Aa', 'n30', [inst('n31', 'Bb')]);
+    doc.components['Bb'] = component('Bb', 'n32', [inst('n33', 'Aa')]);
+    expect(parseDoc(serializeDoc(doc))).toEqual({ ok: false, error: 'component Aa: Component cycle at Aa' });
+  });
+
+  test('accepts components that share a component without a cycle', () => {
+    const doc = mutableDoc();
+    doc.components['Leaf'] = component('Leaf', 'n30', []);
+    doc.components['Left'] = component('Left', 'n31', [inst('n32', 'Leaf')]);
+    doc.components['Right'] = component('Right', 'n33', [inst('n34', 'Leaf')]);
+    doc.components['Top'] = component('Top', 'n35', [inst('n36', 'Left'), inst('n37', 'Right')]);
+    expect(validateDoc(doc)).toBeNull();
+  });
+});
+
+// I1/N1: validateDoc reports a malformed header field or token group, and never throws on it.
+describe('validateDoc shapes', () => {
+  function asDoc(patch: (doc: Record<string, any>) => void): DesignDoc {
+    const doc: Record<string, any> = mutableDoc();
+    patch(doc);
+    return doc as DesignDoc;
+  }
+
+  test.each<[string, (doc: Record<string, any>) => void, string]>([
+    ['a component without props', (d) => { delete d['components'].Card.props; }, 'component Card: props must be an object'],
+    ['a component with null props', (d) => { d['components'].Card.props = null; }, 'component Card: props must be an object'],
+    ['a prop declared as null', (d) => { d['components'].Card.props = { title: null }; }, 'component Card: props.title must be an object with a string default'],
+    ['a prop without a default', (d) => { d['components'].Card.props = { title: {} }; }, 'component Card: props.title must be an object with a string default'],
+    ['a null token group', (d) => { d['tokens'] = { color: null }; }, 'tokens: token group "color" must be an object of strings'],
+    ['a non-string token value', (d) => { d['tokens'] = { color: { primary: 3 } }; }, 'tokens: token group "color" must be an object of strings'],
+    ['a page name that is a number', (d) => { d['pages'].home.name = 3; }, 'page home: name must be a string'],
+    ['a page route that is missing', (d) => { delete d['pages'].home.route; }, 'page home: route must be a string'],
+  ])('returns an error for %s', (_label, patch, error) => {
+    expect(validateDoc(asDoc(patch))).toBe(error);
+  });
+});
+
 describe('parseDoc uses validateDoc', () => {
   test('rejects a doc that validateDoc rejects, with the same message', () => {
     const doc = mutableDoc();
