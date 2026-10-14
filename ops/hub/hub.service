@@ -23,6 +23,9 @@ TimeoutStopSec=30
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full
+# The hub's own code. Nothing writes there while the hub runs (the update step runs outside this unit), so a
+# Claude run, which has the hub's user id, cannot edit the guard and have it load on the next restart.
+ReadOnlyPaths=/opt/hub
 
 [Install]
 WantedBy=multi-user.target
