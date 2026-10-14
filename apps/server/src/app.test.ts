@@ -14,6 +14,7 @@ import { createApp } from './app.js';
 import { BuildError } from './build/ci.js';
 import type { BuildService } from './build/service.js';
 import type { SyncService } from './sync/service.js';
+import type { DesignChat } from './design/chat.js';
 import { openDb, type Db } from './db.js';
 
 const PASS = 'correct horse battery staple';
@@ -54,6 +55,7 @@ const build = {
   close: vi.fn(),
 };
 const sync = { summary: vi.fn(), import: vi.fn(), retryPreview: vi.fn() };
+const designChat = { state: vi.fn(), send: vi.fn(), stop: vi.fn() };
 
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), 'hub-app-'));
@@ -75,6 +77,9 @@ beforeEach(() => {
   sync.summary.mockReset().mockResolvedValue({ imported: false, revision: null, pages: [], pending: 0 });
   sync.import.mockReset().mockResolvedValue({ ok: false, kind: 'source', diagnostics: [{ file: '', message: 'No routes' }] });
   sync.retryPreview.mockReset().mockResolvedValue({ manifest: null, warnings: [] });
+  designChat.state.mockReset().mockResolvedValue({ running: false, messages: [] });
+  designChat.send.mockReset().mockResolvedValue({ ok: true, text: 'Read the design.', edit: null });
+  designChat.stop.mockReset().mockReturnValue(false);
 
   db = openDb(':memory:');
   app = createApp({
@@ -84,6 +89,7 @@ beforeEach(() => {
     registry: new AppRegistry(appsDir),
     build: build as unknown as BuildService,
     sync: sync as unknown as SyncService,
+    designChat: designChat as unknown as DesignChat,
     dataDir,
     clientDir,
   });
@@ -701,5 +707,15 @@ describe('hub app', () => {
     expect(sync.import).not.toHaveBeenCalled();
     expect((await post('/api/apps/demo/design/import', headers, { mode: 'next' })).status).toBe(200);
     expect(sync.import).toHaveBeenCalledWith('demo', { mode: 'next' });
+  });
+  it('requires authentication for Design chat and validates requests before invoking Claude', async () => {
+    expect((await app.request('/api/apps/demo/design/chat')).status).toBe(401);
+    expect((await post('/api/apps/demo/design/chat', {}, { text: 'Change' })).status).toBe(401);
+    expect(designChat.send).not.toHaveBeenCalled();
+    const headers = await cookie();
+    expect((await post('/api/apps/demo/design/chat', headers, { text: 'Change', extra: true })).status).toBe(400);
+    expect(designChat.send).not.toHaveBeenCalled();
+    expect((await post('/api/apps/demo/design/chat', headers, { text: 'Change' })).status).toBe(200);
+    expect(designChat.send).toHaveBeenCalledWith('demo', 'Change', undefined);
   });
 });

@@ -27,12 +27,12 @@ export const GUARD_ERROR_REASON =
  * Denies a tool call when checkToolUse finds a reason. Runs on every PreToolUse. Fails closed: if the
  * check itself throws, the call is denied (a hook that throws would otherwise let the call through).
  */
-export function guardHook(cwd: string, check: typeof checkToolUse = checkToolUse): HookCallback {
+export function guardHook(cwd: string, check: typeof checkToolUse = checkToolUse, only?: readonly string[]): HookCallback {
   return async (input: HookInput): Promise<HookJSONOutput> => {
     if (input.hook_event_name !== 'PreToolUse') return {};
     let reason: string | null;
     try {
-      reason = check(cwd, input.tool_name, (input.tool_input ?? {}) as Record<string, unknown>);
+      reason = only && !only.includes(input.tool_name) ? 'This turn may use only the Hub design tools. File access, shell commands and other tools are disabled.' : check(cwd, input.tool_name, (input.tool_input ?? {}) as Record<string, unknown>);
     } catch {
       reason = GUARD_ERROR_REASON;
     }
@@ -54,14 +54,14 @@ export function buildQueryOptions(opts: RunOptions, ctx: RunnerContext): Options
     permissionMode: 'bypassPermissions', // full permissions inside the repo...
     allowDangerouslySkipPermissions: true,
     disallowedTools: [...DEPLOY_DENY_RULES], // ...but deploys are denied, even in bypass mode
-    hooks: { PreToolUse: [{ hooks: [guardHook(opts.cwd)] }] }, // no matcher: every tool call
+    hooks: { PreToolUse: [{ hooks: [guardHook(opts.cwd, checkToolUse, opts.restrictTools ? opts.allowedTools ?? [] : undefined)] }] }, // no matcher: every tool call
     canUseTool: async (toolName) => ({
       behavior: 'deny',
       message: `${toolName} needs a person's approval and the Hub cannot ask. Ask in your reply instead.`,
     }),
     allowedTools: opts.allowedTools ?? [],
     mcpServers: (opts.mcpServers ?? {}) as Options['mcpServers'],
-    settingSources: ['project'], // the app's CLAUDE.md and .claude/settings.json
+    settingSources: opts.restrictTools ? [] : ['project'], // restricted turns never load app hooks/settings
     systemPrompt: {
       type: 'preset',
       preset: 'claude_code',

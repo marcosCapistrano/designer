@@ -9,6 +9,8 @@ export interface RunOptions {
   resume?: string;
   mcpServers?: Record<string, unknown>;
   allowedTools?: string[];
+  /** Design/preview turns may use only these exact tools; they cannot execute app code. */
+  restrictTools?: boolean;
   systemPrompt?: string; // appended to Claude Code's own system prompt
   signal?: AbortSignal; // abort -> done { ok: false, error: 'aborted' }
 }

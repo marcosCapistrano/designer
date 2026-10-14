@@ -55,6 +55,15 @@ function fakeQuery(body: (signal: AbortSignal) => AsyncIterable<SDKMessage>): ty
 }
 
 describe('buildQueryOptions', () => {
+  it('restricted turns refuse every tool outside the exact allowlist and do not load project settings', async () => {
+    const options = built({ restrictTools: true, allowedTools: ['mcp__design__design_get_page'] });
+    expect(options.settingSources).toEqual([]);
+    for (const name of ['Bash', 'Write', 'Read', 'Agent', 'mcp__other__run']) {
+      expect(await runHook(options, preToolUse(name, {}))).toMatchObject({ hookSpecificOutput: { permissionDecision: 'deny' } });
+    }
+    expect(await runHook(options, preToolUse('mcp__design__design_get_page', {}))).toEqual({});
+    expect(await runHook(built({ restrictTools: true }), preToolUse('Read', {}))).toMatchObject({ hookSpecificOutput: { permissionDecision: 'deny' } });
+  });
   it('options give full repo permissions but deny deploys', () => {
     const o = buildQueryOptions(
       { cwd: '/repo', prompt: 'x', resume: 's1', systemPrompt: 'extra' },

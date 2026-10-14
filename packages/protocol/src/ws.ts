@@ -1,12 +1,15 @@
 import type { BuildMessage, BuildTask } from './api.js';
 import type { RenderManifest } from './render.js';
+import type { DesignEditResult, DesignMessage } from './design.js';
 
 export interface RenderReadyMsg { type: 'render.ready'; app: string; manifest: RenderManifest }
 export interface BuildMessageMsg { type: 'build.message'; app: string; message: BuildMessage }
 export interface BuildTaskMsg { type: 'build.task'; app: string; task: BuildTask; running: boolean }
 export interface PongMsg { type: 'pong'; t: number }
+export interface DesignMessageMsg { type: 'design.message'; app: string; message: DesignMessage }
+export interface DesignStatusMsg { type: 'design.status'; app: string; running: boolean; edit?: DesignEditResult | null }
 /** Server → client. Plans 4 and 6 add variants here and to SERVER_MSG_TYPES. */
-export type ServerMsg = RenderReadyMsg | BuildMessageMsg | BuildTaskMsg | PongMsg;
+export type ServerMsg = RenderReadyMsg | BuildMessageMsg | BuildTaskMsg | DesignMessageMsg | DesignStatusMsg | PongMsg;
 
 /**
  * Every ServerMsg type, once. `satisfies Record<ServerMsg['type'], true>` makes the compiler reject a new
@@ -16,6 +19,8 @@ const SERVER_MSG_TYPE_SET = {
   'render.ready': true,
   'build.message': true,
   'build.task': true,
+  'design.message': true,
+  'design.status': true,
   pong: true,
 } satisfies Record<ServerMsg['type'], true>;
 export const SERVER_MSG_TYPES: readonly ServerMsg['type'][] = Object.keys(SERVER_MSG_TYPE_SET) as ServerMsg['type'][];

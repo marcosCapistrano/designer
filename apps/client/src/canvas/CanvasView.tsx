@@ -52,14 +52,14 @@ const TOOLS: ReadonlyArray<{ tool: Tool; label: string }> = [
 ];
 
 const TOOLBAR_STYLE =
-  'position:absolute;left:50%;bottom:12px;transform:translateX(-50%);display:flex;gap:8px;padding:6px;background:#fff;border-radius:10px;box-shadow:0 1px 4px rgba(0,0,0,.2)';
+  'position:absolute;left:50%;bottom:12px;transform:translateX(-50%);display:flex;flex-wrap:wrap;justify-content:center;width:max-content;max-width:calc(100% - 24px);gap:8px;padding:6px;background:#fff;border-radius:10px;box-shadow:0 1px 4px rgba(0,0,0,.2)';
 const ERROR_STYLE =
   'position:absolute;left:12px;top:12px;max-width:calc(100% - 24px);padding:8px 12px;background:#fff;border-radius:8px;color:#d93025;font-size:13px';
 
 function buttonStyle(pressed: boolean): string {
   return pressed
-    ? 'font:inherit;padding:6px 10px;border:1px solid #1a73e8;border-radius:6px;background:#e8f0fe;color:#1a73e8;cursor:pointer'
-    : 'font:inherit;padding:6px 10px;border:1px solid #dadce0;border-radius:6px;background:#fff;color:#202124;cursor:pointer';
+    ? 'font:inherit;min-height:44px;padding:6px 10px;border:1px solid #1a73e8;border-radius:6px;background:#e8f0fe;color:#1a73e8;cursor:pointer'
+    : 'font:inherit;min-height:44px;padding:6px 10px;border:1px solid #dadce0;border-radius:6px;background:#fff;color:#202124;cursor:pointer';
 }
 
 export function CanvasView({ source, cache, onSelect, debug = false }: CanvasViewProps): JSX.Element {

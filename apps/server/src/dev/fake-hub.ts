@@ -9,6 +9,7 @@ import { openRepo } from '../git/git.js';
 import { makeTestRepo, TEST_IDENTITY } from '../git/test-repo.js';
 import { FakeGitHub } from '../github/fake.js';
 import { startHub } from '../server.js';
+import type { DesignToolActions } from '../design/chat.js';
 
 // The app manifest of the spec's example, named after the demo app, with build steps that always pass.
 const DEMO_MANIFEST = {
@@ -58,6 +59,18 @@ async function main(): Promise<void> {
       ],
     ]),
     github: new FakeGitHub({ autoGreenAfter: 1 }),
+    designMcp: (actions) => ({ actions }),
+    designRunner: new FakeClaudeRunner([[
+      async (options) => {
+        const actions = (options.mcpServers!['design'] as { actions: DesignToolActions }).actions;
+        const found = await actions.find('button') as { id: string; kind: string }[];
+        const button = found.find((node) => node.kind === 'element');
+        if (!button) throw new Error('No imported button');
+        await actions.apply([{ op: 'setStyle', node: button.id, device: 'base', prop: 'color', value: 'purple' }]);
+      },
+      { type: 'text', text: 'Prepared a shared button-color preview. Tap Apply to change it.' },
+      { type: 'done', sessionId: 'fake-design-session', ok: true },
+    ]]),
     openRepo: (dir) => openRepo(dir, { identity: TEST_IDENTITY }),
     ciPollMs: 1000,
     clientDir: null,
