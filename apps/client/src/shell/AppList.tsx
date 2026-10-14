@@ -15,20 +15,6 @@ export interface AppListProps {
   ws: WsClient;
 }
 
-const PAGE_STYLE =
-  'box-sizing:border-box;height:100%;overflow:auto;padding:16px;background:#e9e9ec;color:#202124;font-family:system-ui,sans-serif';
-const HEADING_STYLE = 'margin:0 0 12px;font-size:22px;font-weight:600';
-const LIST_STYLE = 'list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:8px';
-const ROW_STYLE =
-  'display:flex;flex-direction:column;gap:6px;box-sizing:border-box;min-height:44px;padding:12px 16px;background:#fff;border-radius:10px;color:#202124;text-decoration:none;min-width:0';
-const NAME_STYLE = 'font-size:17px;font-weight:600;overflow-wrap:anywhere';
-const META_STYLE = 'display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px;font-size:13px;color:#5f6368';
-const BADGE_BASE = 'padding:2px 10px;border-radius:999px;font-weight:600;flex:0 0 auto';
-const BADGE_ADOPTED = `${BADGE_BASE};background:#e6f4ea;color:#137333`;
-const BADGE_NOT_ADOPTED = `${BADGE_BASE};background:#f1f3f4;color:#5f6368`;
-const NOTE_STYLE = 'margin:0;font-size:15px;color:#5f6368';
-const ERROR_STYLE = 'margin:0 0 12px;padding:8px 12px;background:#fff;border-radius:8px;color:#d93025;font-size:14px';
-
 /** The row's status text: 'Claude is working' while a run is active, else the latest build task's status. */
 function statusText(app: AppSummary): string {
   if (app.running) return 'Claude is working';
@@ -77,26 +63,26 @@ export function AppList({ api, ws }: AppListProps): JSX.Element {
   }, [api, ws]);
 
   return (
-    <section style={PAGE_STYLE}>
-      <h1 style={HEADING_STYLE}>Apps</h1>
+    <section class="app-list-page">
+      <h1 class="app-list-heading">Apps</h1>
       {error !== null && (
-        <p role="alert" data-testid="apps-error" style={ERROR_STYLE}>
+        <p role="alert" data-testid="apps-error" class="app-error">
           {error}
         </p>
       )}
-      <ul data-testid="app-list" style={LIST_STYLE}>
+      <ul data-testid="app-list" class="app-list">
         {(apps ?? []).map((app) => (
           <li key={app.name}>
             <a
               data-testid={`app-${app.name}`}
               href={formatRoute({ name: 'app', app: app.name, area: 'build' })}
-              style={ROW_STYLE}
+              class="app-row"
             >
-              <span style={NAME_STYLE}>{app.name}</span>
-              <span style={META_STYLE}>
+              <span class="app-name">{app.name}</span>
+              <span class="app-meta">
                 <span
                   data-testid={`badge-${app.name}`}
-                  style={app.adopted ? BADGE_ADOPTED : BADGE_NOT_ADOPTED}
+                  class={`app-badge ${app.adopted ? 'app-badge-adopted' : 'app-badge-idle'}`}
                   title={app.manifestError ?? ''}
                 >
                   {app.adopted ? 'Adopted' : 'Not adopted'}
@@ -108,7 +94,7 @@ export function AppList({ api, ws }: AppListProps): JSX.Element {
         ))}
       </ul>
       {apps !== null && apps.length === 0 && (
-        <p data-testid="no-apps" style={NOTE_STYLE}>
+        <p data-testid="no-apps" class="app-note">
           No apps yet. Clone a repo into HUB_APPS_DIR on the hub server.
         </p>
       )}
