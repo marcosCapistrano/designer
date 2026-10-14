@@ -20,11 +20,22 @@ export interface RunnerContext {
   oauthToken: string | null;
 }
 
-/** Denies a tool call when checkToolUse finds a reason. Runs on every PreToolUse. */
-export function guardHook(cwd: string): HookCallback {
+export const GUARD_ERROR_REASON =
+  'The Hub could not check this tool call, so it is denied. Try a simpler command or a different tool.';
+
+/**
+ * Denies a tool call when checkToolUse finds a reason. Runs on every PreToolUse. Fails closed: if the
+ * check itself throws, the call is denied (a hook that throws would otherwise let the call through).
+ */
+export function guardHook(cwd: string, check: typeof checkToolUse = checkToolUse): HookCallback {
   return async (input: HookInput): Promise<HookJSONOutput> => {
     if (input.hook_event_name !== 'PreToolUse') return {};
-    const reason = checkToolUse(cwd, input.tool_name, (input.tool_input ?? {}) as Record<string, unknown>);
+    let reason: string | null;
+    try {
+      reason = check(cwd, input.tool_name, (input.tool_input ?? {}) as Record<string, unknown>);
+    } catch {
+      reason = GUARD_ERROR_REASON;
+    }
     if (reason === null) return {};
     return {
       hookSpecificOutput: {
@@ -167,6 +178,34 @@ export function finalEvent(
   return { type: 'done', sessionId, ok: false, error: state.resultError ?? state.apiError ?? thrownMessage };
 }
 
+/**
+ * The SDK warns on every query that canUseTool is shadowed by bypassPermissions. The hub means it:
+ * the PreToolUse hook is the gate, and canUseTool only answers the tools that still ask. That one
+ * warning is dropped so it does not fill the hub's log; every other warning goes through.
+ */
+const QUIET_WARNING_CODES: ReadonlySet<string> = new Set(['CLAUDE_SDK_CAN_USE_TOOL_SHADOWED']);
+let warningFilterInstalled = false;
+
+function warningCode(warning: unknown, rest: readonly unknown[]): unknown {
+  // emitWarning(warning, { code }) or emitWarning(warning, type, code).
+  const [options, code] = rest;
+  if (typeof options === 'object' && options !== null && 'code' in options) return options.code;
+  if (typeof code === 'string') return code;
+  if (typeof warning === 'object' && warning !== null && 'code' in warning) return warning.code;
+  return undefined;
+}
+
+function installWarningFilter(): void {
+  if (warningFilterInstalled) return;
+  warningFilterInstalled = true;
+  const emit = process.emitWarning.bind(process) as (...args: unknown[]) => void;
+  process.emitWarning = ((warning: unknown, ...rest: unknown[]): void => {
+    const code = warningCode(warning, rest);
+    if (typeof code === 'string' && QUIET_WARNING_CODES.has(code)) return;
+    emit(warning, ...rest);
+  }) as typeof process.emitWarning;
+}
+
 export class SdkClaudeRunner implements ClaudeRunner {
   private readonly ctx: RunnerContext;
   private readonly queryFn: typeof query;
@@ -176,13 +215,18 @@ export class SdkClaudeRunner implements ClaudeRunner {
   ) {
     this.ctx = { env: opts.env ?? process.env, oauthToken: opts.oauthToken ?? null };
     this.queryFn = opts.queryFn ?? query;
+    installWarningFilter();
   }
 
   async *run(opts: RunOptions): AsyncIterable<AgentEvent> {
+    // Stopped before it started: do not spawn Claude Code at all.
+    if (opts.signal?.aborted) {
+      yield finalEvent(newMapState(), { resume: opts.resume, aborted: true, thrown: undefined });
+      return;
+    }
     const ac = new AbortController();
     const onAbort = (): void => ac.abort();
-    if (opts.signal?.aborted) ac.abort();
-    else opts.signal?.addEventListener('abort', onAbort, { once: true });
+    opts.signal?.addEventListener('abort', onAbort, { once: true });
 
     const state = newMapState();
     let thrown: unknown;

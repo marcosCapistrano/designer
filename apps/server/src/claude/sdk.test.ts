@@ -3,11 +3,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { CanUseTool, HookInput, Options, SDKMessage, query } from '@anthropic-ai/claude-agent-sdk';
 import { describe, expect, it, test } from 'vitest';
+import { SECRET_ENV_KEYS } from '../config.js';
 import type { AgentEvent, RunOptions } from './runner.js';
 import {
   AUTH_FAILED_MESSAGE,
   buildQueryOptions,
   finalEvent,
+  guardHook,
   mapMessage,
   newMapState,
   SdkClaudeRunner,
@@ -181,6 +183,107 @@ describe('mapMessage and finalEvent', () => {
       ok: false,
       error: AUTH_FAILED_MESSAGE,
     });
+  });
+});
+
+describe('runner hardening (final wave B)', () => {
+  it('guardHook denies when the check itself throws', async () => {
+    const hook = guardHook('/repo', () => {
+      throw new Error('boom');
+    });
+    const out = await hook(preToolUse('Bash', { command: 'ls' }), 'tu1', { signal: new AbortController().signal });
+    expect(out).toMatchObject({
+      hookSpecificOutput: {
+        hookEventName: 'PreToolUse',
+        permissionDecision: 'deny',
+        permissionDecisionReason: expect.stringContaining('could not check'),
+      },
+    });
+  });
+
+  it('the hook denies a push sent through Monitor', async () => {
+    const denied = await runHook(built(), preToolUse('Monitor', { command: 'git push origin HEAD:main' }));
+    expect(denied).toMatchObject({ hookSpecificOutput: { permissionDecision: 'deny' } });
+  });
+
+  it('env drops every SECRET_ENV_KEYS entry and carries only the hub token', () => {
+    const env: Record<string, string> = { PATH: '/bin', HOME: '/home/hub' };
+    for (const key of SECRET_ENV_KEYS) env[key] = `leaked-${key}`;
+    const o = buildQueryOptions({ cwd: '/repo', prompt: 'x' }, { env, oauthToken: 'hub-token' });
+    expect(o.env).toEqual({ PATH: '/bin', HOME: '/home/hub', CLAUDE_CODE_OAUTH_TOKEN: 'hub-token' });
+    expect(Object.values(o.env ?? {}).some((v) => String(v).startsWith('leaked-'))).toBe(false);
+  });
+
+  it('a null oauthToken leaves no token in the env, even one inherited from the hub', () => {
+    const env = { PATH: '/bin', CLAUDE_CODE_OAUTH_TOKEN: 'inherited' };
+    const o = buildQueryOptions({ cwd: '/repo', prompt: 'x' }, { env, oauthToken: null });
+    expect(o.env).toEqual({ PATH: '/bin' });
+  });
+
+  it('one PreToolUse hook with no matcher, so every tool call is checked', () => {
+    const o = built();
+    expect(Object.keys(o.hooks ?? {})).toEqual(['PreToolUse']);
+    expect(o.hooks?.PreToolUse).toHaveLength(1);
+    expect(o.hooks?.PreToolUse?.[0]?.matcher).toBeUndefined();
+    expect(o.hooks?.PreToolUse?.[0]?.hooks).toHaveLength(1);
+  });
+
+  it('queryFn gets the prompt, the built options and the abort controller', async () => {
+    const calls: Array<{ prompt: unknown; options?: Options }> = [];
+    const runner = new SdkClaudeRunner({
+      env: ENV,
+      oauthToken: 'o',
+      queryFn: ((params: { prompt: unknown; options?: Options }) => {
+        calls.push(params);
+        return (async function* () {
+          yield message({ type: 'result', subtype: 'success', is_error: false, session_id: 's9', result: '' });
+        })();
+      }) as unknown as typeof query,
+    });
+    await collect(runner.run({ cwd: '/repo', prompt: 'do it', resume: 's1', allowedTools: ['mcp__x__y'] }));
+    expect(calls).toHaveLength(1);
+    const call = calls[0];
+    expect(call?.prompt).toBe('do it');
+    expect(call?.options?.cwd).toBe('/repo');
+    expect(call?.options?.resume).toBe('s1');
+    expect(call?.options?.allowedTools).toEqual(['mcp__x__y']);
+    expect(call?.options?.abortController).toBeInstanceOf(AbortController);
+    expect(call?.options?.env).toEqual({ PATH: '/bin', CLAUDE_CODE_OAUTH_TOKEN: 'o' });
+  });
+
+  it('a signal aborted before run starts never starts a query', async () => {
+    let started = false;
+    const runner = new SdkClaudeRunner({
+      env: ENV,
+      oauthToken: 'o',
+      queryFn: (() => {
+        started = true;
+        return (async function* () {})();
+      }) as unknown as typeof query,
+    });
+    const controller = new AbortController();
+    controller.abort();
+    const events = await collect(runner.run({ cwd: '/repo', prompt: 'x', resume: 's1', signal: controller.signal }));
+    expect(started).toBe(false);
+    expect(events).toEqual([{ type: 'done', sessionId: 's1', ok: false, error: 'aborted' }]);
+  });
+
+  it('drops the SDK canUseTool-shadowed warning and keeps every other warning', async () => {
+    new SdkClaudeRunner({ env: ENV });
+    const seen: string[] = [];
+    const onWarning = (warning: Error & { code?: string }): void => {
+      seen.push(warning.code ?? warning.message);
+    };
+    process.on('warning', onWarning);
+    try {
+      process.emitWarning('canUseTool will not be invoked', { code: 'CLAUDE_SDK_CAN_USE_TOOL_SHADOWED' });
+      process.emitWarning('canUseTool will not be invoked', 'Warning', 'CLAUDE_SDK_CAN_USE_TOOL_SHADOWED');
+      process.emitWarning('a different warning', { code: 'HUB_TEST_OTHER_WARNING' });
+      await new Promise((resolve) => setImmediate(resolve));
+    } finally {
+      process.off('warning', onWarning);
+    }
+    expect(seen).toEqual(['HUB_TEST_OTHER_WARNING']);
   });
 });
 
