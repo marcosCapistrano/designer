@@ -103,6 +103,19 @@ describe('OctokitGitHub', () => {
     });
   });
 
+  it('checkStatus is pending when not every check run was read', async () => {
+    const { fetchFn } = recordingFetch(200, {
+      total_count: 101,
+      check_runs: [{ name: 'ci', status: 'completed', conclusion: 'success' }],
+    });
+    const gh = new OctokitGitHub('tok', fetchFn);
+
+    const status = await gh.checkStatus(repo, 'abc');
+
+    expect(status.state).toBe('pending');
+    expect(status.checks).toEqual([{ name: 'ci', status: 'completed', conclusion: 'success' }]);
+  });
+
   it('merge squashes and pins the sha', async () => {
     const { fetchFn, calls } = recordingFetch(200, {
       merged: true,
@@ -128,6 +141,15 @@ describe('OctokitGitHub', () => {
     expect(outcome.merged).toBe(false);
     expect(outcome.sha).toBeNull();
     expect(outcome.message).toContain('not mergeable');
+  });
+
+  it('a merge refused with 409 is reported, not thrown', async () => {
+    const { fetchFn } = recordingFetch(409, { message: 'Head branch was modified' });
+    const gh = new OctokitGitHub('tok', fetchFn);
+
+    const outcome = await gh.merge(repo, 7, 'abc');
+
+    expect(outcome).toEqual({ merged: false, sha: null, message: expect.stringContaining('Head branch was modified') });
   });
 
   it('rethrows errors other than a refused merge', async () => {

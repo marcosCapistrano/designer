@@ -51,9 +51,13 @@ export const FAILED_CONCLUSIONS: readonly string[] = [
   'stale',
 ];
 
+/** Conclusions that count as passing. Any other conclusion is unknown and fails closed (pending). */
+const PASSING_CONCLUSIONS: readonly string[] = ['success', 'skipped', 'neutral'];
+
 /**
- * [] -> 'none'; any completed run with a failed conclusion -> 'failure';
- * else any run not completed (or completed without a conclusion) -> 'pending'; else 'success'.
+ * [] -> 'none'; any completed run with a FAILED_CONCLUSIONS conclusion -> 'failure';
+ * else 'success' only when every run is completed with a PASSING_CONCLUSIONS conclusion;
+ * otherwise 'pending' (not completed, no conclusion, or an unrecognised conclusion).
  */
 export function summarizeChecks(runs: readonly CheckRun[]): CiState {
   if (runs.length === 0) return 'none';
@@ -61,8 +65,10 @@ export function summarizeChecks(runs: readonly CheckRun[]): CiState {
     (run) => run.status === 'completed' && run.conclusion !== null && FAILED_CONCLUSIONS.includes(run.conclusion),
   );
   if (failed) return 'failure';
-  if (runs.some((run) => run.status !== 'completed' || run.conclusion === null)) return 'pending';
-  return 'success';
+  const allPassing = runs.every(
+    (run) => run.status === 'completed' && run.conclusion !== null && PASSING_CONCLUSIONS.includes(run.conclusion),
+  );
+  return allPassing ? 'success' : 'pending';
 }
 
 const REMOTE_PATTERNS: readonly RegExp[] = [
