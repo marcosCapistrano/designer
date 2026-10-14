@@ -21,7 +21,12 @@ export interface GitRepo {
   commitAll(message: string): Promise<string | null>;
   headSha(): Promise<string>;
   commitsAhead(base: string): Promise<number>;
-  push(branch: string): Promise<void>;
+  /**
+   * Pushes `branch` to origin as `refs/heads/<branch>:refs/heads/<branch>`, whatever `remote.origin.push` says.
+   * With `leaseSha` the push may rewrite the branch (an amend or rebase) but only while origin still has `leaseSha`
+   * there (`--force-with-lease`); without it the push must be a fast-forward.
+   */
+  push(branch: string, opts?: { leaseSha?: string | null }): Promise<void>;
   remoteUrl(): Promise<string | null>;
 }
 
@@ -48,15 +53,31 @@ export function authConfig(token: string | null | undefined): string[] {
   return [`http.https://github.com/.extraheader=AUTHORIZATION: basic ${basic}`];
 }
 
+/** git's own GIT_CONFIG_PARAMETERS encoding: each `key=value` entry single-quoted, entries separated by spaces. */
+export function configParameters(entries: readonly string[]): string {
+  return entries.map((entry) => `'${entry.replace(/'/g, `'\\''`)}'`).join(' ');
+}
+
 /**
- * Carries the auth entries in GIT_CONFIG_PARAMETERS (git's own single-quoted key=value list),
+ * Git hooks live in the checkout, which Claude can write. The two calls that carry the token (fetch, push) point
+ * hooksPath at /dev/null, so a Claude-written hook (pre-push, reference-transaction, ...) never runs with the
+ * token in its environment.
+ */
+const NO_HOOKS = 'core.hooksPath=/dev/null';
+
+/**
+ * The environment for calls that talk to GitHub: hooks off, and the auth entries in GIT_CONFIG_PARAMETERS,
  * so the token never appears in git's argv or .git/config.
  */
-function authedEnv(env: Record<string, string>, token: string | null | undefined): Record<string, string> {
-  const entries = authConfig(token);
-  if (entries.length === 0) return env;
-  const parameters = entries.map((entry) => `'${entry.replace(/'/g, `'\\''`)}'`).join(' ');
-  return { ...env, GIT_CONFIG_PARAMETERS: parameters };
+export function authedEnv(env: Record<string, string>, token: string | null | undefined): Record<string, string> {
+  return { ...env, GIT_CONFIG_PARAMETERS: configParameters([NO_HOOKS, ...authConfig(token)]) };
+}
+
+const FULL_SHA = /^[0-9a-f]{40,64}$/;
+
+/** Branch names are hub-built (`build/...`); this keeps one that looks like an option out of a git command line. */
+function assertBranchName(branch: string): void {
+  if (branch.trim() === '' || branch.startsWith('-')) throw new Error(`Invalid branch name: ${JSON.stringify(branch)}`);
 }
 
 export function openRepo(dir: string, opts: RepoOptions = {}): GitRepo {
@@ -64,29 +85,41 @@ export function openRepo(dir: string, opts: RepoOptions = {}): GitRepo {
   const local = simpleGit({ baseDir: dir }).env(env);
   const authed = simpleGit({ baseDir: dir }).env(authedEnv(env, opts.token));
 
-  const refExists = (ref: string): Promise<boolean> =>
-    local.raw(['rev-parse', '--verify', '--quiet', ref]).then(
-      () => true,
-      () => false,
-    );
-  const isDirty = async (): Promise<boolean> => (await local.raw(['status', '--porcelain'])).trim() !== '';
+  // --untracked-files=normal wins over a status.showUntrackedFiles=no that Claude may have written to .git/config.
+  const isDirty = async (): Promise<boolean> =>
+    (await local.raw(['status', '--porcelain', '--untracked-files=normal'])).trim() !== '';
   const headSha = async (): Promise<string> => (await local.raw(['rev-parse', 'HEAD'])).trim();
 
   return {
     dir,
 
+    /**
+     * The checked-out branch's name, or 'HEAD' when the checkout is detached. It reads the full ref and strips
+     * refs/heads/, because `rev-parse --abbrev-ref` answers `heads/<name>` when a tag has the same name.
+     */
     async currentBranch() {
-      return (await local.raw(['rev-parse', '--abbrev-ref', 'HEAD'])).trim();
+      // -q: a detached HEAD is an empty answer, not an error; a real failure still throws.
+      const ref = (await local.raw(['symbolic-ref', '-q', 'HEAD'])).trim();
+      if (ref === '') return 'HEAD';
+      return ref.startsWith('refs/heads/') ? ref.slice('refs/heads/'.length) : ref;
     },
 
+    /**
+     * The branch origin's HEAD points at: the local origin/HEAD when it is set, else what origin itself reports
+     * (`ls-remote --symref`). It throws when neither says, rather than guessing: the answer feeds the guard that keeps
+     * the hub off the default branch.
+     */
     async defaultBranch() {
-      try {
-        const ref = (await local.raw(['symbolic-ref', '--short', 'refs/remotes/origin/HEAD'])).trim();
-        if (ref !== '') return ref.replace(/^origin\//, '');
-      } catch {
-        // origin/HEAD is not set; fall through to the branch-name probe.
+      // -q: an unset or non-symbolic origin/HEAD is an empty answer, not an error; a real failure still throws.
+      const ref = (await local.raw(['symbolic-ref', '-q', '--short', 'refs/remotes/origin/HEAD'])).trim();
+      if (ref !== '') return ref.replace(/^origin\//, '');
+
+      const listing = await authed.raw(['ls-remote', '--symref', 'origin', 'HEAD']);
+      const match = /^ref:\s+refs\/heads\/(\S+)\s+HEAD$/m.exec(listing);
+      if (match?.[1] === undefined) {
+        throw new Error('Cannot tell which branch is the default: origin/HEAD is not set and origin did not report its HEAD.');
       }
-      return (await refExists('refs/remotes/origin/main')) ? 'main' : 'master';
+      return match[1];
     },
 
     async fetch() {
@@ -94,11 +127,13 @@ export function openRepo(dir: string, opts: RepoOptions = {}): GitRepo {
     },
 
     async createBranchFrom(branch, base) {
-      await local.raw(['checkout', '--no-track', '-B', branch, `origin/${base}`]);
+      assertBranchName(branch);
+      await local.raw(['checkout', '--no-track', '-B', branch, `origin/${base}`, '--']);
     },
 
     async checkout(branch) {
-      await local.raw(['checkout', branch]);
+      assertBranchName(branch);
+      await local.raw(['checkout', branch, '--']);
     },
 
     isDirty,
@@ -113,19 +148,25 @@ export function openRepo(dir: string, opts: RepoOptions = {}): GitRepo {
     headSha,
 
     async commitsAhead(base) {
-      return Number((await local.raw(['rev-list', '--count', `origin/${base}..HEAD`])).trim());
+      return Number((await local.raw(['rev-list', '--count', `origin/${base}..HEAD`, '--'])).trim());
     },
 
-    async push(branch) {
-      await authed.raw(['push', '--set-upstream', 'origin', branch]);
+    async push(branch, opts = {}) {
+      assertBranchName(branch);
+      const ref = `refs/heads/${branch}`;
+      const lease: string[] = [];
+      if (opts.leaseSha !== undefined && opts.leaseSha !== null) {
+        if (!FULL_SHA.test(opts.leaseSha)) throw new Error(`Invalid lease commit: ${JSON.stringify(opts.leaseSha)}`);
+        lease.push(`--force-with-lease=${ref}:${opts.leaseSha}`);
+      }
+      // An explicit src:dst refspec: a bare branch name would follow remote.origin.push, which Claude can write.
+      await authed.raw(['push', ...lease, '--set-upstream', 'origin', `${ref}:${ref}`]);
     },
 
     async remoteUrl() {
-      try {
-        return (await local.raw(['config', '--get', 'remote.origin.url'])).trim();
-      } catch {
-        return null;
-      }
+      // An unset remote.origin.url exits 1 with no output, which comes back as ''; a real failure throws.
+      const url = (await local.raw(['config', '--get', 'remote.origin.url'])).trim();
+      return url === '' ? null : url;
     },
   };
 }

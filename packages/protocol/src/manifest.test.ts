@@ -58,6 +58,30 @@ test('missing build section', () => {
   if (!result.ok) expect(result.error).toContain('build');
 });
 
-test('index does not export the schema', async () => {
-  expect('AppManifestSchema' in (await import('./index.js'))).toBe(false);
+test('index re-exports nothing from the manifest module', async () => {
+  const index = await import('./index.js');
+  const manifest = await import('./manifest.js');
+  const leaked = Object.keys(manifest).filter((name) => name in index);
+  expect(leaked).toEqual([]);
+  expect(Object.keys(manifest)).toContain('AppManifestSchema');
+});
+
+test('strips unknown keys', () => {
+  const result = parseAppManifest(
+    withPatch((d) => {
+      d.extra = 'x';
+      d.build.extra = 'y';
+    }),
+  );
+  expect(result.ok).toBe(true);
+  if (result.ok) {
+    expect('extra' in result.manifest).toBe(false);
+    expect('extra' in result.manifest.build).toBe(false);
+  }
+});
+
+test('rejects an empty production domain', () => {
+  const result = parseAppManifest(withPatch((d) => { d.deploy.production.domain = ''; }));
+  expect(result.ok).toBe(false);
+  if (!result.ok) expect(result.error).toContain('deploy.production.domain');
 });

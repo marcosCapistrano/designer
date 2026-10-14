@@ -12,6 +12,8 @@ export type TaskPatch = Partial<
   Pick<BuildTask, 'title' | 'branch' | 'status' | 'prNumber' | 'prUrl' | 'headSha' | 'ci' | 'mergeSha' | 'error' | 'retryAt'>
 > & {
   pendingPrompt?: string | null;
+  /** The commit the hub last pushed for the task (kept apart from `headSha`, which follows GitHub). */
+  pushedSha?: string | null;
 };
 
 const DEFAULT_MESSAGE_PAGE = 500;
@@ -29,6 +31,7 @@ const PATCH_COLUMNS: Record<keyof TaskPatch, string> = {
   error: 'error',
   retryAt: 'retry_at',
   pendingPrompt: 'pending_prompt',
+  pushedSha: 'pushed_sha',
 };
 
 const TASK_SELECT =
@@ -61,6 +64,10 @@ interface MessageRow {
   kind: BuildMessageKind;
   text: string;
   created_at: number;
+}
+
+function notFound(id: number): Error {
+  return new Error(`build task ${id} not found`);
 }
 
 function toTask(row: TaskRow): BuildTask {
@@ -138,9 +145,7 @@ export class BuildStore {
       values.push(value);
     }
     const result = this.db.prepare(`UPDATE build_tasks SET ${assignments.join(', ')} WHERE id = ?`).run(...values, id);
-    if (result.changes === 0) {
-      throw new Error(`build task ${id} not found`);
-    }
+    if (result.changes === 0) throw notFound(id);
     return this.requireTask(id);
   }
 
@@ -151,6 +156,14 @@ export class BuildStore {
         `${TASK_SELECT} WHERE app = ? AND status IN (SELECT value FROM json_each(?)) ORDER BY id DESC LIMIT 1`,
       )
       .get(app, JSON.stringify(OPEN_TASK_STATUSES));
+    return row ? toTask(row) : null;
+  }
+
+  /** The newest task of the app that works on `branch`, whatever its status, or null when none does. */
+  taskForBranch(app: string, branch: string): BuildTask | null {
+    const row = this.db
+      .prepare<[string, string], TaskRow>(`${TASK_SELECT} WHERE app = ? AND branch = ? ORDER BY id DESC LIMIT 1`)
+      .get(app, branch);
     return row ? toTask(row) : null;
   }
 
@@ -174,6 +187,14 @@ export class BuildStore {
       .prepare<[number], { pending_prompt: string | null }>('SELECT pending_prompt FROM build_tasks WHERE id = ?')
       .get(taskId);
     return row?.pending_prompt ?? null;
+  }
+
+  /** The commit the hub last pushed for the task, or null when it has not pushed yet. */
+  pushedSha(taskId: number): string | null {
+    const row = this.db
+      .prepare<[number], { pushed_sha: string | null }>('SELECT pushed_sha FROM build_tasks WHERE id = ?')
+      .get(taskId);
+    return row?.pushed_sha ?? null;
   }
 
   addMessage(m: { app: string; taskId: number | null; kind: BuildMessageKind; text: string }): BuildMessage {
@@ -214,9 +235,7 @@ export class BuildStore {
 
   private requireTask(id: number): BuildTask {
     const task = this.task(id);
-    if (!task) {
-      throw new Error(`build task ${id} not found`);
-    }
+    if (!task) throw notFound(id);
     return task;
   }
 }

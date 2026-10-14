@@ -1,11 +1,17 @@
 import { createHash } from 'node:crypto';
 import { Hono } from 'hono';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { openDb, type Db } from '../db.js';
 import { LoginLimiter } from './limiter.js';
-import { hashPassphrase } from './passphrase.js';
+import { hashPassphrase, verifyPassphrase } from './passphrase.js';
 import { authRoutes } from './routes.js';
 import { SESSION_TTL_MS, SessionStore, readCookie, requireAuth } from './sessions.js';
+
+// Wraps the real verifier in a spy, so a test can see whether a request reached it.
+vi.mock('./passphrase.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./passphrase.js')>();
+  return { ...actual, verifyPassphrase: vi.fn(actual.verifyPassphrase) };
+});
 
 const PASS = 'correct horse battery staple';
 const HASH = hashPassphrase(PASS, Buffer.alloc(16, 1));
@@ -111,6 +117,24 @@ describe('auth routes', () => {
     }
     t = 900_004;
     expect((await loginVia(local, PASS)).status).toBe(204);
+  });
+
+  it('a blocked attempt never reaches the passphrase check', async () => {
+    let t = 0;
+    const local = appWith(new LoginLimiter(), () => t);
+    for (t = 0; t < 5; t += 1) {
+      expect((await loginVia(local, 'wrong')).status).toBe(401);
+    }
+    const verify = vi.mocked(verifyPassphrase);
+    verify.mockClear();
+    t = 10;
+    expect((await loginVia(local, 'wrong')).status).toBe(429);
+    expect((await loginVia(local, PASS)).status).toBe(429);
+    expect(verify).not.toHaveBeenCalled();
+    // After the lock, the check runs again.
+    t = 900_004;
+    expect((await loginVia(local, PASS)).status).toBe(204);
+    expect(verify).toHaveBeenCalledTimes(1);
   });
 
   it('a body without a string passphrase is 400', async () => {

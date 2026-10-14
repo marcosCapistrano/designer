@@ -24,4 +24,13 @@ describe('LoginLimiter', () => {
     limiter.fail(4);
     expect(limiter.blocked(5)).toBe(false);
   });
+
+  it('reset forgets failures but keeps an active lock', () => {
+    const limiter = new LoginLimiter();
+    for (const now of [0, 1, 2, 3, 4]) limiter.fail(now);
+    expect(limiter.blocked(5)).toBe(true);
+    limiter.reset();
+    expect(limiter.blocked(5)).toBe(true);
+    expect(limiter.blocked(900_004)).toBe(false);
+  });
 });

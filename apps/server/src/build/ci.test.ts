@@ -167,6 +167,68 @@ describe('refreshCi', () => {
     expect(s.github.calls).toEqual([]);
   });
 
+  it('does not announce a pass while a check suite is still queued, then announces it once it completes', async () => {
+    const s = setup();
+    const task = await reviewTask(s);
+    // Every listed run is green, but the workflow's next job has not been queued yet.
+    s.github.setChecks('h1', GREEN);
+    s.github.setSuites('h1', [{ status: 'queued', conclusion: null, runCount: 1 }]);
+
+    const early = await refreshCi(s.deps, task.id);
+
+    expect(early?.ci).toBe('pending');
+    expect(messagesOf(s)).toEqual([]);
+
+    s.github.setSuites('h1', [{ status: 'completed', conclusion: 'success', runCount: 1 }]);
+    const done = await refreshCi(s.deps, task.id);
+
+    expect(done?.ci).toBe('success');
+    expect(messagesOf(s)).toEqual([['status', 'CI passed. Ready to merge.']]);
+  });
+
+  it('does not write CI onto a task that was merged while its CI was being read', async () => {
+    const s = setup();
+    const task = await reviewTask(s);
+    s.github.setChecks('h1', GREEN);
+    const realCheckStatus = s.github.checkStatus.bind(s.github);
+    vi.spyOn(s.github, 'checkStatus').mockImplementationOnce(async (r, sha) => {
+      const status = await realCheckStatus(r, sha);
+      await mergeTask(s.deps, 'demo', task.id, false); // the merge lands while the poll's CI read is in flight
+      return status;
+    });
+
+    const refreshed = await refreshCi(s.deps, task.id);
+
+    expect(refreshed).toMatchObject({ status: 'merged', mergeSha: 'merged-1' });
+    // The poll's late 'success' must not be announced after the merge.
+    expect(s.store.task(task.id)?.status).toBe('merged');
+    expect(messagesOf(s).map(([, text]) => text)).toEqual(['Merged pull request #1.']);
+  });
+
+  it('announces a pass once when two refreshes overlap', async () => {
+    const s = setup();
+    const task = await reviewTask(s);
+    s.github.setChecks('h1', GREEN);
+    const realCheckStatus = s.github.checkStatus.bind(s.github);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    vi.spyOn(s.github, 'checkStatus').mockImplementation(async (r, sha) => {
+      const status = await realCheckStatus(r, sha);
+      await gate; // both refreshes have read pending before either writes
+      return status;
+    });
+
+    const both = Promise.all([refreshCi(s.deps, task.id), refreshCi(s.deps, task.id)]);
+    await vi.waitFor(() => expect(s.github.calls.filter((call) => call === 'checkStatus')).toHaveLength(2));
+    release();
+    await both;
+
+    expect(s.store.task(task.id)?.ci).toBe('success');
+    expect(messagesOf(s)).toEqual([['status', 'CI passed. Ready to merge.']]);
+  });
+
   it('keeps the stored task when GitHub errors', async () => {
     const s = setup();
     const task = await reviewTask(s);
@@ -205,6 +267,61 @@ describe('mergeTask', () => {
     expect(err.status).toBe(409);
     expect(err.message).toContain('pending');
     expect(s.github.merges).toEqual([]);
+  });
+
+  it('refuses while a check suite has not completed, though every run is green', async () => {
+    const s = setup();
+    const task = await reviewTask(s);
+    s.github.setChecks('h1', GREEN);
+    s.github.setSuites('h1', [{ status: 'in_progress', conclusion: null, runCount: 2 }]);
+
+    const err = await caught(mergeTask(s.deps, 'demo', task.id, false));
+
+    expect(err.status).toBe(409);
+    expect(err.message).toBe('CI is pending; merge needs green CI.');
+    expect(s.github.merges).toEqual([]);
+  });
+
+  it('answers 502 "Could not reach GitHub." when the read fails, and leaves the task alone', async () => {
+    const s = setup();
+    const task = await reviewTask(s);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(s.github, 'getPr').mockRejectedValueOnce(new Error('connect ETIMEDOUT 140.82.112.5:443'));
+
+    const err = await caught(mergeTask(s.deps, 'demo', task.id, false));
+
+    expect(err.status).toBe(502);
+    expect(err.message).toBe('Could not reach GitHub.');
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('ETIMEDOUT'));
+    expect(s.store.task(task.id)).toEqual(task);
+    expect(s.github.merges).toEqual([]);
+  });
+
+  it('answers 502 when the CI read fails', async () => {
+    const s = setup();
+    const task = await reviewTask(s);
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(s.github, 'checkStatus').mockRejectedValueOnce(new Error('Server Error'));
+
+    const err = await caught(mergeTask(s.deps, 'demo', task.id, false));
+
+    expect(err.status).toBe(502);
+    expect(err.message).toBe('Could not reach GitHub.');
+  });
+
+  it('answers 502 when the merge call itself fails, and does not record a merge', async () => {
+    const s = setup();
+    const task = await reviewTask(s);
+    s.github.setChecks('h1', GREEN);
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(s.github, 'merge').mockRejectedValueOnce(new Error('socket hang up'));
+
+    const err = await caught(mergeTask(s.deps, 'demo', task.id, false));
+
+    expect(err.status).toBe(502);
+    expect(err.message).toBe('Could not reach GitHub.');
+    expect(s.store.task(task.id)?.status).toBe('review');
+    expect(s.onMerged).not.toHaveBeenCalled();
   });
 
   it('refuses with no checks', async () => {

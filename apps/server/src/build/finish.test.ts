@@ -138,9 +138,10 @@ function remoteHasBranch(origin: string, branch: string): boolean {
 function recordGitWrites(
   deps: BuildDeps,
   opts: { rejectPush?: string } = {},
-): { deps: BuildDeps; commits: string[]; pushes: string[] } {
+): { deps: BuildDeps; commits: string[]; pushes: string[]; leases: (string | null)[] } {
   const commits: string[] = [];
   const pushes: string[] = [];
+  const leases: (string | null)[] = [];
   const wrapped: BuildDeps['openRepo'] = (dir) => {
     const repo = deps.openRepo(dir);
     return {
@@ -149,21 +150,22 @@ function recordGitWrites(
         commits.push(message);
         return repo.commitAll(message);
       },
-      async push(branch) {
+      async push(branch, pushOpts) {
         pushes.push(branch);
+        leases.push(pushOpts?.leaseSha ?? null);
         if (opts.rejectPush !== undefined) throw new Error(opts.rejectPush);
-        return repo.push(branch);
+        return repo.push(branch, pushOpts);
       },
     };
   };
-  return { deps: { ...deps, openRepo: wrapped }, commits, pushes };
+  return { deps: { ...deps, openRepo: wrapped }, commits, pushes, leases };
 }
 
 /** Finishes the checkout with git writes recorded. */
 async function finishRecorded(h: Harness, task: BuildTask, signal = new AbortController().signal) {
-  const { deps, commits, pushes } = recordGitWrites(h.deps);
+  const { deps, commits, pushes, leases } = recordGitWrites(h.deps);
   const result = await finishTask(deps, { task, dir: h.work, manifest, signal });
-  return { result, commits, pushes };
+  return { result, commits, pushes, leases };
 }
 
 describe('finishTask', () => {
@@ -405,6 +407,123 @@ describe('finishTask', () => {
     expect(published.at(-1)).toEqual({ status: 'review', running: false });
   });
 
+  describe('rewriting a pushed branch', () => {
+    /** A task that has pushed once and has a PR; the checkout is at the pushed head. */
+    async function pushedOnce(): Promise<{ h: Harness; first: BuildTask; pushed: string }> {
+      const h = setup();
+      writeNotes(h.work);
+      const { result: first, pushes, leases } = await finishRecorded(h, h.task);
+      expect(first.status).toBe('review');
+      expect(pushes).toEqual(['build/notes-1']);
+      expect(leases).toEqual([null]); // a first push is a plain push
+      return { h, first, pushed: git(h.work, 'rev-parse', 'HEAD') };
+    }
+
+    /** Claude's "squash": the same change, one rewritten commit. */
+    function amend(h: Harness): void {
+      writeFileSync(join(h.work, 'notes.md'), 'notes, rewritten\n');
+      git(h.work, 'add', '-A');
+      git(h.work, 'commit', '--amend', '-m', 'Add notes (squashed)');
+    }
+
+    /** Someone else pushes a commit to the hub's branch from another clone. Returns the new tip. */
+    function pushFromElsewhere(h: Harness): string {
+      const other = join(dirname(h.origin), 'other');
+      git(dirname(h.origin), 'clone', '-b', 'build/notes-1', h.origin, other);
+      writeFileSync(join(other, 'theirs.txt'), 'theirs\n');
+      git(other, 'add', '-A');
+      git(other, 'commit', '-m', 'their change');
+      git(other, 'push', 'origin', 'build/notes-1');
+      return git(h.origin, 'rev-parse', 'refs/heads/build/notes-1');
+    }
+
+    it('records the commit it pushed', async () => {
+      const { h, first, pushed } = await pushedOnce();
+
+      expect(h.store.pushedSha(first.id)).toBe(pushed);
+      expect(git(h.origin, 'rev-parse', 'refs/heads/build/notes-1')).toBe(pushed);
+    });
+
+    it('pushes again after Claude amends, and the pull request follows', async () => {
+      const { h, first, pushed } = await pushedOnce();
+      amend(h);
+      const amended = git(h.work, 'rev-parse', 'HEAD');
+      expect(amended).not.toBe(pushed);
+
+      const { result, leases } = await finishRecorded(h, first);
+
+      expect(result).toMatchObject({ status: 'review', prNumber: 1, error: null, headSha: amended });
+      expect(leases).toEqual([pushed]);
+      expect(git(h.origin, 'rev-parse', 'refs/heads/build/notes-1')).toBe(amended);
+      expect(h.store.pushedSha(first.id)).toBe(amended);
+      expect(texts(h.store)).toContain('Updated pull request #1.');
+    });
+
+    it('fails with a clear error, and overwrites nothing, when someone else pushed in the meantime', async () => {
+      const { h, first, pushed } = await pushedOnce();
+      const theirs = pushFromElsewhere(h);
+      amend(h);
+
+      const result = await finish(h, first);
+
+      expect(result.status).toBe('failed');
+      expect(result.error).toBe(
+        'git push failed: build/notes-1 on GitHub no longer matches the commit the hub last pushed, so someone else changed it and nothing was overwritten. Close this task and start a new one.',
+      );
+      expect(git(h.origin, 'rev-parse', 'refs/heads/build/notes-1')).toBe(theirs);
+      expect(h.store.pushedSha(first.id)).toBe(pushed);
+      expect(texts(h.store)).toContain(result.error);
+    });
+
+    it('still fails when a CI refresh has already recorded their head as the task head', async () => {
+      const { h, first } = await pushedOnce();
+      const theirs = pushFromElsewhere(h);
+      // What a CI poll does when it sees GitHub's head move: headSha follows GitHub.
+      const refreshed = h.store.updateTask(first.id, { headSha: theirs });
+      amend(h);
+
+      const result = await finish(h, refreshed);
+
+      expect(result.status).toBe('failed');
+      expect(result.error).toContain('someone else changed it');
+      expect(git(h.origin, 'rev-parse', 'refs/heads/build/notes-1')).toBe(theirs);
+    });
+
+    it('a fast-forward push after their commit is also refused (the lease is the commit the hub pushed)', async () => {
+      const { h, first } = await pushedOnce();
+      const theirs = pushFromElsewhere(h);
+      writeFileSync(join(h.work, 'more.md'), 'more\n');
+      git(h.work, 'add', '-A');
+      git(h.work, 'commit', '-m', 'more notes');
+
+      const result = await finish(h, first);
+
+      expect(result.status).toBe('failed');
+      expect(git(h.origin, 'rev-parse', 'refs/heads/build/notes-1')).toBe(theirs);
+    });
+
+    it('a task with no recorded push pushes plainly, so an existing branch of that name is not overwritten', async () => {
+      const h = setup();
+      writeNotes(h.work);
+      const other = join(dirname(h.origin), 'other');
+      git(dirname(h.origin), 'clone', h.origin, other);
+      git(other, 'checkout', '-b', 'build/notes-1');
+      writeFileSync(join(other, 'theirs.txt'), 'theirs\n');
+      git(other, 'add', '-A');
+      git(other, 'commit', '-m', 'theirs');
+      git(other, 'push', 'origin', 'build/notes-1');
+      const theirs = git(h.origin, 'rev-parse', 'refs/heads/build/notes-1');
+
+      const { result, leases } = await finishRecorded(h, h.task);
+
+      expect(leases).toEqual([null]);
+      expect(result.status).toBe('failed');
+      expect(result.error).toMatch(/^git push failed: /);
+      expect(result.error).not.toContain('nothing was overwritten');
+      expect(git(h.origin, 'rev-parse', 'refs/heads/build/notes-1')).toBe(theirs);
+    });
+  });
+
   it('existing PR is updated, not duplicated', async () => {
     const h = setup();
     writeNotes(h.work);
@@ -484,7 +603,7 @@ describe('finishTask', () => {
     expect(h.github.calls).toEqual([]);
   });
 
-  it('refuses to commit or push a default branch that origin/HEAD does not name', async () => {
+  it('refuses to commit or push a default branch that only origin itself names (origin/HEAD unset locally)', async () => {
     const h = setup();
     git(h.work, 'checkout', '-b', 'trunk');
     git(h.work, 'push', 'origin', 'trunk');
@@ -548,6 +667,66 @@ describe('finishTask', () => {
     expect(result.error).toContain('base branch');
     expect(commits).toEqual([]);
     expect(pushes).toEqual([]);
+  });
+
+  it('a Stop that arrives during the branch check wins over the branch complaint', async () => {
+    const controller = new AbortController();
+    const h = setup();
+    writeNotes(h.work);
+    git(h.work, 'checkout', 'main');
+    const task = h.store.createTask({ app: 'demo', title: 'Add notes', branch: 'build/notes-1', base: 'main' });
+    const deps: BuildDeps = {
+      ...h.deps,
+      openRepo: (dir) => {
+        const repo = h.deps.openRepo(dir);
+        return {
+          ...repo,
+          async currentBranch() {
+            controller.abort(); // the Stop lands while the branch is being read
+            return repo.currentBranch(); // main: not the task's branch
+          },
+        };
+      },
+    };
+
+    const result = await finishTask(deps, { task, dir: h.work, manifest, signal: controller.signal });
+
+    expect(result).toMatchObject({ status: 'failed', error: 'Stopped by you.' });
+    expect(texts(h.store)).not.toContain('Claude switched to branch main; the work must stay on build/notes-1.');
+  });
+
+  it('an earlier error does not stay on a task that now has no changes', async () => {
+    const h = setup();
+    const stale = h.store.updateTask(h.task.id, { status: 'failed', error: 'Stopped by you.' });
+
+    const result = await finish(h, stale);
+
+    expect(result).toMatchObject({ status: 'no_changes', error: null });
+    expect(h.store.task(h.task.id)?.error).toBeNull();
+  });
+
+  it('an earlier error does not stay on a task whose follow-up made no new changes', async () => {
+    const h = setup();
+    writeNotes(h.work);
+    const first = await finish(h, h.task);
+    expect(first.status).toBe('review');
+    const stale = h.store.updateTask(first.id, { status: 'failed', error: 'Stopped by you.' });
+
+    const result = await finish(h, stale);
+
+    expect(result).toMatchObject({ status: 'review', error: null });
+    expect(texts(h.store)).toContain('No new changes.');
+  });
+
+  it('a tag named like the work branch does not make the branch look switched', async () => {
+    const h = setup();
+    writeNotes(h.work);
+    git(h.work, 'tag', 'build/notes-1');
+
+    const result = await finish(h, h.task);
+
+    expect(result.status).toBe('review');
+    expect(result.error).toBeNull();
   });
 
   it('refuses to commit or push an empty branch name', async () => {

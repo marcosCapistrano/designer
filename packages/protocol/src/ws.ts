@@ -7,7 +7,18 @@ export interface BuildTaskMsg { type: 'build.task'; app: string; task: BuildTask
 export interface PongMsg { type: 'pong'; t: number }
 /** Server → client. Plans 4 and 6 add variants here and to SERVER_MSG_TYPES. */
 export type ServerMsg = RenderReadyMsg | BuildMessageMsg | BuildTaskMsg | PongMsg;
-export const SERVER_MSG_TYPES: readonly ServerMsg['type'][] = ['render.ready', 'build.message', 'build.task', 'pong'];
+
+/**
+ * Every ServerMsg type, once. `satisfies Record<ServerMsg['type'], true>` makes the compiler reject a new
+ * ServerMsg variant that is missing here, and a type here that is not a variant.
+ */
+const SERVER_MSG_TYPE_SET = {
+  'render.ready': true,
+  'build.message': true,
+  'build.task': true,
+  pong: true,
+} satisfies Record<ServerMsg['type'], true>;
+export const SERVER_MSG_TYPES: readonly ServerMsg['type'][] = Object.keys(SERVER_MSG_TYPE_SET) as ServerMsg['type'][];
 
 export interface PingMsg { type: 'ping'; t: number }
 /** Client → server. */
@@ -22,16 +33,20 @@ function parseObject(data: string): Record<string, unknown> | null {
   }
 }
 
-/** Returns the message when data is a JSON object whose `type` is a known server message type. Never throws. */
+/**
+ * Returns the message when data is a JSON object whose `type` is a known server message type. Never throws.
+ * The check is on the tag only: the payload is not validated, so a consumer must not trust its shape
+ * beyond `type` (the sender is the hub, so the payload is only as wrong as a hub bug).
+ */
 export function parseServerMsg(data: string): ServerMsg | null {
   const obj = parseObject(data);
   if (!obj || !(SERVER_MSG_TYPES as readonly unknown[]).includes(obj.type)) return null;
   return obj as unknown as ServerMsg;
 }
 
-/** Returns the message when data is exactly `{ type: 'ping', t: number }`. Never throws. */
+/** Returns the message when data is `{ type: 'ping', t }` with a finite number `t`. Never throws. */
 export function parseClientMsg(data: string): ClientMsg | null {
   const obj = parseObject(data);
-  if (!obj || obj.type !== 'ping' || typeof obj.t !== 'number') return null;
+  if (!obj || obj.type !== 'ping' || typeof obj.t !== 'number' || !Number.isFinite(obj.t)) return null;
   return { type: 'ping', t: obj.t };
 }

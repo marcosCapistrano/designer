@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { FakeGitHub } from './fake.js';
-import { type CheckRun, parseGitHubRemote, summarizeChecks } from './github.js';
+import { type CheckRun, type CheckSuite, parseGitHubRemote, summarizeChecks } from './github.js';
 
 const repo = { owner: 'o', repo: 'r' };
 
@@ -40,6 +40,36 @@ describe('summarizeChecks', () => {
 
   it('is pending when a completed run has a conclusion this code does not recognise', () => {
     expect(summarizeChecks([{ name: 'a', status: 'completed', conclusion: 'weird_new_value' }])).toBe('pending');
+  });
+});
+
+describe('summarizeChecks with check suites', () => {
+  const green: CheckRun[] = [{ name: 'a', status: 'completed', conclusion: 'success' }];
+  const suite = (status: string, runCount = 1): CheckSuite => ({ status, conclusion: null, runCount });
+
+  it('is pending while a suite has not completed, even when every listed run is green', () => {
+    expect(summarizeChecks(green, [suite('queued')])).toBe('pending');
+    expect(summarizeChecks(green, [suite('completed'), suite('in_progress')])).toBe('pending');
+  });
+
+  it('is success when every run is green and every suite completed', () => {
+    expect(summarizeChecks(green, [suite('completed'), suite('completed')])).toBe('success');
+    expect(summarizeChecks(green, [])).toBe('success');
+  });
+
+  it('is failure when a run failed, whatever the suites say', () => {
+    const failing: CheckRun[] = [{ name: 'a', status: 'completed', conclusion: 'failure' }];
+    expect(summarizeChecks(failing, [suite('queued')])).toBe('failure');
+  });
+
+  it('is pending, not none, when no run is listed but a suite with runs is open', () => {
+    expect(summarizeChecks([], [suite('queued', 3)])).toBe('pending');
+    expect(summarizeChecks([], [suite('completed', 3)])).toBe('none');
+  });
+
+  it('does not count a suite that has created no run', () => {
+    expect(summarizeChecks(green, [suite('queued', 0)])).toBe('success');
+    expect(summarizeChecks([], [suite('queued', 0)])).toBe('none');
   });
 });
 
@@ -107,6 +137,31 @@ describe('FakeGitHub', () => {
     const pr = await gh.getPr(repo, 1);
     expect(pr).toMatchObject({ state: 'closed', merged: true, mergeSha: 'merged-1' });
     expect(await gh.findOpenPr(repo, 'build/x-1')).toBeNull();
+  });
+
+  it('holds CI pending while a check suite set on the fake has not completed', async () => {
+    const gh = new FakeGitHub();
+    gh.setChecks('h1', [{ name: 'a', status: 'completed', conclusion: 'success' }]);
+    gh.setSuites('h1', [{ status: 'queued', conclusion: null, runCount: 1 }]);
+    expect((await gh.checkStatus(repo, 'h1')).state).toBe('pending');
+
+    gh.setSuites('h1', [{ status: 'completed', conclusion: 'success', runCount: 1 }]);
+    expect((await gh.checkStatus(repo, 'h1')).state).toBe('success');
+  });
+
+  it('keeps pull requests apart by repo, as GitHub does', async () => {
+    const gh = new FakeGitHub();
+    const other = { owner: 'o', repo: 'other' };
+    await gh.createPr(repo, { head: 'build/x-1', base: 'main', title: 'T', body: 'B' });
+
+    await expect(gh.getPr(other, 1)).rejects.toThrow('Not Found');
+    await expect(gh.merge(other, 1, 'head-1')).rejects.toThrow('Not Found');
+    expect(await gh.findOpenPr(other, 'build/x-1')).toBeNull();
+    // The same branch name may be open in the other repo too.
+    await expect(gh.createPr(other, { head: 'build/x-1', base: 'main', title: 'T', body: 'B' })).resolves.toMatchObject({
+      number: 2,
+    });
+    expect(gh.merges).toEqual([]);
   });
 
   it('reports one in-progress run and then success when autoGreenAfter is 1', async () => {

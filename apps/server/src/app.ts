@@ -50,7 +50,9 @@ function isInside(root: string, path: string): boolean {
 /**
  * Whether the client folder may answer this request path. Anything with a segment that starts with a dot
  * (.env, .git, a dot spelled %2e) is refused, and so is a file whose real path, after following symlinks,
- * is outside the client folder. A path that does not exist passes: serveStatic answers 404 for it.
+ * is outside the client folder. A path that does not exist passes: serveStatic answers 404 for it. Any other
+ * failure to resolve it (a symlink loop, no permission, a name too long) is not understood well enough to
+ * serve, so it is refused too.
  */
 async function mayServe(clientDir: string, requestPath: string): Promise<boolean> {
   if (requestPath.split('/').some((segment) => segment.startsWith('.'))) return false;
@@ -61,8 +63,9 @@ async function mayServe(clientDir: string, requestPath: string): Promise<boolean
     // serveStatic answers a directory with its index.html, which may itself be a link.
     if ((await stat(real)).isDirectory()) real = await realpath(join(real, 'index.html'));
     return isInside(root, real);
-  } catch {
-    return true;
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException | null)?.code;
+    return code === 'ENOENT' || code === 'ENOTDIR';
   }
 }
 
@@ -96,6 +99,11 @@ function clientFiles(clientDir: string): MiddlewareHandler {
 const MAX_BODY_BYTES = 256 * 1024;
 /** Longest error message written to the log. */
 const MAX_LOGGED_MESSAGE_CHARS = 500;
+
+/** Node reports a request body cut off by the client as Error('aborted') with code ECONNRESET. */
+function isClientAbort(err: Error): boolean {
+  return (err as NodeJS.ErrnoException).code === 'ECONNRESET' && err.message === 'aborted';
+}
 
 export function createApp(deps: AppDeps): Hono {
   const { sessions, registry, build, dataDir, clientDir } = deps;
@@ -147,6 +155,9 @@ export function createApp(deps: AppDeps): Hono {
   app.onError((err, c) => {
     // csrf() and friends throw HTTPException with the response they want sent; do not turn it into a 500.
     if (err instanceof HTTPException) return err.getResponse();
+    // The client dropped the connection while its body was still arriving (a chunked upload cut off). Nobody is
+    // left to answer, and it is not a fault of the hub, so it is not logged as an unhandled error.
+    if (isClientAbort(err)) return c.json({ error: 'Request aborted' }, 400);
     if (err instanceof BuildError) return c.json({ error: err.message }, err.status);
     // The message only, never the stack or the error object: they could carry request details or tokens.
     // JSON.stringify escapes newlines, so a message cannot forge a log line; the message is cut at 500 chars.

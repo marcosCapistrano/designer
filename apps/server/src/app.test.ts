@@ -1,6 +1,8 @@
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { createConnection, type AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { serve } from '@hono/node-server';
 import type { BuildTask } from '@hub/protocol';
 import type { Hono } from 'hono';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -173,6 +175,13 @@ describe('hub app', () => {
     expect(await res.json()).toEqual({ error: 'busy' });
   });
 
+  it('a merge that cannot reach GitHub is a 502 with its own message', async () => {
+    build.merge.mockRejectedValue(new BuildError('Could not reach GitHub.', 502));
+    const res = await post('/api/apps/demo/build/tasks/7/merge', await cookie());
+    expect(res.status).toBe(502);
+    expect(await res.json()).toEqual({ error: 'Could not reach GitHub.' });
+  });
+
   it('other errors are a generic 500 and never leak', async () => {
     const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     try {
@@ -283,6 +292,13 @@ describe('hub app', () => {
         duplex: 'half',
       } as RequestInit);
       expect(res.status).toBe(413);
+      expect(build.send).not.toHaveBeenCalled();
+    });
+
+    it('csrf answers before the body limit: a forged oversized post is 403, not 413, and is never read', async () => {
+      const headers = { ...(await cookie()), 'sec-fetch-site': 'cross-site', 'content-type': 'text/plain' };
+      const res = await post('/api/apps/demo/build/messages', headers, 'x'.repeat(300 * 1024));
+      expect(res.status).toBe(403);
       expect(build.send).not.toHaveBeenCalled();
     });
 
@@ -483,6 +499,23 @@ describe('hub app', () => {
       }
     });
 
+    it('404s a HEAD on a dotfile as it does a GET', async () => {
+      for (const path of ['/.env', '/%2eenv', '/.git/config']) {
+        const res = await app.request(path, { method: 'HEAD' });
+        expect(res.status, path).toBe(404);
+        expect(await res.text(), path).toBe('');
+      }
+    });
+
+    it('404s a path it cannot resolve for a reason other than "not there"', async () => {
+      symlinkSync(join(clientDir, 'loop-b'), join(clientDir, 'loop-a'));
+      symlinkSync(join(clientDir, 'loop-a'), join(clientDir, 'loop-b'));
+      for (const path of ['/loop-a', '/loop-b', `/${'n'.repeat(300)}`, `/assets/${'n'.repeat(300)}.js`]) {
+        const res = await app.request(path);
+        expect(res.status, path.slice(0, 20)).toBe(404);
+      }
+    });
+
     it('404s a symlink that leaves clientDir, file or directory', async () => {
       for (const path of ['/link.txt', '/linkdir/secret.txt', '/linkdir/']) {
         const res = await app.request(path);
@@ -512,6 +545,90 @@ describe('hub app', () => {
         expect(res.status, path).toBe(404);
         expect(await res.text(), path).not.toContain('above clientDir');
       }
+    });
+
+    describe('over a real socket, with the request line exactly as sent', () => {
+      // app.request() builds a URL first, which resolves "/../x" before the app sees it. A socket does not.
+      let server: ReturnType<typeof serve>;
+      let port: number;
+
+      beforeEach(async () => {
+        await new Promise<void>((resolve) => {
+          server = serve({ fetch: app.fetch, port: 0, hostname: '127.0.0.1' }, (info: AddressInfo) => {
+            port = info.port;
+            resolve();
+          });
+        });
+      });
+
+      afterEach(async () => {
+        await new Promise<void>((resolve) => {
+          server.close(() => resolve());
+          (server as unknown as { closeAllConnections(): void }).closeAllConnections();
+        });
+      });
+
+      function rawGet(target: string): Promise<{ status: number; body: string }> {
+        return new Promise((resolve, reject) => {
+          const socket = createConnection({ host: '127.0.0.1', port }, () => {
+            socket.write(`GET ${target} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n`);
+          });
+          let data = '';
+          socket.on('data', (chunk: Buffer) => {
+            data += chunk.toString('latin1');
+          });
+          socket.on('error', reject);
+          socket.on('close', () => {
+            const status = Number(/^HTTP\/1\.1 (\d{3})/.exec(data)?.[1]);
+            resolve({ status, body: data.slice(data.indexOf('\r\n\r\n') + 4) });
+          });
+        });
+      }
+
+      it('never serves a file above clientDir, however the traversal is spelled', async () => {
+        writeFileSync(join(root, 'x'), 'above clientDir');
+        writeFileSync(join(root, 'client-secret.txt'), 'above clientDir');
+        const targets = [
+          '/../x',
+          '/..%2fx',
+          '/%2e%2e/x',
+          '/%2e%2e%2fx',
+          '/assets/../../x',
+          '/assets/%2e%2e/%2e%2e/x',
+          '/./../x',
+          '//..//x',
+          '/..\\x',
+        ];
+        for (const target of targets) {
+          const res = await rawGet(target);
+          expect(res.body, target).not.toContain('above clientDir');
+          expect([200, 400, 404], target).toContain(res.status);
+          // 200 is allowed only when the answer is the client's own index.html.
+          if (res.status === 200) expect(res.body, target).toBe('<p>hub</p>');
+        }
+      });
+
+      it('an upload the client cuts off is not logged as an unhandled error', async () => {
+        const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+        try {
+          const socket = createConnection({ host: '127.0.0.1', port }, () => {
+            socket.write(
+              'POST /api/login HTTP/1.1\r\nHost: x\r\nSec-Fetch-Site: same-origin\r\nContent-Type: application/json\r\n' +
+                'Transfer-Encoding: chunked\r\n\r\n5\r\n{"pas\r\n',
+            );
+            setTimeout(() => socket.destroy(), 50);
+          });
+          socket.on('error', () => undefined);
+          await new Promise<void>((resolve) => socket.once('close', () => resolve()));
+          // The abort reaches the app a moment after the socket closes.
+          await new Promise<void>((resolve) => setTimeout(resolve, 300));
+
+          expect(error).not.toHaveBeenCalled();
+          expect((await rawGet('/api/health')).status).toBe(200);
+        } finally {
+          error.mockRestore();
+        }
+      });
     });
 
     it('keeps the immutable Cache-Control on HEAD', async () => {

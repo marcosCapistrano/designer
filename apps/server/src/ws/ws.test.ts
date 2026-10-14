@@ -1,7 +1,7 @@
 import { createServer, type Server } from 'node:http';
 import { createConnection, type AddressInfo, type Socket } from 'node:net';
 import type { ServerMsg } from '@hub/protocol';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { WebSocket } from 'ws';
 import { readCookie } from '../auth/sessions.js';
 import { attachWebSocket, WS_PATH } from './attach.js';
@@ -23,8 +23,20 @@ const clients: WebSocket[] = [];
 const rawSockets: Socket[] = [];
 const attachments: Array<ReturnType<typeof attachWebSocket>> = [];
 const servers: Server[] = [];
+/** Exceptions that reached the process's uncaughtException event during the current test. */
+const uncaught: unknown[] = [];
+const recordUncaught = (err: unknown): void => {
+  uncaught.push(err);
+};
+
+beforeEach(() => {
+  uncaught.length = 0;
+  process.on('uncaughtException', recordUncaught);
+});
 
 afterEach(async () => {
+  process.off('uncaughtException', recordUncaught);
+  vi.useRealTimers();
   for (const client of clients.splice(0)) client.terminate();
   for (const socket of rawSockets.splice(0)) socket.destroy();
   for (const attached of attachments.splice(0)) attached.close();
@@ -313,6 +325,7 @@ describe('attachWebSocket', () => {
     const received = nextMessage(other);
     hub.broadcast({ type: 'pong', t: 9 });
     expect(await received).toBe(JSON.stringify({ type: 'pong', t: 9 }));
+    expect(uncaught).toEqual([]);
   });
 
   it('closes a client that sends more than 64 KiB in one message, and accepts exactly 64 KiB', async () => {
@@ -334,6 +347,20 @@ describe('attachWebSocket', () => {
 
     await expect.poll(() => closeCode).toBe(1009);
     await expect.poll(() => hub.size()).toBe(0);
+    expect(uncaught).toEqual([]);
+  });
+
+  it('answers 401 on the wire, byte for byte, when the session check throws', async () => {
+    const hub = new SocketHub();
+    const base = await startServer(hub, () => {
+      throw new Error('session store unavailable');
+    });
+
+    const { response } = await rawRequest(portOf(base), upgradeRequest(WS_PATH, 'hub_session=good'));
+
+    expect(response).toBe('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n');
+    expect(hub.size()).toBe(0);
+    expect(uncaught).toEqual([]);
   });
 });
 
@@ -344,7 +371,9 @@ function closed(client: WebSocket): Promise<number> {
   });
 }
 
-const LIVE_MS = 1000;
+const LIVE_MS = 2000;
+/** Heartbeat interval for tests that wait on a real sweep; short enough to be quick, long enough not to flake under load. */
+const HEARTBEAT_TEST_MS = 250;
 
 describe('attachWebSocket origin check', () => {
   it('connects when the Origin host matches the Host header, or when there is no Origin', async () => {
@@ -439,7 +468,7 @@ describe('attachWebSocket session recheck', () => {
   it('a heartbeat sweep rechecks every socket against the cookie it connected with', async () => {
     const hub = new SocketHub();
     const { live, isAuthed } = liveSessions('a', 'b');
-    const { base } = await startAttached(hub, isAuthed, 40);
+    const { base } = await startAttached(hub, isAuthed, HEARTBEAT_TEST_MS);
     const a = connect(base, WS_PATH, 'hub_session=a');
     const b = connect(base, WS_PATH, 'hub_session=b');
     await opened(a);
@@ -486,5 +515,34 @@ describe('attachWebSocket session recheck', () => {
     attached.recheck();
 
     expect(checks).toEqual([]);
+  });
+});
+
+describe('attachWebSocket close', () => {
+  it('stops the heartbeat, terminates clients and detaches the upgrade listener', async () => {
+    // Only the interval is faked, so the sockets run in real time while the test drives the heartbeat.
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    const hub = new SocketHub();
+    const sweep = vi.spyOn(hub, 'sweep');
+    const { base, attached } = await startAttached(hub, sessionCookieOk, 1000);
+    const server = servers.at(-1);
+    expect(server?.listenerCount('upgrade')).toBe(1);
+    const client = connect(base, WS_PATH, 'hub_session=good');
+    await opened(client);
+
+    vi.advanceTimersByTime(1000);
+    expect(sweep).toHaveBeenCalledTimes(1);
+
+    const done = closed(client);
+    attached.close();
+    await done;
+
+    vi.advanceTimersByTime(10_000);
+    expect(sweep).toHaveBeenCalledTimes(1); // no heartbeat after close()
+    expect(server?.listenerCount('upgrade')).toBe(0);
+
+    const late = connect(base, WS_PATH, 'hub_session=good');
+    await expect(opened(late)).rejects.toThrow(); // nobody accepts an upgrade any more
+    expect(hub.size()).toBe(0);
   });
 });

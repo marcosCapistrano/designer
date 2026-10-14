@@ -15,13 +15,16 @@ import { openDb } from './db.js';
 import { openRepo } from './git/git.js';
 import { makeTestRepo, TEST_IDENTITY } from './git/test-repo.js';
 import { FakeGitHub } from './github/fake.js';
-import { type HubOptions, type RunningHub, startHub } from './server.js';
+import type { CiStatus, RepoRef } from './github/github.js';
+import { type HubOptions, hubUrl, type RunningHub, startHub } from './server.js';
 
 const PASS = 'correct horse battery staple';
 const HASH = hashPassphrase(PASS, Buffer.alloc(16, 1));
 const OK: CommandResult = { ok: true, code: 0, output: '', timedOut: false, aborted: false };
 const alwaysOk: RunCommand = async () => OK;
 const LIVE_MS = 5000;
+/** Heartbeat interval for tests that wait on a real heartbeat: quick, but long enough not to flake under load. */
+const HEARTBEAT_TEST_MS = 250;
 const START_MS = 1_800_000_000_000;
 
 let root: string;
@@ -265,8 +268,80 @@ describe('startHub', () => {
   });
 });
 
+describe('hubUrl', () => {
+  it('brackets an IPv6 address and leaves a name or IPv4 address alone', () => {
+    expect(hubUrl('127.0.0.1', 8080)).toBe('http://127.0.0.1:8080');
+    expect(hubUrl('localhost', 8080)).toBe('http://localhost:8080');
+    expect(hubUrl('::1', 8080)).toBe('http://[::1]:8080');
+    expect(hubUrl('[::1]', 8080)).toBe('http://[::1]:8080');
+  });
+});
+
+describe('startHub teardown', () => {
+  it('a failure after listening takes the port down again', async () => {
+    const port = await freePort();
+    const log = (line: string): void => {
+      if (line.startsWith('Hub listening')) throw new Error('log sink broke');
+    };
+
+    await expect(start({ config: configFor({ port }), log })).rejects.toThrow('log sink broke');
+
+    await expect(fetch(`http://127.0.0.1:${port}/api/health`)).rejects.toThrow();
+  });
+
+  it('close waits for a CI poll that is mid-way, so its write lands before the database closes', async () => {
+    let entered = false;
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let armed = false;
+    class GatedGitHub extends FakeGitHub {
+      override async checkStatus(r: RepoRef, sha: string): Promise<CiStatus> {
+        if (armed) {
+          entered = true;
+          await gate;
+          this.setChecks(sha, [{ name: 'ci', status: 'completed', conclusion: 'success' }]);
+        }
+        return super.checkStatus(r, sha);
+      }
+    }
+    const hub = await start({
+      github: new GatedGitHub({ autoGreenAfter: 1 }),
+      ciPollMs: 30,
+      runner: new FakeClaudeRunner([
+        [
+          (o) => {
+            writeFileSync(join(o.cwd, 'NOTES.md'), 'notes\n');
+          },
+          { type: 'done', sessionId: 's', ok: true },
+        ],
+      ]),
+    });
+    const cookie = await login(hub.url);
+    const seen = collect(await opened(connect(hub.url, { cookie })));
+    expect((await sendMessage(hub.url, cookie, 'Write notes')).status).toBe(202);
+    await expect
+      .poll(() => seen.some((m) => m.type === 'build.task' && m.task.status === 'review'), { timeout: 20_000 })
+      .toBe(true);
+    armed = true;
+    await expect.poll(() => entered, { timeout: 20_000 }).toBe(true);
+
+    const closing = hub.close();
+    setTimeout(release, 150);
+    await closing;
+
+    const db = openDb(join(dataDir, 'hub.sqlite'));
+    try {
+      expect(new BuildStore(db, () => START_MS).latestTask('demo')?.ci).toBe('success');
+    } finally {
+      db.close();
+    }
+  });
+});
+
 describe('startHub bookkeeping', () => {
-  it('purges expired sessions before listening, using the injected clock', async () => {
+  it('purges sessions that expired while the hub was down, using the injected clock', async () => {
     const seed = openDb(join(dataDir, 'hub.sqlite'));
     const insert = seed.prepare('INSERT INTO auth_sessions (token_hash, created_at, expires_at) VALUES (?, ?, ?)');
     insert.run('expired', START_MS - 10, START_MS - 1);
@@ -381,26 +456,26 @@ describe('startHub sockets and sessions', () => {
   });
 
   it('closes a socket once its session expires, on the next heartbeat', async () => {
-    const hub = await start({ heartbeatMs: 100 });
+    const hub = await start({ heartbeatMs: HEARTBEAT_TEST_MS });
     const cookie = await login(hub.url);
     const socket = await opened(connect(hub.url, { cookie }));
 
     clock += SESSION_TTL_MS;
 
-    expect(await closedWithin(socket, 1000)).toBe(true);
+    expect(await closedWithin(socket, 4 * LIVE_MS)).toBe(true);
   });
 
   it('keeps a socket whose session is still valid across heartbeats', async () => {
-    const hub = await start({ heartbeatMs: 100 });
+    const hub = await start({ heartbeatMs: HEARTBEAT_TEST_MS });
     const cookie = await login(hub.url);
     const socket = await opened(connect(hub.url, { cookie }));
     const seen = collect(socket);
 
     clock += SESSION_TTL_MS - 1;
-    expect(await closedWithin(socket, 600)).toBe(false);
+    expect(await closedWithin(socket, 3 * HEARTBEAT_TEST_MS)).toBe(false);
 
     hub.hub.broadcast({ type: 'pong', t: 4 });
-    await expect.poll(() => seen.length, { timeout: 1000 }).toBe(1);
+    await expect.poll(() => seen.length, { timeout: LIVE_MS }).toBe(1);
     expect(socket.readyState).toBe(WebSocket.OPEN);
   });
 

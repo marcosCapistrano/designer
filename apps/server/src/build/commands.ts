@@ -96,7 +96,9 @@ export async function resolveBuildCommands(dir: string, manifest: AppManifest | 
 
 /**
  * Runs one shell command in its own process group, with scrubbed env and CI=1.
- * On timeout or abort the whole group gets SIGTERM, then SIGKILL after a grace period.
+ * On timeout or abort the whole group gets SIGTERM, then SIGKILL after a grace period; and when the shell has
+ * ended by then, the rest of the group is killed at once, so a background process that ignored SIGTERM
+ * does not outlive the command.
  */
 export const runCommand: RunCommand = (cmd, opts) =>
   new Promise((resolvePromise) => {
@@ -148,6 +150,9 @@ export const runCommand: RunCommand = (cmd, opts) =>
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      // The shell is gone, so the pending SIGKILL timer would be cleared below. A timed-out or aborted command
+      // may have left a daemonized child that ignores SIGTERM and holds no pipe; the group is killed now.
+      if (timedOut || aborted) killGroup('SIGKILL');
       if (killTimer !== undefined) clearTimeout(killTimer);
       opts.signal?.removeEventListener('abort', onAbort);
       resolvePromise({

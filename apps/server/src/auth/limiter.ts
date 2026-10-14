@@ -35,6 +35,7 @@ export class LoginLimiter {
     }
   }
 
+  /** Forgets the failures counted so far (after a good login). It does not lift a lock that is already in force. */
   reset(): void {
     this.failures = [];
   }

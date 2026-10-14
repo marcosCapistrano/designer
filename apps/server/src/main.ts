@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { runCommand } from './build/commands.js';
 import { SdkClaudeRunner } from './claude/sdk.js';
 import { ConfigError, type HubConfig, loadConfig } from './config.js';
+import { errorText } from './errors.js';
 import { OctokitGitHub } from './github/octokit.js';
 import { startHub } from './server.js';
 
@@ -12,8 +13,7 @@ const MAX_LOGGED_MESSAGE_CHARS = 500;
 
 /** One log line for a failure: the message only (never the stack or the error object), JSON-escaped and cut. */
 function oneLine(prefix: string, err: unknown): string {
-  const message = err instanceof Error ? err.message : String(err);
-  return `${prefix}: ${JSON.stringify(message.slice(0, MAX_LOGGED_MESSAGE_CHARS))}`;
+  return `${prefix}: ${JSON.stringify(errorText(err).slice(0, MAX_LOGGED_MESSAGE_CHARS))}`;
 }
 
 /** The hub cannot trust its state after one of these, so it logs one line and exits; systemd restarts it. */

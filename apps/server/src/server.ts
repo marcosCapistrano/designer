@@ -13,6 +13,7 @@ import { BuildStore } from './build/store.js';
 import type { ClaudeRunner } from './claude/runner.js';
 import type { HubConfig } from './config.js';
 import { openDb } from './db.js';
+import { errorText } from './errors.js';
 import { type GitRepo, openRepo as openGitRepo } from './git/git.js';
 import type { GitHub } from './github/github.js';
 import { attachWebSocket } from './ws/attach.js';
@@ -43,12 +44,17 @@ export interface RunningHub {
   close(): Promise<void>;
 }
 
+/** Longest close() waits for a background tick that is still running before it closes the database. */
+const TICK_DRAIN_MS = 10_000;
+
 const DEFAULT_CI_POLL_MS = 30_000;
 const DEFAULT_RETRY_POLL_MS = 60_000;
 const PURGE_SESSIONS_MS = 3_600_000;
 
-function errorText(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
+/** The URL a listener on `bind`:`port` answers at; an IPv6 address goes in brackets. */
+export function hubUrl(bind: string, port: number): string {
+  const bare = bind.startsWith('[') && bind.endsWith(']') ? bind.slice(1, -1) : bind;
+  return `http://${bare.includes(':') ? `[${bare}]` : bare}:${port}`;
 }
 
 /**
@@ -111,40 +117,25 @@ export async function startHub(opts: HubOptions): Promise<RunningHub> {
     const address = server.address();
     const port = typeof address === 'object' && address !== null ? address.port : config.port;
 
-    const sockets = attachWebSocket(server, hub, {
-      isAuthed: (cookieHeader) => sessions.valid(readCookie(cookieHeader, SESSION_COOKIE)),
-      heartbeatMs: opts.heartbeatMs,
-    });
-    recheckSockets = sockets.recheck;
-
+    let sockets: ReturnType<typeof attachWebSocket> | null = null;
     let closing = false;
-    /** Runs `task` every `ms` milliseconds, one at a time; an error is logged unless the hub is shutting down. */
-    const every = (ms: number, label: string, task: () => unknown): ReturnType<typeof setInterval> => {
-      let busy = false;
-      const timer = setInterval(() => {
-        if (busy) return;
-        busy = true;
-        void (async () => {
-          try {
-            await task();
-          } catch (err) {
-            if (!closing) log(`${label} failed: ${JSON.stringify(errorText(err))}`);
-          } finally {
-            busy = false;
-          }
-        })();
-      }, ms);
-      timer.unref();
-      return timer;
-    };
-    const timers = [
-      every(opts.ciPollMs ?? DEFAULT_CI_POLL_MS, 'CI poll', () => build.pollCi()),
-      every(opts.retryPollMs ?? DEFAULT_RETRY_POLL_MS, 'Queued task retry', () => build.retryQueued()),
-      every(PURGE_SESSIONS_MS, 'Session purge', () => sessions.purgeExpired()),
-    ];
+    const timers: ReturnType<typeof setInterval>[] = [];
+    /** Background ticks (CI poll, queued retry, session purge) that are running right now. */
+    const ticks = new Set<Promise<void>>();
 
-    const url = `http://${config.bind}:${port}`;
-    log(`Hub listening on ${url}`);
+    /** Waits for the running ticks, but not for ever: a tick stuck on GitHub must not hold the shutdown. */
+    const drainTicks = async (): Promise<void> => {
+      if (ticks.size === 0) return;
+      let giveUp: ReturnType<typeof setTimeout> | undefined;
+      const deadline = new Promise<void>((resolve) => {
+        giveUp = setTimeout(resolve, TICK_DRAIN_MS);
+      });
+      try {
+        await Promise.race([Promise.allSettled([...ticks]), deadline]);
+      } finally {
+        clearTimeout(giveUp);
+      }
+    };
 
     let closed: Promise<void> | null = null;
     const close = (): Promise<void> => {
@@ -155,9 +146,12 @@ export async function startHub(opts: HubOptions): Promise<RunningHub> {
         // until the runs have ended, so their last messages still reach the browsers.
         const stopped = new Promise<void>((resolve) => server.close(() => resolve()));
         try {
+          // A tick that is mid-way would write to the database after it closed; a retry tick could start a run
+          // after stopAll has looked. So the ticks finish first.
+          await drainTicks();
           await build.stopAll();
         } finally {
-          sockets.close();
+          sockets?.close();
           server.closeAllConnections();
           await stopped;
           db.close();
@@ -166,7 +160,47 @@ export async function startHub(opts: HubOptions): Promise<RunningHub> {
       return closed;
     };
 
-    return { url, port, hub, build, close };
+    try {
+      sockets = attachWebSocket(server, hub, {
+        isAuthed: (cookieHeader) => sessions.valid(readCookie(cookieHeader, SESSION_COOKIE)),
+        heartbeatMs: opts.heartbeatMs,
+      });
+      recheckSockets = sockets.recheck;
+
+      /** Runs `task` every `ms` milliseconds, one at a time; an error is logged unless the hub is shutting down. */
+      const every = (ms: number, label: string, task: () => unknown): ReturnType<typeof setInterval> => {
+        let busy = false;
+        const timer = setInterval(() => {
+          if (busy) return;
+          busy = true;
+          const tick: Promise<void> = (async () => {
+            try {
+              await task();
+            } catch (err) {
+              if (!closing) log(`${label} failed: ${JSON.stringify(errorText(err))}`);
+            } finally {
+              busy = false;
+            }
+          })().finally(() => ticks.delete(tick));
+          ticks.add(tick);
+        }, ms);
+        timer.unref();
+        return timer;
+      };
+      timers.push(
+        every(opts.ciPollMs ?? DEFAULT_CI_POLL_MS, 'CI poll', () => build.pollCi()),
+        every(opts.retryPollMs ?? DEFAULT_RETRY_POLL_MS, 'Queued task retry', () => build.retryQueued()),
+        every(PURGE_SESSIONS_MS, 'Session purge', () => sessions.purgeExpired()),
+      );
+
+      const url = hubUrl(config.bind, port);
+      log(`Hub listening on ${url}`);
+      return { url, port, hub, build, close };
+    } catch (err) {
+      // The server is already listening: take it, the sockets and the timers down again, not just the database.
+      await close().catch(() => undefined);
+      throw err;
+    }
   } catch (err) {
     db.close();
     throw err;
