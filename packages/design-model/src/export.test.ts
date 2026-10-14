@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'vitest';
 import { applyOp } from './apply.js';
-import { exportPage } from './export.js';
+import { EXPORT_NODE_LIMIT, exportPage } from './export.js';
 import { sampleDoc } from './fixtures.js';
 import { findNode } from './tree.js';
 import type {
@@ -230,6 +230,13 @@ describe('exportPage', () => {
     expect(exportOk(doc).css).toBe('[data-d-id="n3"]{padding:8px;}\n[data-d-id="n5/n6"]{padding:16px;}');
   });
 
+  test('escapes <, >, newline, quote and backslash in ids used as CSS selector strings', () => {
+    const node: ElementNode = { ...el('x', 'div'), id: 'a<b>\nc"d\\e', style: { base: { padding: '8px' } } };
+    const { css, html } = exportOk(docWith(el('p1', 'main', [node])));
+    expect(css).toBe('[data-d-id="a\\3C b\\3E \\A c\\"d\\\\e"]{padding:8px;}');
+    expect(html).toContain('<div data-d-id="a&lt;b&gt;\nc&quot;d\\e"></div>');
+  });
+
   test('returns an error for an unknown page', () => {
     expect(exportPage(sampleDoc(), 'nope')).toEqual({ ok: false, error: 'Page nope not found' });
   });
@@ -251,6 +258,40 @@ describe('exportPage', () => {
     const b = comp('B', el('b1', 'div', [inst('b2', 'A')]));
     const doc = docWith(el('p1', 'main', [inst('p9', 'A')]), [a, b]);
     expect(exportPage(doc, 'home')).toEqual({ ok: false, error: 'Component cycle at A' });
+  });
+});
+
+// C0 is a div with one text child, so 2 nodes. Each C_k is a div holding two instances of
+// C_(k-1), so C_k expands to 3 * 2^k - 1 nodes: C5 is 95 nodes and C14 is 49151.
+function ladder(levels: number): ComponentDef[] {
+  const defs = [comp('C0', el('c0', 'div', [txt('c0t', 'leaf')]))];
+  for (let k = 1; k <= levels; k++) {
+    defs.push(comp(`C${k}`, el(`d${k}`, 'div', [inst(`a${k}`, `C${k - 1}`), inst(`b${k}`, `C${k - 1}`)])));
+  }
+  return defs;
+}
+
+describe('export node budget', () => {
+  test('refuses a page that expands past the limit, without building the output', () => {
+    const doc = docWith(el('p1', 'main', [inst('p9', 'C14')]), ladder(14));
+    const started = performance.now();
+    expect(exportPage(doc, 'home')).toEqual({ ok: false, error: 'Page home exceeds 20000 nodes' });
+    expect(performance.now() - started).toBeLessThan(1000);
+  });
+
+  test('a page within the limit still exports', () => {
+    const doc = docWith(el('p1', 'main', [inst('p9', 'C5')]), ladder(5));
+    expect(exportPage(doc, 'home').ok).toBe(true);
+  });
+
+  test('the limit is inclusive: exactly EXPORT_NODE_LIMIT nodes exports, one more is refused', () => {
+    const texts = (count: number): TextNode[] => Array.from({ length: count }, (_, i) => txt(`t${i}`, 'x'));
+    // The page root counts as one node.
+    expect(exportPage(docWith(el('p1', 'main', texts(EXPORT_NODE_LIMIT - 1))), 'home').ok).toBe(true);
+    expect(exportPage(docWith(el('p1', 'main', texts(EXPORT_NODE_LIMIT))), 'home')).toEqual({
+      ok: false,
+      error: `Page home exceeds ${EXPORT_NODE_LIMIT} nodes`,
+    });
   });
 });
 

@@ -27,6 +27,10 @@ interface Styles {
   mobile: StyleMap;
 }
 
+// Most nodes one page may expand to. Components are expanded, so a small page can hold a
+// large tree; the count runs while expanding, so an oversized page is refused before any output is built.
+export const EXPORT_NODE_LIMIT = 20000;
+
 // The tree after expansion: component instances are replaced by their elements, and ids,
 // attribute values and text are final. Only the HTML and CSS renderers read this.
 interface TextOut {
@@ -53,6 +57,22 @@ interface Scope {
   props: Record<string, string>;
   // Components being expanded, outermost first. Used to detect a component that contains itself.
   components: string[];
+  // Shared by every scope of one page's expansion.
+  budget: Budget;
+}
+
+interface Budget {
+  pageId: string;
+  used: number;
+}
+
+// Counts one expanded node. Returns an error once the page has more than EXPORT_NODE_LIMIT.
+function takeNode(scope: Scope): Result<null> {
+  scope.budget.used += 1;
+  if (scope.budget.used > EXPORT_NODE_LIMIT) {
+    return { ok: false, error: `Page ${scope.budget.pageId} exceeds ${EXPORT_NODE_LIMIT} nodes` };
+  }
+  return { ok: true, value: null };
 }
 
 export function exportPage(
@@ -62,7 +82,13 @@ export function exportPage(
   const page = ownValue(doc.pages, pageId);
   if (page === undefined) return { ok: false, error: `Page ${pageId} not found` };
 
-  const root = expandElement(page.root, { doc, prefix: '', props: {}, components: [] });
+  const root = expandElement(page.root, {
+    doc,
+    prefix: '',
+    props: {},
+    components: [],
+    budget: { pageId, used: 0 },
+  });
   if (!root.ok) return root;
   return {
     ok: true,
@@ -72,6 +98,8 @@ export function exportPage(
 
 function expandNode(node: DesignNode, scope: Scope): Result<Out> {
   if (node.kind === 'text') {
+    const counted = takeNode(scope);
+    if (!counted.ok) return counted;
     return { ok: true, value: { kind: 'text', text: substituteProps(node.text, scope.props) } };
   }
   if (node.kind === 'element') return expandElement(node, scope);
@@ -83,6 +111,8 @@ function expandElement(
   scope: Scope,
   styles: Styles = layerStyles(node.style),
 ): Result<ElementOut> {
+  const counted = takeNode(scope);
+  if (!counted.ok) return counted;
   const children = expandAll(node.children, scope);
   if (!children.ok) return children;
   return {
@@ -126,6 +156,7 @@ function expandInstance(node: InstanceNode, scope: Scope): Result<ElementOut> {
       prefix: `${scope.prefix}${node.id}/`,
       props: resolveProps(def, passed),
       components: [...scope.components, node.component],
+      budget: scope.budget,
     },
     layerStyles(node.style, def.root.style),
   );
@@ -226,7 +257,16 @@ function ruleFor(id: string, map: StyleMap): string {
   return `[data-d-id="${cssString(id)}"]{${decls}}`;
 }
 
-// Escapes the characters that would end a quoted CSS string.
+// Escapes the characters that would end a quoted CSS string or the <style> element around it.
+// Hex escapes end with a space, so a hex digit that follows stays literal.
+const CSS_STRING_ESCAPES: Record<string, string> = {
+  '"': '\\"',
+  '\\': '\\\\',
+  '<': '\\3C ',
+  '>': '\\3E ',
+  '\n': '\\A ',
+};
+
 function cssString(value: string): string {
-  return value.replace(/["\\]/g, (ch) => `\\${ch}`);
+  return value.replace(/["\\<>\n]/g, (ch) => CSS_STRING_ESCAPES[ch] ?? ch);
 }

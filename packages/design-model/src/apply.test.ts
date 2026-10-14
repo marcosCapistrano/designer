@@ -76,6 +76,11 @@ describe('setStyle', () => {
     expect(error).toContain('cannot be styled');
   });
 
+  test('rejects a value with an unclosed function', () => {
+    const error = rejected(sampleDoc(), { op: 'setStyle', node: 'n3', device: 'base', prop: 'color', value: 'var(--a' });
+    expect(error).toBe('Value for color has unbalanced brackets or quotes');
+  });
+
   test('rejects an unknown device', () => {
     const op = { op: 'setStyle', node: 'n3', device: 'desktop', prop: 'padding', value: '4px' } as unknown as Op;
     expect(rejected(sampleDoc(), op)).toContain('Unknown device');
@@ -179,6 +184,11 @@ describe('setToken', () => {
   test('rejects an empty token value', () => {
     const error = rejected(sampleDoc(), { op: 'setToken', group: 'color', name: 'primary', value: '' });
     expect(error).toContain('Invalid value');
+  });
+
+  test('rejects a token value with an unclosed quote', () => {
+    const error = rejected(sampleDoc(), { op: 'setToken', group: 'color', name: 'primary', value: '"abc' });
+    expect(error).toBe('Value for --color-primary has unbalanced brackets or quotes');
   });
 });
 

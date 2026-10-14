@@ -1,4 +1,3 @@
-import { canonicalStringify } from './canonical.js';
 import { basicHandlers } from './ops/basic.js';
 import { componentHandlers } from './ops/components.js';
 import type { AnyOpHandler, HandlerMap } from './ops/handler.js';
@@ -71,10 +70,11 @@ function changedEntries(before: DesignDoc, after: DesignDoc): RestoreEntry[] {
   return entries.sort(compareEntries);
 }
 
+// JSON.stringify is enough here: a key-order difference reads as changed, which only adds a restore entry.
 function changedKeys<T>(before: Record<string, T>, after: Record<string, T>): string[] {
   const keys = new Set([...Object.keys(before), ...Object.keys(after)]);
   return [...keys].filter(
-    (key) => canonicalStringify(ownValue(before, key)) !== canonicalStringify(ownValue(after, key)),
+    (key) => JSON.stringify(ownValue(before, key)) !== JSON.stringify(ownValue(after, key)),
   );
 }
 

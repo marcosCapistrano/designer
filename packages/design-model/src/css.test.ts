@@ -54,6 +54,9 @@ describe('validateStyle', () => {
     ['--x', 'a\\b'],
     ['padding', '1px\n2px'],
     ['color', 'var(--x)}'],
+    ['--x', 'a>b'],
+    ['--x', 'a\rb'],
+    ['--x', 'a\fb'],
   ])('rejects a forbidden character in %s: %j', (prop, value) => {
     expect(validateStyle(prop, value)).toContain('forbidden character');
   });
@@ -61,5 +64,38 @@ describe('validateStyle', () => {
   test('rejects CSS comment markers in a value', () => {
     expect(validateStyle('padding', '1px /*')).toContain('forbidden character');
     expect(validateStyle('--x', 'a */ b')).toContain('forbidden character');
+  });
+
+  test.each([
+    ['color', 'red !important'],
+    ['--x', '1 ! IMPORTANT'],
+    ['padding', '1px!important'],
+    ['--x', '1 !\timportant'],
+    ['--x', '"a !important"'],
+  ])('rejects !important in %s: %j', (prop, value) => {
+    expect(validateStyle(prop, value)).toBe(`Value for ${prop} must not use !important`);
+  });
+
+  test.each([
+    ['color', 'var(--a'],
+    ['--x', '"abc'],
+    ['--x', '\'abc'],
+    ['--x', `"a'`],
+    ['--x', '('],
+    ['--x', '[[['],
+    ['--x', ')'],
+    ['--x', 'a(b]'],
+    ['--x', 'var(--a))'],
+  ])('rejects unbalanced brackets or quotes in %s: %j', (prop, value) => {
+    expect(validateStyle(prop, value)).toBe(`Value for ${prop} has unbalanced brackets or quotes`);
+  });
+
+  test.each([
+    ['--x', '"a(b"'],
+    ['--x', `'a"b'`],
+    ['color', 'var(--a, rgb(0 0 0))'],
+    ['content', '"[x]"'],
+  ])('accepts balanced brackets and quotes in %s: %j', (prop, value) => {
+    expect(validateStyle(prop, value)).toBeNull();
   });
 });
