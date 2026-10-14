@@ -88,6 +88,6 @@ Scripts live in `ops/hub/`: `bootstrap.sh` (server setup), `set-secret.sh` (stor
     ```
 
 13. **Known limits**
-    Claude runs as the same Unix user as the hub. The deploy guard is a tool policy, not a sandbox. The hub's unit mounts `/opt/hub` read-only, so a Claude run cannot edit the hub's own code; it can still read the hub's credentials.
+    Claude runs as the same Unix user as the hub. The deploy guard is a tool policy, not a sandbox. The hub's unit mounts `/opt/hub` read-only, so a Claude run cannot edit the hub's code while the hub runs. It can still read the hub's credentials, and it can write the hub user's own `~/.gitconfig` and `~/.npmrc`, which the update step (step 12) loads. Until the deploy plan moves Claude to its own user, read those two files before you run an update.
 
     Secrets are encrypted with the systemd host key (Hetzner CX servers have no TPM).
