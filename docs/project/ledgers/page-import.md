@@ -13,7 +13,7 @@ Base: `ed55a88` (PRs #1–#4 merged). Branch: `feat/page-import-extractor`.
 - Components are expanded per occurrence for this foundation. Shared component definitions/instances remain required follow-up work before page import is complete. Next document shells (`html`, `body`, `head`) currently fail model validation; only model-safe static layouts are supported.
 - Updated the saved continuation prompt and README: PR #3 is merged; adhunters-v4 conversion stays paused on draft PR #50; its master merge deploys production and staging shares the production DB.
 
-Validation: 18 importer fixture tests pass; full workspace typecheck passes; server has 1,182 passing tests and one skipped live test; client build and size check pass (23,993 bytes JS gzip). Local full-suite runs hit existing design-model performance limits (166/192 ms vs 150 ms) and sandbox-blocked Chromium. The latter is being verified outside the sandbox with the downloaded Playwright browser; performance assertions are unchanged. CI remains the required PR gate.
+Validation: 18 importer fixture tests pass; full workspace typecheck passes; server has 1,182 passing tests and one skipped live test; renderer has 94 passing tests; client has 352 passing tests and one skipped manual test. Client build and size check pass (23,993 bytes JS gzip). Local full-suite runs hit existing design-model performance limits (166/192 ms vs 150 ms) and sandbox-blocked Chromium. Browser suites passed outside the sandbox with the downloaded Playwright browser; performance assertions are unchanged. CI remains the required PR gate.
 
 ## Remaining tasks
 
