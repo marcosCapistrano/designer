@@ -2,9 +2,13 @@
 const isOmitted = (value: unknown): boolean =>
   value === undefined || typeof value === 'function' || typeof value === 'symbol';
 
+const SURROGATE = /[\uD800-\uDFFF]/;
+
 // Compares by code point. The default string sort compares UTF-16 code units, which
-// disagrees for astral characters versus U+E000..U+FFFF.
+// disagrees for astral characters versus U+E000..U+FFFF. Without a surrogate in either string
+// the two orders agree, so the plain comparison is used.
 function compareCodePoints(a: string, b: string): number {
+  if (!SURROGATE.test(a) && !SURROGATE.test(b)) return a < b ? -1 : a > b ? 1 : 0;
   const x = Array.from(a, (ch) => ch.codePointAt(0) ?? 0);
   const y = Array.from(b, (ch) => ch.codePointAt(0) ?? 0);
   const n = Math.min(x.length, y.length);

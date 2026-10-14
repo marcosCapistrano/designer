@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'vitest';
 import { sampleDoc } from './fixtures.js';
-import { allIds, allocIds, findNode, isDescendant, nextSeq, walkDoc } from './tree.js';
+import { allIds, allocIds, depthOf, findNode, heightOf, isDescendant, nextSeq, walkDoc } from './tree.js';
 import type { DesignDoc, DesignNode, ElementNode } from './types.js';
 
 function nodeById(doc: DesignDoc, id: string): DesignNode {
@@ -142,6 +142,82 @@ describe('allocIds', () => {
     doc.meta.seq = 1;
     homeRoot(doc).children.push({ id: 'n41', kind: 'text', text: 'far' });
     expect(allocIds(doc, 1)).toEqual(['n42']);
+  });
+
+  test('accepts counts of 0 and 1000', () => {
+    expect(allocIds(sampleDoc(), 0)).toEqual([]);
+    expect(allocIds(sampleDoc(), 1000)).toHaveLength(1000);
+  });
+
+  test.each([-1, 1.5, 1001, NaN, Infinity])('throws a RangeError for the count %s', (count) => {
+    expect(() => allocIds(sampleDoc(), count)).toThrow(RangeError);
+    expect(() => allocIds(sampleDoc(), count)).toThrow('allocIds count must be an integer from 0 to 1000');
+  });
+
+  test('allocates the largest id n999999999999999 and no further', () => {
+    const doc = sampleDoc();
+    doc.meta.seq = 999999999999999;
+    expect(allocIds(doc, 1)).toEqual(['n999999999999999']);
+    expect(() => allocIds(doc, 2)).toThrow(RangeError);
+    expect(() => allocIds(doc, 2)).toThrow('allocIds would exceed the largest node id n999999999999999');
+  });
+
+  test('throws when the highest existing id leaves no room for the count', () => {
+    const doc = sampleDoc();
+    homeRoot(doc).children.push({ id: 'n999999999999998', kind: 'text', text: 'last' });
+    expect(allocIds(doc, 1)).toEqual(['n999999999999999']);
+    expect(() => allocIds(doc, 2)).toThrow('allocIds would exceed the largest node id n999999999999999');
+  });
+
+  test('throws when meta.seq is already past the largest id', () => {
+    const doc = sampleDoc();
+    doc.meta.seq = 1000000000000000;
+    expect(() => allocIds(doc, 1)).toThrow(RangeError);
+  });
+
+  test('a count of 0 never throws, even past the largest id', () => {
+    const doc = sampleDoc();
+    doc.meta.seq = 1000000000000000;
+    expect(allocIds(doc, 0)).toEqual([]);
+  });
+});
+
+describe('depthOf', () => {
+  test('the page root is level 1', () => {
+    expect(depthOf(sampleDoc(), 'n1')).toBe(1);
+  });
+
+  test('each level below the root adds one', () => {
+    expect(depthOf(sampleDoc(), 'n2')).toBe(2);
+    expect(depthOf(sampleDoc(), 'n3')).toBe(3);
+    expect(depthOf(sampleDoc(), 'n4')).toBe(4);
+    expect(depthOf(sampleDoc(), 'n5')).toBe(2);
+  });
+
+  test('a component root is level 1', () => {
+    expect(depthOf(sampleDoc(), 'n6')).toBe(1);
+    expect(depthOf(sampleDoc(), 'n8')).toBe(3);
+  });
+
+  test('throws for a missing id', () => {
+    expect(() => depthOf(sampleDoc(), 'zzz')).toThrow('Node zzz not found');
+  });
+});
+
+describe('heightOf', () => {
+  test('a text or instance node is one level', () => {
+    expect(heightOf({ id: 'n9', kind: 'text', text: 'x' })).toBe(1);
+    expect(heightOf({ id: 'n9', kind: 'instance', component: 'Card', props: {}, style: { base: {} } })).toBe(1);
+  });
+
+  test('an element without children is one level', () => {
+    expect(heightOf({ id: 'n9', kind: 'element', tag: 'p', attrs: {}, style: { base: {} }, children: [] })).toBe(1);
+    expect(heightOf(nodeById(sampleDoc(), 'n7'))).toBe(2);
+  });
+
+  test('counts the levels of the deepest branch', () => {
+    expect(heightOf(nodeById(sampleDoc(), 'n1'))).toBe(4);
+    expect(heightOf(nodeById(sampleDoc(), 'n6'))).toBe(3);
   });
 });
 

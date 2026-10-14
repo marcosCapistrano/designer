@@ -68,6 +68,21 @@ function locateIn(
   return null;
 }
 
+// The level of a node, counting the page or component root as level 1.
+export function depthOf(doc: DesignDoc, id: string): number {
+  const hit = findNode(doc, id);
+  if (hit === null) throw new Error(`Node ${id} not found`);
+  return hit.path.length + 1;
+}
+
+// How many levels a subtree takes, counting its own root: a leaf is 1.
+export function heightOf(node: DesignNode): number {
+  if (node.kind !== 'element') return 1;
+  let tallest = 0;
+  for (const child of node.children) tallest = Math.max(tallest, heightOf(child));
+  return 1 + tallest;
+}
+
 export function walkDoc(
   doc: DesignDoc,
   visit: (node: DesignNode, container: Container) => void,
@@ -93,9 +108,19 @@ export function nextSeq(doc: DesignDoc): number {
   return next;
 }
 
+const MAX_ALLOC = 1000;
+// The largest sequence number a node id may carry. Matches MAX_SEQUENCE in rules.ts.
+const MAX_SEQUENCE = 999999999999999;
+
 // Does not change doc. The caller stores the new seq when it applies the op.
 export function allocIds(doc: DesignDoc, count: number): string[] {
+  if (!Number.isInteger(count) || count < 0 || count > MAX_ALLOC) {
+    throw new RangeError(`allocIds count must be an integer from 0 to ${MAX_ALLOC}`);
+  }
   const start = nextSeq(doc);
+  if (count > 0 && start + count - 1 > MAX_SEQUENCE) {
+    throw new RangeError('allocIds would exceed the largest node id n999999999999999');
+  }
   return Array.from({ length: count }, (_, i) => `n${start + i}`);
 }
 
