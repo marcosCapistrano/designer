@@ -9,6 +9,7 @@ const DEPLOY_SCRIPT = 'Deploying is a Hub action; deploy scripts are not allowed
 const HETZNER = 'Deploying is a Hub action; the Hetzner API is not allowed in Build.';
 const ALIAS = 'Git and gh aliases can run deploys; they are not allowed in Build.';
 const UNCLEAR = 'Build cannot tell which program this runs; name the program directly.';
+const SETTINGS = 'Claude Code settings and MCP config are managed by the Hub; do not edit them in Build.';
 const program = (name: string): string => `Deploying is a Hub action; ${name} is not allowed in Build.`;
 const DOCKER = program('docker');
 const SSH = program('ssh');
@@ -826,6 +827,82 @@ describe('deployDenyReason fix round 5', () => {
   });
 });
 
+// ---------------------------------------------------------------------------------------------
+// Plan 3 final wave, lane B: the Ruling 16 carries (one rule each) and the push-config rule.
+// ---------------------------------------------------------------------------------------------
+
+const DENIED_FW: Array<[string, string]> = [
+  // 1. I-1/R1, R2: a quoted or ANSI-C `$(` hidden in a word whose `expanded` flag is set for another reason.
+  ["declare $'a[$(ssh h)]'=1", UNCLEAR],
+  ["declare 'a[$(ssh h)]'$E=1", UNCLEAR],
+  ["declare $'a[\\x24(ssh h)]'=1", UNCLEAR],
+  ["x='$(ssh h)'$E; declare -p x", UNCLEAR],
+  // 2. R3: a single-quoted `$(` or backtick inside arithmetic.
+  ["echo $(( '$(ssh h)' + 1 ))", UNCLEAR],
+  ["(( '`ssh h`' + 1 ))", UNCLEAR],
+  // 3. R4: `$'...'` that hides a substitution inside `${...}`.
+  ["echo ${a[$'$(ssh h)']}", UNCLEAR],
+  ["echo ${a[$'\\x24(ssh h)']}", UNCLEAR],
+  // 4. I-2/R5: a shell's rc/init file read from stdin.
+  ['bash --rcfile /dev/stdin -ic : <<< x', UNCLEAR],
+  ['bash --init-file=- -ic :', UNCLEAR],
+  ['bash --rcfile /proc/thread-self/fd/0 -ic :', UNCLEAR],
+  ['bash --rcfile "$F" -ic :', UNCLEAR],
+  // 5. R7: a dynamic key after --file / -f.
+  ['git config --file .git/config "$K" push', UNCLEAR],
+  ['git config -f x "$K"', UNCLEAR],
+  // 6. R8: push-shaped third-party subcommands, plain and dashed.
+  ['git annex sync', GIT_PUSH],
+  ['git annex copy --to origin .', GIT_PUSH],
+  ['git annex move x --to=r', GIT_PUSH],
+  ['git annex push', GIT_PUSH],
+  ['git-annex sync', GIT_PUSH],
+  ['git lfs push origin main', GIT_PUSH],
+  // Final-review I1: config writes that redirect the hub's own push.
+  ["git config remote.origin.push 'refs/heads/build/x:refs/heads/main'", GIT_PUSH],
+  ['git config --add remote.origin.push x', GIT_PUSH],
+  ['git config --file .git/config remote.origin.pushurl x', GIT_PUSH],
+  ['git config set remote.origin.url x', GIT_PUSH],
+  ['git config url.x.insteadOf y', GIT_PUSH],
+  ['git config URL.x.PushInsteadOf y', GIT_PUSH],
+  ['git remote set-url origin x', GIT_PUSH],
+  ['git remote set-url --push origin x', GIT_PUSH],
+];
+
+const ALLOWED_FW: string[] = [
+  // Real substitutions and plain ANSI-C strings in data builtins.
+  'declare "x=$(pwd)"',
+  "declare x=$'line\\n'",
+  "echo ${x:-$'\\n'}",
+  'echo $(( 1 + 2 ))',
+  // A shell rc file that is a real file is the parked script-file class.
+  "bash --rcfile .bashrc.test -ic 'echo hi'",
+  // Reads, and writes to other keys.
+  'git config --get remote.origin.url',
+  'git config remote.origin.url',
+  'git config get remote.origin.url',
+  'git config --list',
+  'git config --file .gitmodules submodule.x.path',
+  'git config -f x user.name y',
+  'git remote -v',
+  'git remote get-url origin',
+  // Pull-shaped and read-only git-annex.
+  'git annex status',
+  'git annex get x',
+  'git annex copy --from origin x',
+  'git-annex info',
+];
+
+describe('deployDenyReason final wave B', () => {
+  it.each(DENIED_FW)('denies %j', (command, reason) => {
+    expect(deployDenyReason(command)).toBe(reason);
+  });
+
+  it.each(ALLOWED_FW)('allows %j', (command) => {
+    expect(deployDenyReason(command)).toBeNull();
+  });
+});
+
 describe('checkToolUse', () => {
   it('edits stay in the checkout', () => {
     expect(checkToolUse('/repo', 'Write', { file_path: '/repo/src/a.ts' })).toBeNull();
@@ -855,4 +932,33 @@ describe('checkToolUse', () => {
     expect(checkToolUse('/repo', 'Bash', { command: 'git push' })).toBe(GIT_PUSH);
     expect(checkToolUse('/repo', 'Bash', { command: 'pnpm test' })).toBeNull();
   });
+
+  it('any tool with a string command is checked like Bash (Monitor and future tools)', () => {
+    expect(checkToolUse('/repo', 'Monitor', { command: 'git push origin HEAD:main' })).toBe(GIT_PUSH);
+    expect(checkToolUse('/repo', 'SomeFutureTool', { command: 'git push' })).toBe(GIT_PUSH);
+    expect(checkToolUse('/repo', 'Monitor', { command: 'tail -f build.log' })).toBeNull();
+    expect(checkToolUse('/repo', 'Monitor', { command: ['git', 'push'] })).toBeNull();
+  });
+
+  it.each([
+    '.claude/settings.json',
+    '.claude/settings.local.json',
+    '.claude/settings.backup.json',
+    'apps/web/.claude/settings.json',
+    '/repo/.claude/settings.local.json',
+    '.mcp.json',
+    'apps/web/.mcp.json',
+  ])('blocks edits to Claude Code settings and MCP config: %s', (file) => {
+    for (const tool of ['Write', 'Edit', 'MultiEdit']) {
+      expect(checkToolUse('/repo', tool, { file_path: file })).toBe(SETTINGS);
+    }
+    expect(checkToolUse('/repo', 'NotebookEdit', { notebook_path: file })).toBe(SETTINGS);
+  });
+
+  it.each(['.claude/commands/ship.md', '.claude/agents/a.md', 'src/settings.json', 'mcp.json', 'docs/.mcp.json.md'])(
+    'other files near them stay editable: %s',
+    (file) => {
+      expect(checkToolUse('/repo', 'Write', { file_path: file })).toBeNull();
+    },
+  );
 });

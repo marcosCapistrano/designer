@@ -22,6 +22,38 @@ export interface LexWord {
   expanded: boolean;
   /** The word has an unquoted bracket glob or brace expansion. */
   bracketed: boolean;
+  /**
+   * The word's quoted, escaped or `$'...'` text holds a `$(` or a backtick that bash does not
+   * substitute here, but that a data builtin (declare, printf -v, read, ...) evaluates later. Set
+   * whatever the word's other parts are, so an expansion elsewhere in the word does not hide it.
+   */
+  hidden: boolean;
+}
+
+/** A command substitution written as text: `$(` (not arithmetic `$((`) or a backtick. */
+export function hasSubstitutionText(text: string): boolean {
+  return /\$\((?!\()/.test(text) || text.includes('`');
+}
+
+/**
+ * The text an ANSI-C `$'...'` string stands for, as far as it matters here: escapes are decoded so
+ * that `\x24(` or `\140` is seen as the `$(` or backtick it produces. Unknown escapes keep their char.
+ */
+export function decodeAnsiC(raw: string): string {
+  const body = raw.slice(2, raw.endsWith("'") && raw.length > 2 ? -1 : undefined);
+  return body.replace(
+    /\\(x[0-9A-Fa-f]{1,2}|u[0-9A-Fa-f]{1,4}|U[0-9A-Fa-f]{1,8}|[0-7]{1,3}|c[\s\S]|[\s\S])/g,
+    (_match, esc: string) => {
+      const kind = esc.charAt(0);
+      if (kind === 'x' || kind === 'u' || kind === 'U') {
+        const code = Number.parseInt(esc.slice(1), 16);
+        return code <= 0x10ffff ? String.fromCodePoint(code) : '';
+      }
+      if (kind >= '0' && kind <= '7') return String.fromCharCode(Number.parseInt(esc, 8) & 0xff);
+      if (kind === 'c') return String.fromCharCode(esc.charCodeAt(1) & 0x1f);
+      return esc;
+    },
+  );
 }
 
 export interface LexCommand {
@@ -94,10 +126,16 @@ class WordBuilder {
   private readonly braces: boolean[] = [];
   private openBracket = false;
   private prevDot = false;
+  /**
+   * The word's literal text only (plain, quoted, escaped and decoded `$'...'` parts). An expansion
+   * adds nothing, so a `$` and a `(` on either side of one still read as `$(`.
+   */
+  private literalText = '';
 
   /** An unquoted, unescaped character. */
   plain(ch: string): void {
     this.text += ch;
+    this.literalText += ch;
     this.lastExtglobPrefix = EXTGLOB_PREFIX.includes(ch);
     if (ch < '0' || ch > '9') this.onlyDigits = false;
     switch (ch) {
@@ -132,6 +170,7 @@ class WordBuilder {
   /** A character that is quoted or escaped: it is text, whatever it is. */
   literal(s: string): void {
     this.text += s;
+    this.literalText += s;
     this.onlyDigits = false;
     this.prevDot = false;
     this.lastExtglobPrefix = false;
@@ -145,6 +184,12 @@ class WordBuilder {
     this.onlyDigits = false;
     this.prevDot = false;
     this.lastExtglobPrefix = false;
+  }
+
+  /** An ANSI-C `$'...'` string: dynamic like an expansion, but its decoded text is literal text. */
+  ansiC(raw: string): void {
+    this.expansion(raw);
+    this.literalText += decodeAnsiC(raw);
   }
 
   quote(): void {
@@ -163,7 +208,13 @@ class WordBuilder {
   }
 
   finish(): LexWord {
-    return { text: this.text, dynamic: this.dynamic, expanded: this.expanded, bracketed: this.bracketed };
+    return {
+      text: this.text,
+      dynamic: this.dynamic,
+      expanded: this.expanded,
+      bracketed: this.bracketed,
+      hidden: hasSubstitutionText(this.literalText),
+    };
   }
 
   private glob(): void {
@@ -699,6 +750,9 @@ class Lexer {
     } else if (!inDq && next === "'") {
       this.pos = start + 2;
       this.skipAnsiC();
+      // Dynamic like an expansion, but its decoded text may hide a `$(` (the word's `hidden` flag).
+      word?.ansiC(src.slice(start, this.pos));
+      return;
     } else if (!inDq && next === '"') {
       this.pos = start + 2;
       this.scanDq(null);
@@ -706,6 +760,22 @@ class Lexer {
       this.pos = start + 1;
     }
     word?.expansion(src.slice(start, this.pos));
+  }
+
+  /**
+   * Inside `${...}` and arithmetic, bash evaluates text as arithmetic, which strips quotes and runs
+   * any `$(...)` or backtick that a single-quoted or `$'...'` part hid from this lexer. Fail closed.
+   */
+  private failIfHidden(text: string, where: string): void {
+    if (hasSubstitutionText(text)) throw new LexUnclear(`quoted command substitution inside ${where}`);
+  }
+
+  /** At a `$` inside `${...}` or arithmetic: reads it, and fails closed on a `$'...'` that hides a `$(`. */
+  private scanDollarIn(inDq: boolean, where: string): void {
+    const start = this.pos;
+    const ansiC = !inDq && this.src.charAt(start + 1) === "'";
+    this.scanDollar(inDq, null);
+    if (ansiC) this.failIfHidden(decodeAnsiC(this.src.slice(start, this.pos)), where);
   }
 
   /** After `$'`: an ANSI-C string, where a backslash can escape the closing quote. */
@@ -745,10 +815,7 @@ class Lexer {
         this.skipSingleQuoted();
         // A subscript or offset in ${...} is evaluated as arithmetic, which strips the quotes and
         // runs any $(...) or backtick they hid. The lexer never saw it as a command, so fail closed.
-        const quoted = src.slice(start, this.pos - 1);
-        if (/\$\((?!\()/.test(quoted) || quoted.includes('`')) {
-          throw new LexUnclear('quoted command substitution inside ${...}');
-        }
+        this.failIfHidden(src.slice(start, this.pos - 1), '${...}');
       } else if (ch === '"') {
         this.pos++;
         this.scanDq(null);
@@ -756,7 +823,7 @@ class Lexer {
         this.pos++;
         this.scanBacktick(false);
       } else if (ch === '$') {
-        this.scanDollar(inDq, null);
+        this.scanDollarIn(inDq, '${...}');
       } else {
         this.pos++;
       }
@@ -785,7 +852,10 @@ class Lexer {
       if (ch === '\\') {
         this.pos += 2;
       } else if (ch === "'") {
+        // Arithmetic text is read as if double-quoted: single quotes do not stop a `$(` (R3).
+        const start = this.pos + 1;
         this.skipSingleQuoted();
+        this.failIfHidden(src.slice(start, this.pos - 1), 'arithmetic');
       } else if (ch === '"') {
         this.pos++;
         this.scanDq(null);
@@ -793,7 +863,7 @@ class Lexer {
         this.pos++;
         this.scanBacktick(false);
       } else if (ch === '$') {
-        this.scanDollar(false, null);
+        this.scanDollarIn(false, 'arithmetic');
       } else if (kind === 'paren' && ch === '(') {
         depth++;
         this.pos++;

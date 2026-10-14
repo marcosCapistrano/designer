@@ -1,5 +1,5 @@
 import { basename, isAbsolute, relative, resolve, sep } from 'node:path';
-import { type LexWord, MAX_NESTING, lexShell } from './shell-lexer.js';
+import { hasSubstitutionText, type LexWord, MAX_NESTING, lexShell } from './shell-lexer.js';
 
 /**
  * The deploy guard: refuses Bash commands that push, merge, deploy or reach Hetzner.
@@ -36,6 +36,7 @@ const DEPLOY_SCRIPT_REASON = 'Deploying is a Hub action; deploy scripts are not 
 const HETZNER_REASON = 'Deploying is a Hub action; the Hetzner API is not allowed in Build.';
 const ALIAS_REASON = 'Git and gh aliases can run deploys; they are not allowed in Build.';
 const UNCLEAR_REASON = 'Build cannot tell which program this runs; name the program directly.';
+const SETTINGS_REASON = 'Claude Code settings and MCP config are managed by the Hub; do not edit them in Build.';
 
 const EDIT_TOOLS: ReadonlySet<string> = new Set(['Edit', 'MultiEdit', 'Write', 'NotebookEdit']);
 
@@ -145,14 +146,13 @@ const CALLBACK_BUILTINS: ReadonlySet<string> = new Set(['compgen', 'complete', '
 /** A command word that is an array-element assignment (`a[idx]=v`): bash evaluates the index. */
 const ARRAY_ASSIGN = /^[A-Za-z_][A-Za-z0-9_]*\[/;
 
-/** A literal command substitution (`$(` but not arithmetic `$((`) or a backtick, quoted or not. */
-function hasCommandSubstitutionText(text: string): boolean {
-  return /\$\((?!\()/.test(text) || text.includes('`');
-}
-
-/** A quoted `$(` or backtick that the lexer did not expand (so the inner command was never seen). */
+/**
+ * A quoted, escaped or `$'...'` `$(` or backtick that the lexer did not expand (so the inner command
+ * was never seen). The lexer's per-word `hidden` flag reads only the word's literal parts, so an
+ * expansion elsewhere in the word (`'a[$(x)]'$E`, `$'...'`) does not hide it (Ruling 16, I-1/R2).
+ */
 function hidesCommandSubstitution(word: LexWord): boolean {
-  return !word.expanded && hasCommandSubstitutionText(word.text);
+  return word.hidden || (!word.expanded && hasSubstitutionText(word.text));
 }
 
 /** `let x` re-evaluates x as arithmetic; a lone name or a `[` subscript is the dangerous operand. */
@@ -214,6 +214,42 @@ const GIT_CONFIG_SUBCOMMANDS: ReadonlySet<string> = new Set([
   'rename-section',
   'remove-section',
 ]);
+/** git config subcommands that only read. */
+const GIT_CONFIG_READ_SUBCOMMANDS: ReadonlySet<string> = new Set(['get', 'list', 'get-regexp']);
+/** git config options that take the next word as their value (`--file X`, `-f X`). */
+const GIT_CONFIG_VALUE_FLAGS: ReadonlySet<string> = new Set([
+  '-f',
+  '--file',
+  '--blob',
+  '--default',
+  '--type',
+  '--comment',
+  '--value',
+]);
+/** Legacy git config modes that only read. */
+const GIT_CONFIG_READ_FLAGS: ReadonlySet<string> = new Set([
+  '--get',
+  '--get-all',
+  '--get-regexp',
+  '--get-urlmatch',
+  '--get-color',
+  '--get-colorbool',
+  '--list',
+  '-l',
+]);
+/** Legacy git config modes that write even with a key and no value. */
+const GIT_CONFIG_WRITE_FLAGS: ReadonlySet<string> = new Set(['--add', '--replace-all', '--unset', '--unset-all']);
+/**
+ * Config keys that decide where a push goes. The hub's own push of the build branch reads them from
+ * the checkout's .git/config, so writing one could send the hub's push to the default branch or to
+ * another host (final review I1).
+ */
+const PUSH_CONFIG_KEY = /^(?:remote\..+\.(?:push|pushurl|url)|url\..+\.(?:insteadof|pushinsteadof))$/i;
+/** `git remote` subcommands that rewrite a remote's URL or move its config. */
+const GIT_REMOTE_REWRITES: ReadonlySet<string> = new Set(['set-url', 'rename', 'remove', 'rm']);
+/** git-annex subcommands that send content to a remote, with or without `--to`. */
+const GIT_ANNEX_PUSHES: ReadonlySet<string> = new Set(['sync', 'push', 'assist', 'export']);
+const GIT_ANNEX_PUSHES_WITH_TO: ReadonlySet<string> = new Set(['copy', 'move', 'mirror']);
 
 const FIND_EXEC: ReadonlySet<string> = new Set(['-exec', '-execdir', '-ok', '-okdir']);
 
@@ -669,6 +705,20 @@ function skipArgs(words: readonly LexWord[], start: number, spec: ArgSpec): Skip
   return { next: i, letters, longs, replace };
 }
 
+/** A shell option list with `--rcfile`/`--init-file` naming stdin (`-`, /dev/stdin, ...) or a run-time value. */
+function readsRcFromStdin(options: readonly LexWord[]): boolean {
+  for (let k = 0; k < options.length; k++) {
+    const word = options[k];
+    const match = word === undefined ? null : /^--(?:rcfile|init-file)(?:=([\s\S]*))?$/.exec(word.text);
+    if (match === null) continue;
+    const attached = match[1];
+    const value = attached === undefined ? options[k + 1] : word;
+    const text = attached ?? value?.text;
+    if (value === undefined || text === undefined || value.dynamic || text === '-' || isStdinPath(text)) return true;
+  }
+  return false;
+}
+
 /** Index of the program word, after assignments, keywords, options and wrapper arguments. */
 function findProgram(input: readonly LexWord[], ctx: Ctx): Found {
   let words = input;
@@ -712,6 +762,8 @@ function findProgram(input: readonly LexWord[], ctx: Ctx): Found {
     if (SHELL_NAMES.has(name)) {
       // A heredoc or a bare shell feeds commands through stdin, which this guard cannot see.
       if (ctx.heredoc) return { kind: 'reason', reason: UNCLEAR_REASON };
+      // An rc/init file read from stdin (or named at run time) is a script this guard cannot see.
+      if (readsRcFromStdin(words.slice(i + 1, skipped.next))) return { kind: 'reason', reason: UNCLEAR_REASON };
       const operandMissing = skipped.next >= words.length;
       if (skipped.letters.includes('c')) {
         // The command string after -c is the program; a quoted one is checked as a command line.
@@ -820,15 +872,19 @@ function gitReason(args: readonly LexWord[], ctx: Ctx): string | null {
   if (sub.dynamic) return UNCLEAR_REASON;
   const later = operands.slice(1);
   if (GIT_PUSH_SUBCOMMANDS.has(sub.text)) return GIT_PUSH_REASON;
-  if (sub.text === 'config') {
-    // A dynamic config key could be an alias the Hub has not seen. Modern git takes a subcommand
-    // (set/get/...) before the key, so skip a literal one before reading the key.
-    const nonOptions = later.filter((w) => !w.text.startsWith('-'));
-    const afterSub =
-      nonOptions[0] !== undefined && !nonOptions[0].dynamic && GIT_CONFIG_SUBCOMMANDS.has(nonOptions[0].text)
-        ? nonOptions.slice(1)
-        : nonOptions;
-    return afterSub[0]?.dynamic === true ? UNCLEAR_REASON : null;
+  if (sub.text === 'config') return gitConfigReason(later);
+  if (sub.text === 'remote') {
+    const action = later.find((w) => !w.text.startsWith('-'));
+    if (action?.dynamic === true) return UNCLEAR_REASON;
+    if (action !== undefined && GIT_REMOTE_REWRITES.has(action.text)) return GIT_PUSH_REASON;
+  }
+  if (sub.text === 'annex') {
+    // git-annex sync/push/copy --to send content (and, for sync, branches) to a remote (R8).
+    const action = later.find((w) => !w.text.startsWith('-'));
+    if (action?.dynamic === true) return UNCLEAR_REASON;
+    if (action !== undefined && GIT_ANNEX_PUSHES.has(action.text)) return GIT_PUSH_REASON;
+    const hasTo = later.some((w) => w.text === '--to' || w.text.startsWith('--to='));
+    if (action !== undefined && GIT_ANNEX_PUSHES_WITH_TO.has(action.text) && hasTo) return GIT_PUSH_REASON;
   }
   if (sub.text === 'checkout' || sub.text === 'switch') {
     // Under xargs the branch name may still arrive.
@@ -848,6 +904,37 @@ function gitReason(args: readonly LexWord[], ctx: Ctx): string | null {
     }
   }
   return null;
+}
+
+/** The words after `git config`. */
+function gitConfigReason(later: readonly LexWord[]): string | null {
+  // Option values (`--file X`, `-f X`) are not the key (R7).
+  const nonOptions: LexWord[] = [];
+  const flags: string[] = [];
+  for (let k = 0; k < later.length; k++) {
+    const word = later[k];
+    if (word === undefined) break;
+    if (GIT_CONFIG_VALUE_FLAGS.has(word.text)) k++;
+    else if (word.text.startsWith('-')) flags.push(word.text);
+    else nonOptions.push(word);
+  }
+  // Modern git takes a subcommand (set/get/...) before the key, so skip a literal one.
+  const first = nonOptions[0];
+  const subcommand =
+    first !== undefined && !first.dynamic && GIT_CONFIG_SUBCOMMANDS.has(first.text) ? first.text : null;
+  const operands = subcommand === null ? nonOptions : nonOptions.slice(1);
+  const key = operands[0];
+  if (key === undefined) return null;
+  // A dynamic config key could be an alias the Hub has not seen.
+  if (key.dynamic) return UNCLEAR_REASON;
+  // A write to a key that decides where a push goes; reads stay allowed.
+  if (!PUSH_CONFIG_KEY.test(key.text)) return null;
+  const reads =
+    (subcommand !== null && GIT_CONFIG_READ_SUBCOMMANDS.has(subcommand)) ||
+    flags.some((f) => GIT_CONFIG_READ_FLAGS.has(f));
+  const writes =
+    subcommand !== null || operands.length > 1 || flags.some((f) => GIT_CONFIG_WRITE_FLAGS.has(f));
+  return writes && !reads ? GIT_PUSH_REASON : null;
 }
 
 function ghReason(args: readonly LexWord[], ctx: Ctx): string | null {
@@ -1018,7 +1105,7 @@ function commandReason(words: readonly LexWord[], ctx: Ctx): string | null {
   // status` is allowed. A non-git `./scripts/git-*.sh` basename simply reads as that subcommand.
   const dashedGit = /^git-(.+)$/.exec(name);
   if (dashedGit !== null) {
-    const sub: LexWord = { text: dashedGit[1] ?? '', dynamic: false, expanded: false, bracketed: false };
+    const sub: LexWord = { text: dashedGit[1] ?? '', dynamic: false, expanded: false, bracketed: false, hidden: false };
     return gitReason([sub, ...args], here);
   }
   if (DATA_CODE_BUILTINS.has(name)) {
@@ -1099,13 +1186,27 @@ export function deployDenyReason(command: string): string | null {
   }
 }
 
+/**
+ * Project settings Claude Code loads itself (`settingSources: ['project']`): hooks, permissions and
+ * MCP servers that run outside this guard. At any depth under the checkout.
+ */
+function isClaudeConfigFile(rel: string): boolean {
+  const parts = rel.split(sep);
+  const name = parts[parts.length - 1] ?? '';
+  const parent = parts[parts.length - 2];
+  return name === '.mcp.json' || (parent === '.claude' && /^settings.*\.json$/.test(name));
+}
+
 export function checkToolUse(cwd: string, toolName: string, input: Record<string, unknown>): string | null {
-  if (toolName === 'Bash') {
+  // Bash, and any other tool that runs a command string (Monitor, and tools added later).
+  if (toolName === 'Bash' || typeof input.command === 'string') {
+    let reason: string | null;
     try {
-      return deployDenyReason(String(input.command ?? ''));
+      reason = deployDenyReason(String(input.command ?? ''));
     } catch {
-      return UNCLEAR_REASON;
+      reason = UNCLEAR_REASON;
     }
+    if (reason !== null || !EDIT_TOOLS.has(toolName)) return reason;
   }
   if (!EDIT_TOOLS.has(toolName)) return null;
   const target = resolve(cwd, String(input.file_path ?? input.notebook_path ?? ''));
@@ -1114,5 +1215,6 @@ export function checkToolUse(cwd: string, toolName: string, input: Record<string
     return `Edits must stay inside the app checkout (${cwd}).`;
   }
   if (rel === '.git' || rel.startsWith(`.git${sep}`)) return 'Do not edit .git directly.';
+  if (isClaudeConfigFile(rel)) return SETTINGS_REASON;
   return null;
 }

@@ -147,6 +147,23 @@ describe('lexShell heredocs', () => {
     expect(view("echo ${a['literal']}")).toEqual([['echo', "${a['literal']}~"]]);
   });
 
+  it('flags a quoted or $\'...\' substitution in a word as hidden, whatever else the word holds', () => {
+    // The containing command is listed after the commands found inside its substitutions.
+    const hidden = (input: string): boolean[] => (lexShell(input).at(-1)?.words ?? []).map((w) => w.hidden);
+    expect(hidden("x 'a[$(y)]'$E")).toEqual([false, true]);
+    expect(hidden("x $'a[\\x24(y)]'")).toEqual([false, true]);
+    expect(hidden("x $'\\140y\\140'")).toEqual([false, true]);
+    expect(hidden('x "$(y)" $\'a\\tb\' \'$((1))\'')).toEqual([false, false, false, false]);
+  });
+
+  it('fails closed on a single-quoted or $\'...\' substitution in arithmetic or ${...}', () => {
+    expect(() => lexShell("echo $(( '$(y)' + 1 ))")).toThrow(LexUnclear);
+    expect(() => lexShell("(( '`y`' ))")).toThrow(LexUnclear);
+    expect(() => lexShell("echo $(( $'\\x24(y)' ))")).toThrow(LexUnclear);
+    expect(() => lexShell("echo ${a[$'$(y)']}")).toThrow(LexUnclear);
+    expect(view("echo ${x:-$'\\n'} $(( '1' + 2 ))")).toEqual([['echo', "${x:-$'\\n'}~", "$(( '1' + 2 ))~"]]);
+  });
+
   it('allows simple array subscripts in arithmetic but not a bare name', () => {
     expect(view('echo $(( arr[0] + 1 ))')).toEqual([['echo', '$(( arr[0] + 1 ))~']]);
     expect(view('echo $((${#a[@]} - 1))')).toEqual([['echo', '$((${#a[@]} - 1))~']]);
