@@ -98,13 +98,21 @@ function setup(opts: SetupOptions = {}) {
       sent.push(m);
     },
   };
+  const hold: { next: Promise<void> | null } = { next: null };
   const fake = new FakeClaudeRunner(opts.scripts ?? [[write('notes.md'), text('Done.'), done('s1')]]);
   const github = new FakeGitHub();
   const deps: BuildDeps = {
     store,
     runner: opts.runner ?? fake,
     hub,
-    registry: { get: async (n) => (n === 'demo' ? entry : null) },
+    registry: {
+      get: async (n) => {
+        const held = hold.next;
+        hold.next = null;
+        if (held !== null) await held;
+        return n === 'demo' ? entry : null;
+      },
+    },
     openRepo: opts.openRepo ?? ((dir) => openRepo(dir, { identity: TEST_IDENTITY })),
     github,
     runCommand: opts.runCommand ?? (async () => OK),
@@ -112,7 +120,7 @@ function setup(opts: SetupOptions = {}) {
     onMerged: opts.onMerged,
   };
   const svc = new BuildService(deps);
-  return { svc, deps, store, sent, runner: fake, github, origin, work, entry };
+  return { svc, deps, store, sent, runner: fake, github, origin, work, entry, hold };
 }
 
 type Setup = ReturnType<typeof setup>;
@@ -324,11 +332,13 @@ describe('BuildService.send', () => {
     expect(s.svc.isRunning('demo')).toBe(false);
   });
 
-  it('fails the new task when the branch cannot be created', async () => {
+  it('closes the new task when the branch cannot be created, so the next prompt starts fresh', async () => {
+    let broken = true;
     const s = setup({
-      openRepo: repoWith(() => ({
-        createBranchFrom: async () => {
-          throw new Error('cannot branch');
+      openRepo: repoWith((real) => ({
+        createBranchFrom: async (branch: string, base: string) => {
+          if (broken) throw new Error('cannot branch');
+          return real.createBranchFrom(branch, base);
         },
       })),
     });
@@ -337,10 +347,33 @@ describe('BuildService.send', () => {
       status: 409,
       message: 'Git: cannot branch',
     });
-    expect(latest(s)).toMatchObject({ status: 'failed', error: 'Git: cannot branch' });
+    const dead = latest(s);
+    expect(dead).toMatchObject({ status: 'closed', error: null });
+    expect(feed(s)).toContainEqual(['error', 'Git: cannot branch']);
+    expect(lastTaskMsg(s)).toMatchObject({ running: false, task: { id: dead.id, status: 'closed' } });
     expect(s.svc.isRunning('demo')).toBe(false);
     expect(s.runner.calls).toHaveLength(0);
+
+    broken = false;
+    await s.svc.send('demo', 'Add a notes file');
+    await s.svc.idle('demo');
+    expect(latest(s)).toMatchObject({ id: dead.id + 1, status: 'review' });
   });
+
+  it('fails the new task when the user message cannot be stored', async () => {
+    const s = setup();
+    vi.spyOn(s.store, 'addMessage').mockImplementationOnce(() => {
+      throw new Error('disk full');
+    });
+
+    await expect(s.svc.send('demo', 'Add a notes file')).rejects.toThrow('disk full');
+
+    expect(latest(s)).toMatchObject({ status: 'failed', error: 'disk full' });
+    expect(s.svc.isRunning('demo')).toBe(false);
+    expect(s.runner.calls).toHaveLength(0);
+    expect(lastTaskMsg(s)).toMatchObject({ running: false, task: { status: 'failed' } });
+  });
+
 });
 
 describe('BuildService stop and failures', () => {
@@ -403,9 +436,27 @@ describe('BuildService stop and failures', () => {
     release.resolve();
     await s.svc.idle('demo');
 
-    expect(IN_FLIGHT).not.toContain(latest(s).status);
+    // The push cannot be cancelled, so it completes and the PR opens: review, not stuck in pushing.
+    expect(latest(s)).toMatchObject({ status: 'review', prNumber: 1 });
     expect(s.svc.isRunning('demo')).toBe(false);
     expect(lastTaskMsg(s).running).toBe(false);
+  });
+
+  it('stop after the checks pass but before the push fails the task without pushing', async () => {
+    const s: Setup = setup({
+      runCommand: async (cmd) => {
+        if (cmd === 'pnpm test') s.svc.stop('demo');
+        return OK;
+      },
+    });
+
+    const task = await run(s);
+
+    expect(task).toMatchObject({ status: 'failed', error: 'Stopped by you.' });
+    expect(git(s.origin, 'branch', '--list', 'build/*')).toBe('');
+    expect(s.github.prs.size).toBe(0);
+    expect(s.github.calls).not.toContain('createPr');
+    expect(s.svc.isRunning('demo')).toBe(false);
   });
 
   it('stopAll aborts every run and waits for them to end', async () => {
@@ -498,7 +549,7 @@ describe('BuildService stop and failures', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     const broadcast = s.deps.hub.broadcast.bind(s.deps.hub);
     vi.spyOn(s.deps.hub, 'broadcast').mockImplementation((m) => {
-      if (m.type === 'build.task' && !m.running) throw new Error('socket gone');
+      if (m.type === 'build.task' && !m.running && !s.svc.isRunning('demo')) throw new Error('socket gone');
       broadcast(m);
     });
 
@@ -598,6 +649,62 @@ describe('BuildService usage limit', () => {
     expect(latest(s)).toMatchObject({ status: 'failed', error: 'Git: no such branch' });
     expect(s.svc.isRunning('demo')).toBe(false);
     expect(s.runner.calls).toHaveLength(1);
+  });
+
+  it('retryQueued re-reads the task: one closed while the registry answered is not restarted', async () => {
+    const s = setup({ scripts: [[{ type: 'done', sessionId: '', ok: false, error: 'usage_limit:5000' }]] });
+    const queued = await run(s);
+    t = 6000;
+    const registry = deferred();
+    s.hold.next = registry.promise;
+
+    const retrying = s.svc.retryQueued();
+    await s.svc.close('demo', queued.id);
+    registry.resolve();
+
+    expect(await retrying).toBe(0);
+    expect(s.runner.calls).toHaveLength(1);
+    expect(s.store.task(queued.id)?.status).toBe('closed');
+    expect(s.svc.isRunning('demo')).toBe(false);
+  });
+
+  it('retryQueued does not start a second run when a send took the app meanwhile', async () => {
+    const checkingOut = deferred();
+    const gate = deferred();
+    let armed = false;
+    const s = setup({
+      scripts: [[{ type: 'done', sessionId: '', ok: false, error: 'usage_limit:5000' }], [write('a.txt'), done('s2')]],
+      openRepo: repoWith((real) => ({
+        checkout: async (branch: string) => {
+          if (armed) {
+            armed = false;
+            checkingOut.resolve();
+            await gate.promise;
+          }
+          return real.checkout(branch);
+        },
+      })),
+    });
+    const queued = await run(s);
+    git(s.work, 'checkout', 'main');
+    t = 6000;
+    const registry = deferred();
+    s.hold.next = registry.promise;
+    const retrying = s.svc.retryQueued();
+
+    // The send reserves the app and waits in its checkout; the task is still `queued`.
+    armed = true;
+    const sending = s.svc.send('demo', 'Continue please');
+    await checkingOut.promise;
+    expect(s.store.task(queued.id)?.status).toBe('queued');
+    registry.resolve();
+
+    expect(await retrying).toBe(0);
+    gate.resolve();
+    await sending;
+    await s.svc.idle('demo');
+    expect(s.runner.calls).toHaveLength(2);
+    expect(latest(s)).toMatchObject({ id: queued.id, status: 'review' });
   });
 });
 
@@ -761,23 +868,51 @@ describe('BuildService.state', () => {
     expect(state.task).toMatchObject({ id: task.id, status: 'merged' });
   });
 
-  it('does not ask GitHub while Claude runs, or when CI is already known', async () => {
+  it('does not ask GitHub while a send has the app, even before Claude starts', async () => {
+    const checkingOut = deferred();
     const gate = deferred();
-    const s = setup({ scripts: [[write('a.txt'), done('s1')], [() => gate.promise, done('s1')]] });
+    let slow = false;
+    const s = setup({
+      scripts: [[write('a.txt'), done('s1')], [write('b.txt'), done('s1')]],
+      openRepo: repoWith((real) => ({
+        checkout: async (branch: string) => {
+          if (slow) {
+            checkingOut.resolve();
+            await gate.promise;
+          }
+          return real.checkout(branch);
+        },
+      })),
+    });
     await run(s);
+    s.github.setChecks('head-1', [{ name: 'ci', status: 'in_progress', conclusion: null }]);
+    git(s.work, 'checkout', 'main');
+    slow = true;
 
-    await s.svc.send('demo', 'More work');
+    // The task is still `review` with pending CI while the send checks out its branch.
+    const sending = s.svc.send('demo', 'More work');
+    await checkingOut.promise;
+    expect(s.store.openTask('demo')).toMatchObject({ status: 'review', ci: 'pending' });
     const calls = s.github.calls.length;
-    const running = await s.svc.state('demo');
-    expect(running.running).toBe(true);
+    const snapshot = await s.svc.state('demo');
+
+    expect(snapshot).toMatchObject({ running: true, task: { status: 'review', ci: 'pending' } });
     expect(s.github.calls).toHaveLength(calls);
 
     gate.resolve();
+    await sending;
     await s.svc.idle('demo');
+  });
+
+  it('does not ask GitHub again once CI is known', async () => {
+    const s = setup();
+    await run(s);
     s.github.setChecks('head-1', GREEN);
+
     await s.svc.state('demo');
     const known = s.github.calls.length;
     await s.svc.state('demo');
+
     expect(s.github.calls).toHaveLength(known);
   });
 
@@ -805,6 +940,91 @@ describe('BuildService.state', () => {
 
     expect(state.task).toMatchObject({ id: task.id, status: 'review' });
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('db locked'));
+  });
+});
+
+const PASSED = 'CI passed. Ready to merge.';
+
+function passes(s: Setup): number {
+  return s.store.messages('demo').filter((m) => m.text === PASSED).length;
+}
+
+/** Makes GitHub's PR read wait for `gate`, and returns the spy that counts the reads. */
+function gatePrReads(s: Setup, gate: Deferred) {
+  const getPr = s.github.getPr.bind(s.github);
+  return vi.spyOn(s.github, 'getPr').mockImplementation(async (r, n) => {
+    await gate.promise;
+    return getPr(r, n);
+  });
+}
+
+describe('BuildService CI refresh', () => {
+  it('announces a green PR once for concurrent state() calls and a poll', async () => {
+    const s = setup();
+    const task = await run(s);
+    s.github.setChecks('head-1', GREEN);
+
+    await Promise.all([s.svc.state('demo'), s.svc.state('demo'), s.svc.pollCi()]);
+
+    expect(passes(s)).toBe(1);
+    expect(s.store.task(task.id)?.ci).toBe('success');
+  });
+
+  it('shares one GitHub read between concurrent state() calls, then lets a poll run after it', async () => {
+    const s = setup();
+    const task = await run(s);
+    s.github.setChecks('head-1', GREEN);
+    const gate = deferred();
+    const reads = gatePrReads(s, gate);
+
+    const first = s.svc.state('demo');
+    const second = s.svc.state('demo');
+    await vi.waitFor(() => expect(reads).toHaveBeenCalledTimes(1));
+    const poll = s.svc.pollCi();
+    gate.resolve();
+    const [a, b] = await Promise.all([first, second, poll]);
+
+    expect(a.task?.ci).toBe('success');
+    expect(b.task?.ci).toBe('success');
+    expect(passes(s)).toBe(1);
+    // One read shared by both state() calls, one by the poll that waited for it.
+    expect(reads).toHaveBeenCalledTimes(2);
+    expect(s.store.task(task.id)?.ci).toBe('success');
+  });
+
+  it('makes a state() call that arrives during a poll wait for it instead of reading again', async () => {
+    const s = setup();
+    await run(s);
+    s.github.setChecks('head-1', GREEN);
+    const gate = deferred();
+    const reads = gatePrReads(s, gate);
+
+    const poll = s.svc.pollCi();
+    await vi.waitFor(() => expect(reads).toHaveBeenCalledTimes(1));
+    const state = s.svc.state('demo');
+    gate.resolve();
+    const [snapshot] = await Promise.all([state, poll]);
+
+    expect(snapshot.task?.ci).toBe('success');
+    expect(reads).toHaveBeenCalledTimes(1);
+    expect(passes(s)).toBe(1);
+  });
+
+  it('shares a refresh between a send and state()', async () => {
+    const s = setup({ scripts: [[write('a.txt'), done('s1')], [write('b.txt'), done('s1')]] });
+    await run(s);
+    s.github.setChecks('head-1', GREEN);
+    const gate = deferred();
+    const reads = gatePrReads(s, gate);
+
+    const sending = s.svc.send('demo', 'More work');
+    await vi.waitFor(() => expect(reads).toHaveBeenCalledTimes(1));
+    const state = s.svc.state('demo');
+    gate.resolve();
+    await Promise.all([sending, state]);
+    await s.svc.idle('demo');
+
+    expect(passes(s)).toBe(1);
   });
 });
 
