@@ -1,0 +1,34 @@
+{
+  "name": "@hub/client",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.node.json",
+    "size": "node scripts/check-size.mjs dist 150000",
+    "dev:renders": "tsx dev/render-fixtures.ts",
+    "test:e2e": "tsx dev/render-fixtures.ts --pages 50 --seed 1 && playwright test"
+  },
+  "dependencies": {
+    "@hub/protocol": "workspace:*",
+    "idb-keyval": "^6.3.0",
+    "preact": "^10.29.8"
+  },
+  "devDependencies": {
+    "@hub/design-model": "workspace:*",
+    "@hub/renderer": "workspace:*",
+    "@playwright/test": "1.56.1",
+    "@preact/preset-vite": "^2.10.6",
+    "@types/node": "^22.20.5",
+    "fake-indexeddb": "^6.2.5",
+    "sirv": "^3.0.2",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vite": "^7.3.7",
+    "vitest": "^5.0.4"
+  }
+}
