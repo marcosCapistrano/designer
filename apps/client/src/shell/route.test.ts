@@ -23,4 +23,33 @@ describe('hash routes', () => {
   it('anything else falls back to the apps list', () => {
     expect(parseHash('#/whatever')).toEqual({ name: 'apps' });
   });
+
+  it('empty, bare hash and root hash open the apps list', () => {
+    expect(parseHash('')).toEqual({ name: 'apps' });
+    expect(parseHash('#')).toEqual({ name: 'apps' });
+    expect(parseHash('#/')).toEqual({ name: 'apps' });
+  });
+
+  it('an empty app name opens the apps list', () => {
+    expect(parseHash('#/apps/')).toEqual({ name: 'apps' });
+    expect(parseHash('#/apps//design')).toEqual({ name: 'apps' });
+  });
+
+  it('more than two segments open the apps list', () => {
+    expect(parseHash('#/apps/x/design/extra')).toEqual({ name: 'apps' });
+  });
+
+  it('a trailing slash opens Build', () => {
+    expect(parseHash('#/apps/x/')).toEqual({ name: 'app', app: 'x', area: 'build' });
+  });
+
+  it('an app name with a slash survives the round trip', () => {
+    const route = { name: 'app', app: 'a/b', area: 'deploy' } as const;
+    expect(formatRoute(route)).toBe('#/apps/a%2Fb/deploy');
+    expect(parseHash(formatRoute(route))).toEqual(route);
+  });
+
+  it('the apps route formats as the root hash', () => {
+    expect(formatRoute({ name: 'apps' })).toBe('#/');
+  });
 });

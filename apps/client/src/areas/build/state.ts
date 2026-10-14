@@ -47,22 +47,42 @@ function replacesTask(current: BuildTask | null, incoming: BuildTask): boolean {
   return incoming.updatedAt >= current.updatedAt;
 }
 
-/** Applies a full snapshot from the server (on load or reconnect), merging it into what the view already shows. */
-export function applyState(v: BuildView, s: BuildState): BuildView {
+export interface ApplyStateOptions {
+  /**
+   * false when a source newer than this snapshot (a live build.task, or an action's reply) has already set
+   * `running`, so the snapshot's own flag is stale. Default true.
+   */
+  running?: boolean;
+}
+
+/**
+ * Applies a full snapshot from the server (on load or reconnect), merging it into what the view already shows.
+ *
+ * `running` is only taken from a snapshot whose task is at least as new as the one on screen. Snapshots can
+ * overlap and arrive out of order; an older one that kept the newer task but copied its own `running` would
+ * leave Send disabled until a remount. A snapshot with no task can only set `running` while the view has none.
+ */
+export function applyState(v: BuildView, s: BuildState, opts: ApplyStateOptions = {}): BuildView {
+  const takesTask = s.task !== null && replacesTask(v.task, s.task);
+  const current = takesTask || (s.task === null && v.task === null);
   return {
     ...v,
     loaded: true,
-    running: s.running,
-    task: s.task !== null && replacesTask(v.task, s.task) ? s.task : v.task,
+    running: current && opts.running !== false ? s.running : v.running,
+    task: takesTask ? s.task : v.task,
     messages: mergeMessages(v.messages, s.messages),
   };
 }
 
-/** Applies one live server message for `app`. Returns `v` itself when the message is for another app or is not Build data. */
+/**
+ * Applies one live server message for `app`. Returns `v` itself when the message changes nothing: another
+ * app's, a task update older than the one shown, a message already shown, or anything that is not Build data
+ * (render.ready, pong). A stale build.task is ignored whole, including its `running` flag.
+ */
 export function applyServerMsg(v: BuildView, app: string, m: ServerMsg): BuildView {
   switch (m.type) {
     case 'build.message':
-      if (m.app !== app) return v;
+      if (m.app !== app || v.messages.some((x) => x.id === m.message.id)) return v;
       return { ...v, messages: mergeMessages(v.messages, [m.message]) };
     case 'build.task':
       if (m.app !== app || !replacesTask(v.task, m.task)) return v;
@@ -75,6 +95,24 @@ export function applyServerMsg(v: BuildView, app: string, m: ServerMsg): BuildVi
 /** The id of the newest message in the view, or 0 when there are none. */
 export function lastMessageId(v: BuildView): number {
   return v.messages.at(-1)?.id ?? 0;
+}
+
+/** Whether a Claude run owns a task in this status. The server only holds these while a run is active. */
+export function isRunStatus(status: BuildTaskStatus): boolean {
+  return status === 'working' || status === 'verifying' || status === 'pushing';
+}
+
+/** The pull request link to show for a task: https only, and no "#null" when the number is unknown. */
+export function prLink(t: BuildTask): { href: string; label: string } | null {
+  if (t.prUrl === null) return null;
+  let url: URL;
+  try {
+    url = new URL(t.prUrl);
+  } catch {
+    return null;
+  }
+  if (url.protocol !== 'https:') return null;
+  return { href: t.prUrl, label: t.prNumber === null ? 'Pull request' : `PR #${t.prNumber}` };
 }
 
 export interface TaskSummary {
