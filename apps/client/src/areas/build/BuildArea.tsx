@@ -57,6 +57,7 @@ export function BuildArea({ app, api, ws }: BuildAreaProps): JSX.Element {
 
     // Effects run after the first paint, so on mount the state is already empty and the user may already
     // have typed: resetting then would erase the draft. Reset only when the app really changed.
+    // This relies on `api` and `ws` being stable (memoized in App): a rerun for the same app does not reset.
     if (stateApp.current !== app) {
       stateApp.current = app;
       viewRef.current = EMPTY_VIEW;
