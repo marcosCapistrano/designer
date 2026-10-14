@@ -1,7 +1,12 @@
 {
   "name": "@hub/design-model",
   "version": "0.0.0",
+  "private": true,
   "type": "module",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
   "scripts": {
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
