@@ -266,6 +266,71 @@ describe('wrapNodes', () => {
   });
 });
 
+function instance(id: string, component: string): DesignNode {
+  return { id, kind: 'instance', component, props: {}, style: { base: {} } };
+}
+
+// The Card root holds Shell, and Shell holds Card, so the doc already has a cycle. Only the
+// move and wrap tests use it: those ops rearrange nodes already in the container, so an
+// insertNode could never produce this doc.
+function cyclicDoc(): DesignDoc {
+  const doc = sampleDoc();
+  doc.components.Shell = { name: 'Shell', props: {}, root: element('n20', [instance('n21', 'Card')]) };
+  doc.components.Card?.root.children.push(instance('n10', 'Shell'));
+  return doc;
+}
+
+// Shell holds a Card instance, so Shell reaches Card but Card does not reach Shell.
+function shellDoc(): DesignDoc {
+  const doc = sampleDoc();
+  doc.components.Shell = { name: 'Shell', props: {}, root: element('n20', [instance('n21', 'Card')]) };
+  return doc;
+}
+
+describe('component cycles', () => {
+  test('rejects an instance of Card inserted into Card', () => {
+    expect(rejected(sampleDoc(), {
+      op: 'insertNode', parent: 'n6', index: 0, node: instance('n9', 'Card'),
+    })).toBe('Component cycle at Card');
+  });
+
+  test('rejects a cycle nested inside the inserted subtree', () => {
+    expect(rejected(sampleDoc(), {
+      op: 'insertNode', parent: 'n6', index: 0, node: element('n9', [instance('n10', 'Card')]),
+    })).toBe('Component cycle at Card');
+  });
+
+  test('rejects an instance whose expansion contains Card', () => {
+    expect(rejected(shellDoc(), {
+      op: 'insertNode', parent: 'n6', index: 0, node: instance('n9', 'Shell'),
+    })).toBe('Component cycle at Card');
+  });
+
+  test('allows an instance of Card inside Shell, because Card does not reach Shell', () => {
+    expect(childIds(applied(shellDoc(), {
+      op: 'insertNode', parent: 'n20', index: 1, node: instance('n9', 'Card'),
+    }), 'n20')).toEqual(['n21', 'n9']);
+  });
+
+  test('allows an instance of Shell inside a page', () => {
+    expect(childIds(applied(shellDoc(), {
+      op: 'insertNode', parent: 'n1', index: 0, node: instance('n9', 'Shell'),
+    }), 'n1')).toEqual(['n9', 'n2', 'n5']);
+  });
+
+  test('moveNode rejects a subtree that reaches the container', () => {
+    expect(rejected(cyclicDoc(), {
+      op: 'moveNode', node: 'n10', parent: 'n6', index: 0,
+    })).toBe('Component cycle at Card');
+  });
+
+  test('wrapNodes rejects a subtree that reaches the container', () => {
+    expect(rejected(cyclicDoc(), {
+      op: 'wrapNodes', nodes: ['n10'], wrapper: element('n11'),
+    })).toBe('Component cycle at Card');
+  });
+});
+
 describe('validateSubtree', () => {
   test('accepts a valid subtree', () => {
     expect(validateSubtree(sampleDoc(), element('n9', [text('n10')]))).toBeNull();

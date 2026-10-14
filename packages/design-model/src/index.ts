@@ -5,3 +5,5 @@ export * from './tree.js';
 export * from './css.js';
 export * from './apply.js';
 export * from './ops/structure.js';
+export * from './ops/components.js';
+export * from './props.js';

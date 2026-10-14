@@ -1,5 +1,5 @@
-import { findNode, type Located } from '../tree.js';
-import type { DesignDoc, ElementNode } from '../types.js';
+import { findNode, type Container, type Located } from '../tree.js';
+import type { DesignDoc, DesignNode, ElementNode } from '../types.js';
 
 export type NodeLookup = { ok: true; hit: Located } | { ok: false; error: string };
 
@@ -37,4 +37,41 @@ export function validateAttrName(name: string): string | null {
 // Own properties only. Plain indexing would reach Object.prototype for a key such as "constructor".
 export function ownValue<T>(record: Record<string, T>, key: string): T | undefined {
   return Object.hasOwn(record, key) ? record[key] : undefined;
+}
+
+// Component names of every instance in the given subtrees, in document order.
+export function instanceComponents(nodes: readonly DesignNode[]): string[] {
+  return nodes.flatMap((node) => {
+    if (node.kind === 'instance') return [node.component];
+    if (node.kind === 'text') return [];
+    return instanceComponents(node.children);
+  });
+}
+
+// True when component `from` is `target`, or the expansion of `from` contains an instance that
+// reaches `target`. A name with no definition contributes nothing. Safe on cyclic input.
+export function componentReaches(doc: DesignDoc, from: string, target: string): boolean {
+  const seen = new Set<string>();
+  const pending = [from];
+  for (let name = pending.pop(); name !== undefined; name = pending.pop()) {
+    if (name === target) return true;
+    if (seen.has(name)) continue;
+    seen.add(name);
+    const def = ownValue(doc.components, name);
+    if (def !== undefined) pending.push(...instanceComponents([def.root]));
+  }
+  return false;
+}
+
+// Ruling 21: nodes placed inside component C must not make C contain itself. Returns the
+// error for placing them into container, or null.
+export function cycleError(
+  doc: DesignDoc,
+  container: Container,
+  nodes: readonly DesignNode[],
+): string | null {
+  if (container.kind !== 'component') return null;
+  const target = container.key;
+  const cyclic = instanceComponents(nodes).some((name) => componentReaches(doc, name, target));
+  return cyclic ? `Component cycle at ${target}` : null;
 }
