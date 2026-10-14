@@ -217,7 +217,7 @@ describe('BasePainter', () => {
   });
 
   it('a paint that throws mid-way forces a full repaint next time', () => {
-    const { ctx } = fakeCtx();
+    const { ctx, saveDepth } = fakeCtx();
     const loaded = tilesOf('k/0_0', 'k/1_0');
     let failing = false;
     const tiles = {
@@ -232,6 +232,8 @@ describe('BasePainter', () => {
     // The pan blits the canvas, then the exposed strip's tile lookup throws.
     failing = true;
     expect(() => painter.paint(input(frames, { camera: { x: 20, y: 0, scale: 0.5 } }))).toThrow('boom');
+    // The region's save() is matched by a restore() in finally, so no clip leaks.
+    expect(saveDepth()).toBe(0);
     failing = false;
     // Without a full repaint this would blit the already-shifted canvas a second time.
     expect(painter.paint(input(frames, { camera: { x: 20, y: 0, scale: 0.5 } }))).toMatchObject({ mode: 'full' });
