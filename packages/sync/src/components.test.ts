@@ -62,7 +62,26 @@ describe('shared source components', () => {
   it('rejects route-dependent shared CSS instead of guessing a definition', () => {
     const project = { files: { ...files, 'b.tsx': `import './other.css'; import Button from './Button'; export default () => <main><Button label="Other" /></main>`, 'other.css': 'button { padding: 20px; }' } };
     const result = extractPages(project, [entries[0]!, { route: '/b', file: 'b.tsx' }], { sharedComponents: true });
-    expect(result).toMatchObject({ ok: false, diagnostics: [{ message: expect.stringContaining('route-dependent') }] });
+    expect(result).toMatchObject({ ok: false, diagnostics: [{ file: 'other.css', message: expect.stringContaining('context-dependent CSS: button (other.css)') }] });
+  });
+  it('styles occurrences in their real ancestor context before deriving the definition (R3)', () => {
+    const shared = {
+      'globals.css': '.ember .label { color: red; }',
+      'Label.tsx': `export default function Label({ text = 'x' }) { return <span className="label">{text}</span>; }`,
+      'a.tsx': `import './globals.css'; import Label from './Label'; export default () => <div className="ember"><Label text="A" /></div>`,
+    };
+    const routes = [{ route: '/a', file: 'a.tsx' }, { route: '/b', file: 'a.tsx' }];
+    const result = extractPages({ files: shared }, routes, { sharedComponents: true });
+    expect(result.ok, JSON.stringify(result)).toBe(true);
+    if (result.ok) {
+      const definition = Object.values(result.doc.components)[0]!;
+      expect(definition.root.style.base).toEqual({ color: 'red' });
+      expect(definition.root.attrs['class']).toBeUndefined();
+    }
+    const mixed = { ...shared, 'a.tsx': `import './globals.css'; import Label from './Label'; export default () => <main><div className="ember"><Label text="A" /></div><Label text="B" /></main>` };
+    expect(extractPages({ files: mixed }, [routes[0]!], { sharedComponents: true })).toMatchObject({ ok: false, diagnostics: [{ file: 'globals.css', message: 'Shared component default in Label.tsx has context-dependent CSS: .ember .label (globals.css) match only some occurrences; provide a preview adapter' }] });
+    const split = { ...shared, 'b.tsx': `import './globals.css'; import Label from './Label'; export default () => <main><Label text="B" /></main>` };
+    expect(extractPages({ files: split }, [routes[0]!, { route: '/b', file: 'b.tsx' }], { sharedComponents: true })).toMatchObject({ ok: false, diagnostics: [{ file: 'globals.css', message: expect.stringContaining('.ember .label (globals.css)') }] });
   });
   it.each([
     ['children slots', `import Button from './Button'; export default () => <main><Button label="X"><p>Child</p></Button></main>`],

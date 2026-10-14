@@ -1,9 +1,11 @@
 import * as css from 'css-tree';
 import type { Device, ElementNode, StyleMap } from '@hub/design-model';
-import { isSourceOnly, matchSelector, OUTSIDE, specificity, type SelectorAst, type TreeNode } from './selectors.js';
+import { isSourceOnly, matchSelector, specificity, type SelectorAst, type TreeNode } from './selectors.js';
 
-export interface Rule { selector: SelectorAst; device: Device; layer: number; declarations: StyleMap; specificity: [number, number, number]; sourceOnly: boolean }
-export interface StyleOptions { file: string; resolveImport(spec: string, from: string): { file: string; text: string } }
+/** `file` is the stylesheet that declares the rule and `text` its unscoped selector, for diagnostics. */
+export interface Rule { selector: SelectorAst; text: string; file: string; device: Device; layer: number; declarations: StyleMap; specificity: [number, number, number]; sourceOnly: boolean }
+/** `layers` collects first-appearance layer order across every stylesheet of one page. */
+export interface StyleOptions { file: string; resolveImport(spec: string, from: string): { file: string; text: string }; layers?: string[] }
 /** A CSS failure attributed to the stylesheet that contains it. */
 export class CssError extends Error { constructor(readonly file: string, message: string) { super(message); } }
 
@@ -40,6 +42,7 @@ function media(prelude: css.AtrulePrelude | css.Raw | null): Device | 'source' {
 export function parseStyles(text: string, scope: string | null, opts: StyleOptions): { rules: Rule[]; tokens: Record<string, string>; sourceOnly: number } {
   const rules: Rule[] = [];
   const tokens: { name: string; value: string; layer: number }[] = [];
+  const layers = opts.layers ?? [];
   let sourceOnly = 0;
   interface Context { device: Device; layer: number; source: boolean; top: boolean }
   function read(nodes: css.List<css.CssNode>, at: Context, stack: string[]): void {
@@ -63,11 +66,11 @@ export function parseStyles(text: string, scope: string | null, opts: StyleOptio
           const names = list?.type === 'LayerList' ? list.children.toArray().map((layer) => layer.type === 'Layer' ? layer.name : '') : [];
           for (const name of names) if (!LAYERS.includes(name)) throw new Error(`Unsupported CSS layer ${name || prelude}`);
           if (!names.length) throw new Error(`Unsupported CSS anonymous @layer ${prelude}`);
-          if (!node.block) {
-            if (!at.top || names.some((name, i) => i > 0 && LAYERS.indexOf(name) <= LAYERS.indexOf(names[i - 1]!))) throw new Error(`Unsupported CSS layer order ${prelude}`);
-            return;
-          }
-          if (names.length !== 1 || at.layer !== LAYERS.length || at.device !== 'base') throw new Error(`Unsupported CSS nested @layer ${prelude}`);
+          if (node.block ? names.length !== 1 || at.layer !== LAYERS.length || at.device !== 'base' : !at.top) throw new Error(`Unsupported CSS nested @layer ${prelude}`);
+          // Browsers order layers by first appearance; the importer requires that to be the canonical order (R4).
+          for (const name of names) if (!layers.includes(name)) layers.push(name);
+          if (layers.some((name, i) => i > 0 && LAYERS.indexOf(name) < LAYERS.indexOf(layers[i - 1]!))) throw new Error(`Unsupported CSS layer order: ${layers.join(', ')}`);
+          if (!node.block) return;
           read(node.block.children, { ...at, layer: LAYERS.indexOf(names[0]!), top: false }, stack);
           return;
         }
@@ -87,9 +90,10 @@ export function parseStyles(text: string, scope: string | null, opts: StyleOptio
       });
       node.prelude.children.forEach((selector) => {
         if (selector.type !== 'Selector' || !selector.children.size) throw new Error(`Unsupported CSS selector ${css.generate(selector)}`);
-        const source = isSourceOnly(selector) || at.source;
+        const source = isSourceOnly(selector, Object.hasOwn(declarations, 'content')) || at.source;
+        const text = css.generate(selector);
         let own = declarations;
-        if (css.generate(selector) === ':root' && at.device === 'base' && !source) {
+        if (text === ':root' && at.device === 'base' && !source) {
           own = {};
           for (const [property, value] of Object.entries(declarations)) {
             if (property.startsWith('--')) tokens.push({ name: property.slice(2), value, layer: at.layer });
@@ -99,7 +103,7 @@ export function parseStyles(text: string, scope: string | null, opts: StyleOptio
         }
         if (scope) css.walk(selector, (part) => { if (part.type === 'ClassSelector') part.name = `${scope}__${part.name}`; });
         if (source) sourceOnly++;
-        rules.push({ selector, device: at.device, layer: at.layer, declarations: own, specificity: specificity(selector), sourceOnly: source });
+        rules.push({ selector, text, file: stack[stack.length - 1]!, device: at.device, layer: at.layer, declarations: own, specificity: specificity(selector), sourceOnly: source });
       });
     });
   }
@@ -118,10 +122,10 @@ export function parseStyles(text: string, scope: string | null, opts: StyleOptio
 }
 
 /**
- * Compiles source classes into style maps. `page` styles a page root; `wrapper` treats the root as an
- * unstyled synthetic page root; `definition` styles a shared component root whose context is unknown.
+ * Compiles source classes into style maps over the fully expanded source tree (R3). A `wrapper` root is a
+ * synthetic page root that is not itself styled. `matched` receives the resting rules matching each element.
  */
-export function applyStyles(root: ElementNode, rules: Rule[], inline: Map<string, StyleMap>, mode: 'page' | 'wrapper' | 'definition' = 'page'): void {
+export function applyStyles(root: ElementNode, rules: Rule[], inline: Map<string, StyleMap>, opts: { wrapper?: boolean; matched?: Map<ElementNode, Rule[]> } = {}): void {
   const known = new Set<string>();
   for (const rule of rules) css.walk(rule.selector, (part) => { if (part.type === 'ClassSelector') known.add(part.name); });
   const resting = rules.map((rule, order) => ({ rule, order })).filter(({ rule }) => !rule.sourceOnly);
@@ -134,7 +138,10 @@ export function applyStyles(root: ElementNode, rules: Rule[], inline: Map<string
       if (child.kind === 'element') visit(child, { tag: child.tag, attrs: { ...child.attrs }, parent: view, index, siblings: elements.length }, true);
     });
     if (styled) {
-      const matching = resting.filter(({ rule }) => matchSelector(view, rule.selector))
+      const matching = resting.filter(({ rule }) => {
+        try { return matchSelector(view, rule.selector); }
+        catch (error) { throw new CssError(rule.file, `${error instanceof Error ? error.message : 'Invalid selector'} in ${rule.text}`); }
+      })
         .sort((a, b) => a.rule.layer - b.rule.layer || a.rule.specificity[0] - b.rule.specificity[0] || a.rule.specificity[1] - b.rule.specificity[1] || a.rule.specificity[2] - b.rule.specificity[2] || a.order - b.order);
       for (const device of ['base', 'tablet', 'mobile'] as const) {
         const style: StyleMap = {};
@@ -150,9 +157,10 @@ export function applyStyles(root: ElementNode, rules: Rule[], inline: Map<string
         }
         if (device === 'base' || matching.some(({ rule }) => rule.device !== 'base')) node.style[device] = style;
       }
+      opts.matched?.set(node, matching.map(({ rule }) => rule));
     }
     // The design model owns its generated class attribute; source classes are compiled into style maps.
     delete node.attrs['class'];
   }
-  visit(root, { tag: root.tag, attrs: { ...root.attrs }, parent: mode === 'definition' ? OUTSIDE : null, index: 0, siblings: 1 }, mode !== 'wrapper');
+  visit(root, { tag: root.tag, attrs: { ...root.attrs }, parent: null, index: 0, siblings: 1 }, !opts.wrapper);
 }

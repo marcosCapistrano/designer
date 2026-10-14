@@ -26,6 +26,7 @@ describe('selectors', () => {
     expect(matchSelector(tree('div', { 'data-state': 'open' }), selector)).toBe(true);
     expect(matchSelector(tree('div', { 'data-state': 'closed' }), selector)).toBe(false);
     expect(matchSelector(tree('div', {}), selector)).toBe(false);
+    expect(matchSelector(tree('div', {}), parseSelector('[constructor]'))).toBe(false);
   });
 
   it('.a .b does not match a .b outside .a', () => {

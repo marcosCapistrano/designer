@@ -1,5 +1,5 @@
 import ts from '@typescript/typescript6';
-import { canonicalStringify, validateDoc, type ComponentDef, type DesignDoc, type DesignNode, type ElementNode, type StyleMap } from '@hub/design-model';
+import { canonicalStringify, validateDoc, type ComponentDef, type DesignDoc, type DesignNode, type ElementNode, type InstanceNode, type NodeStyle, type StyleMap } from '@hub/design-model';
 import { applyStyles, CssError, parseStyles, type Rule } from './css.js';
 import type { ExtractOptions, ExtractResult, PreviewNode, RouteEntry, SourceDiagnostic, SourceProject } from './types.js';
 import { choiceKey, choicesProblem, PreviewRequired } from './choices.js';
@@ -42,6 +42,7 @@ function resolveFile(project: SourceProject, from: string, specifier: string): s
 class PropValue { constructor(readonly name: string) {} }
 type Value = string | number | boolean | null | Record<string, unknown> | unknown[] | PropValue;
 interface Module { source: ts.SourceFile; imports: Map<string, { file: string; name: string }>; styles: Map<string, string>; constants: Map<string, ts.Expression> }
+interface Occurrence { instance: InstanceNode; component: string; label: string }
 
 export function extractPages(project: SourceProject, entries: RouteEntry[], options: ExtractOptions = {}): ExtractResult {
   const doc: DesignDoc = { meta: { version: 1, seq: 0 }, pages: {}, components: {}, tokens: {} };
@@ -53,6 +54,8 @@ export function extractPages(project: SourceProject, entries: RouteEntry[], opti
   function markSamples(value: unknown): void { if (Array.isArray(value)) { sampleArrays.add(value); value.forEach(markSamples); } else if (value && typeof value === 'object') Object.values(value).forEach(markSamples); }
   for (const choice of Object.values(options.choices ?? {})) if (choice.kind === 'value') markSamples(choice.value);
   const seenRoutes = new Set<string>();
+  // Styles each shared definition computed at its first occurrence, with the rules responsible, across routes.
+  const adopted = new Map<string, Map<string, { style: NodeStyle; rules: Rule[] }>>();
   for (const entry of [...entries].sort((a, b) => a.route < b.route ? -1 : a.route > b.route ? 1 : 0)) {
     let currentFile = entry.file;
     try {
@@ -71,6 +74,8 @@ export function extractPages(project: SourceProject, entries: RouteEntry[], opti
       let requiredProps: Set<string> | null = null;
       const definitions: Record<string, ComponentDef> = {};
       const requirements = new Map<string, Set<string>>();
+      const occurrences = new Map<ElementNode, Occurrence>();
+      const layers: string[] = [];
       const nodeId = (file: string, path: string) => `s${stableId(`${idNamespace}:${file}:${path}`)}`;
       function reactHook(expression: ts.Expression, mod: Module, hook: string): boolean {
         if (ts.isIdentifier(expression)) { const imported=mod.imports.get(expression.text); return imported?.file==='react'&&imported.name===hook; }
@@ -101,13 +106,16 @@ export function extractPages(project: SourceProject, entries: RouteEntry[], opti
               const scope = cssFile.endsWith('.module.css') ? `c${stableId(cssFile)}` : null;
               if (!loadedStyles.has(cssFile)) {
                 currentFile = cssFile;
-                rules.push(...parseStyles(project.files[cssFile]!, scope, { file: cssFile, resolveImport(spec, from) {
+                loadedStyles.add(cssFile);
+                // A stylesheet reached from both TSX and @import is bundled once, at its first occurrence.
+                rules.push(...parseStyles(project.files[cssFile]!, scope, { file: cssFile, layers, resolveImport(spec, from) {
                   const imported = resolveFile(project, from, spec);
-                  if (!imported.endsWith('.css')) throw new Error(`Unsupported CSS @import ${spec}`);
-                  files.add(imported); return { file: imported, text: project.files[imported]! };
+                  if (!imported.endsWith('.css') || imported.endsWith('.module.css')) throw new Error(`Unsupported CSS @import ${spec}`);
+                  files.add(imported);
+                  if (loadedStyles.has(imported)) return { file: imported, text: '' };
+                  loadedStyles.add(imported); return { file: imported, text: project.files[imported]! };
                 } }).rules);
                 currentFile = file;
-                loadedStyles.add(cssFile);
               }
               if (statement.importClause?.name) {
                 if (!scope) throw new Error('Default CSS imports require CSS Modules');
@@ -388,7 +396,13 @@ export function extractPages(project: SourceProject, entries: RouteEntry[], opti
               } finally { idNamespace = oldNamespace; declarations = oldDeclarations; requiredProps = oldRequired; }
             }
             for (const key of requirements.get(component) ?? []) if (!Object.hasOwn(passed, key)) throw new Error(`Missing preview prop ${key} for ${tag}`);
-            return [{ id: nodeId(mod.source.fileName, path), kind: 'instance', component, props: passed, style: { base: {} } }];
+            const instance: InstanceNode = { id: nodeId(mod.source.fileName, path), kind: 'instance', component, props: passed, style: { base: {} } };
+            if (declarations) return [instance];
+            // R3: style the occurrence expanded in its real context; it becomes an instance afterwards.
+            const expanded = renderComponent(file, exportName, props, `${path}/${tag}`);
+            if (expanded.length !== 1 || expanded[0]?.kind !== 'element') throw new Error('Shared components require one element root');
+            occurrences.set(expanded[0], { instance, component, label: `${exportName} in ${file}` });
+            return expanded;
           }
           return imported ? renderComponent(resolveFile(project, mod.source.fileName, imported.file), imported.name, props, `${path}/${tag}`)
             : renderComponent(mod.source.fileName, tag, props, `${path}/${tag}`);
@@ -425,11 +439,59 @@ export function extractPages(project: SourceProject, entries: RouteEntry[], opti
       }
       const id = `page-${namespace}`;
       const first = nodes[0];
-      const root: ElementNode = nodes.length === 1 && first?.kind === 'element' ? first
+      const expanded: ElementNode = nodes.length === 1 && first?.kind === 'element' ? first
         : { id: `s${namespace}`, kind: 'element', tag: 'div', attrs: {}, style: { base: {} }, children: nodes };
-      applyStyles(root, rules, inline, root === first ? 'page' : 'wrapper');
+      const matched = new Map<ElementNode, Rule[]>();
+      applyStyles(expanded, rules, inline, { wrapper: expanded !== first, matched });
+      const styled = new Set<string>();
+      function adopt(node: ElementNode, { component, label }: Occurrence): void {
+        const styles = new Map<string, { style: NodeStyle; rules: Rule[] }>();
+        const definition = definitions[component]!;
+        function align(def: DesignNode, occurrence: DesignNode): void {
+          const nested = occurrence.kind === 'element' ? occurrences.get(occurrence) : undefined;
+          if (def.kind === 'instance' && nested?.component === def.component) return adopt(occurrence as ElementNode, nested);
+          if (def.kind !== occurrence.kind || def.kind === 'instance' || (def.kind === 'element' && occurrence.kind === 'element' && (def.tag !== occurrence.tag || def.children.length !== occurrence.children.length))) {
+            throw new Error(`Shared component ${label} renders a different structure per occurrence; provide a preview adapter`);
+          }
+          if (def.kind !== 'element' || occurrence.kind !== 'element') return;
+          styles.set(def.id, { style: occurrence.style, rules: matched.get(occurrence) ?? [] });
+          def.children.forEach((child, index) => align(child, occurrence.children[index]!));
+        }
+        align(definition.root, node);
+        const first = adopted.get(component);
+        if (first) for (const [id, now] of styles) {
+          const before = first.get(id)!;
+          if (canonicalStringify(before.style) === canonicalStringify(now.style)) continue;
+          const key = (rule: Rule) => `${rule.text} (${rule.file})`;
+          const was = new Set(before.rules.map(key)), is = new Set(now.rules.map(key));
+          const responsible = [...was, ...is].filter((item) => !was.has(item) || !is.has(item));
+          const message = `Shared component ${label} has context-dependent CSS: ${responsible.join(', ') || 'inline styles'} match only some occurrences; provide a preview adapter`;
+          const rule = [...before.rules, ...now.rules].find((item) => responsible.includes(key(item)));
+          throw rule ? new CssError(rule.file, message) : new Error(message);
+        }
+        else adopted.set(component, styles);
+        function apply(def: DesignNode): void {
+          if (def.kind !== 'element') return;
+          def.style = structuredClone(styles.get(def.id)!.style);
+          delete def.attrs['class'];
+          def.children.forEach(apply);
+        }
+        apply(definition.root);
+        styled.add(component);
+      }
+      function collapse(node: ElementNode): void {
+        node.children = node.children.map((child) => {
+          const occurrence = child.kind === 'element' ? occurrences.get(child) : undefined;
+          if (!occurrence) { if (child.kind === 'element') collapse(child); return child; }
+          adopt(child as ElementNode, occurrence);
+          return occurrence.instance;
+        });
+      }
+      const top = occurrences.get(expanded);
+      if (top) adopt(expanded, top); else collapse(expanded);
+      const root: ElementNode = top ? { id: `s${namespace}`, kind: 'element', tag: 'div', attrs: {}, style: { base: {} }, children: [top.instance] } : expanded;
       for (const [name, definition] of Object.entries(definitions)) {
-        applyStyles(definition.root, rules, inline, 'definition');
+        if (!styled.has(name)) throw new Error(`Shared component ${name} has no rendered occurrence to style`);
         const existing = doc.components[name];
         if (existing && canonicalStringify(existing) !== canonicalStringify(definition)) throw new Error(`Shared component ${name} has route-dependent props or CSS; provide an explicit preview adapter`);
         doc.components[name] = definition;

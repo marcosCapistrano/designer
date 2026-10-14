@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { ElementNode } from '@hub/design-model';
-import { applyStyles, parseStyles } from './css.js';
+import { applyStyles, CssError, parseStyles, type Rule } from './css.js';
+import { parseSelector } from './selectors.js';
 
 const el = (tag: string, cls = '', children: ElementNode[] = []): ElementNode => ({ id: `n${Math.random().toString(16).slice(2)}`, kind: 'element', tag, attrs: cls ? { class: cls } : {}, style: { base: {} }, children });
 const parse = (text: string, files: Record<string, string> = {}, scope: string | null = null) => parseStyles(text, scope, {
@@ -28,11 +29,29 @@ describe('stylesheet parsing', () => {
   it('orders cascade layers before specificity, unlayered last (R4)', () => {
     expect(style('@layer utilities { .a { color: red } } .a { color: blue }').base).toEqual({ color: 'blue' });
     expect(style('.a { color: blue } @layer utilities { .a { color: red } }').base).toEqual({ color: 'blue' });
-    expect(style('@layer utilities { .a { color: red } } @layer base { p.a { color: blue } }').base).toEqual({ color: 'red' });
-    expect(parse('@layer reset, base, utilities; @layer theme { .a { color: red } }').rules[0]!.layer).toBe(1);
+    expect(style('@layer base { p.a { color: blue } } @layer utilities { .a { color: red } }').base).toEqual({ color: 'red' });
+    expect(parse('@layer reset, theme, utilities; @layer theme { .a { color: red } }').rules[0]!.layer).toBe(1);
     expect(() => parse('@layer vendor { .a { color: red } }')).toThrow('Unsupported CSS layer vendor');
-    expect(() => parse('@layer utilities, base;')).toThrow('Unsupported CSS layer order');
+    expect(() => parse('@layer utilities, base;')).toThrow('Unsupported CSS layer order: utilities, base');
+    expect(() => parse('@layer utilities { .a { color: red } } @layer base { p.a { color: blue } }')).toThrow('Unsupported CSS layer order: utilities, base');
+    expect(() => parse('@layer reset, base, utilities; @layer theme { .a { color: red } }')).toThrow('Unsupported CSS layer order: reset, base, utilities, theme');
     expect(() => parse('@layer base { @layer utilities { .a { color: red } } }')).toThrow('Unsupported CSS nested @layer');
+  });
+
+  it('tracks layer first appearance across every stylesheet of a page', () => {
+    const layers: string[] = [];
+    const resolveImport = () => { throw new Error('none'); };
+    parseStyles('@layer utilities { .a { color: red } }', null, { file: 'a.css', resolveImport, layers });
+    expect(() => parseStyles('@layer base { .a { color: blue } }', null, { file: 'b.css', resolveImport, layers })).toThrow('Unsupported CSS layer order: utilities, base');
+  });
+
+  it('treats ::before/::after without content as source-only', () => {
+    const parsed = parse('*, *::before, *::after { box-sizing: border-box }');
+    expect(parsed.sourceOnly).toBe(2);
+    const child = el('p');
+    const root = el('main', '', [child]);
+    applyStyles(root, parsed.rules, new Map());
+    expect([root.style.base, child.style.base]).toEqual([{ 'box-sizing': 'border-box' }, { 'box-sizing': 'border-box' }]);
   });
 
   it('hover rule is source-only', () => {
@@ -88,8 +107,15 @@ describe('stylesheet parsing', () => {
     expect(() => parseStyles('@import "./x.css";', 'cX', { file: 'a.module.css', resolveImport: () => ({ file: 'x.css', text: '' }) })).toThrow('Unsupported CSS @import in a CSS Module');
   });
 
+  it('attributes matching errors to the rule file and selector', () => {
+    const rule: Rule = { selector: parseSelector('p:nth-child(2)'), text: 'p:nth-child(2)', file: 'x.css', device: 'base', layer: 5, declarations: {}, specificity: [0, 1, 1], sourceOnly: false };
+    const error = (() => { try { applyStyles(el('p'), [rule], new Map()); } catch (caught) { return caught; } })();
+    expect(error).toBeInstanceOf(CssError);
+    expect(error).toMatchObject({ file: 'x.css', message: 'Unsupported CSS selector :nth-child in p:nth-child(2)' });
+  });
+
   it.each([
-    ['.a::before { content: "x" }', 'Unsupported CSS pseudo-element ::before'],
+    ['.a::before { content: "x" }', 'Unsupported CSS pseudo-element ::before with content'],
     ['.a + .b { color: red }', 'Unsupported CSS combinator +'],
     ['.a:nth-child(2) { color: red }', 'Unsupported CSS selector :nth-child'],
     ['.a:not(:hover) { color: red }', 'Unsupported CSS selector :not() with a state pseudo-class'],

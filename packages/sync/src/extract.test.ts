@@ -93,7 +93,20 @@ describe('static import', () => {
     }
     const broken = extractPages({ files: { ...files, 'app/styles/tokens.css': '.x::after { content: ""; }' } }, [{ route: '/', file: 'app/page.tsx' }]);
     expect(broken.ok).toBe(false);
-    if (!broken.ok) expect(broken.diagnostics[0]).toMatchObject({ file: 'app/styles/tokens.css', message: 'Unsupported CSS pseudo-element ::after' });
+    if (!broken.ok) expect(broken.diagnostics[0]).toMatchObject({ file: 'app/styles/tokens.css', message: 'Unsupported CSS pseudo-element ::after with content' });
+  });
+
+  it('parses a stylesheet reached from TSX and @import once, at its first occurrence, and orders layers across files', () => {
+    const files = {
+      'page.tsx': `import './globals.css'; import './a.css'; export default () => <p className="x">Hi</p>`,
+      'globals.css': `@import "./a.css"; .x { color: blue; }`,
+      'a.css': `.x { color: red; }`,
+    };
+    const result = extractPages({ files }, [{ route: '/', file: 'page.tsx' }]);
+    expect(result.ok, JSON.stringify(result)).toBe(true);
+    if (result.ok) expect(Object.values(result.doc.pages)[0]!.root.style.base).toEqual({ color: 'blue' });
+    const layered = extractPages({ files: { ...files, 'globals.css': '@layer utilities { .x { color: blue; } }', 'a.css': '@layer base { .x { color: red; } }' } }, [{ route: '/', file: 'page.tsx' }]);
+    expect(layered).toMatchObject({ ok: false, diagnostics: [{ file: 'a.css', message: 'Unsupported CSS layer order: utilities, base' }] });
   });
 
   it('rejects unresolved utility classes and side-effect code', () => {

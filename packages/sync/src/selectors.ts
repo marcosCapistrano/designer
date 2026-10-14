@@ -8,8 +8,6 @@ type Specificity = [number, number, number];
 const STATE = /^(?:hover|focus.*|active|disabled|checked|placeholder-shown)$/;
 const LOGICAL = new Set(['is', 'where', 'not']);
 const STRUCTURAL = new Set(['first-child', 'last-child', 'root']);
-/** Stands for the unknown context of a shared definition; asking about it fails instead of guessing. */
-export const OUTSIDE: TreeNode = { tag: '', attrs: {}, parent: null, index: 0, siblings: 1 };
 
 export function parseSelector(text: string): SelectorAst {
   const list = css.parse(text, { context: 'selectorList' });
@@ -24,18 +22,21 @@ function args(node: css.PseudoClassSelector): SelectorAst[] {
   return list.children.toArray().map((item) => { if (item.type !== 'Selector') throw new Error(`Unsupported CSS selector :${node.name}()`); return item; });
 }
 
-/** Validates a selector and reports whether it can only match in a non-resting state (R2). */
-export function isSourceOnly(selector: SelectorAst): boolean {
+/**
+ * Validates a selector and reports whether it can only match in a non-resting state (R2).
+ * `::before`/`::after` render nothing without `content`, so they are source-only unless the rule sets it.
+ */
+export function isSourceOnly(selector: SelectorAst, content = true): boolean {
   let state = false;
   selector.children.forEach((part) => {
     if (part.type === 'Combinator') { if (part.name !== ' ' && part.name !== '>') throw new Error(`Unsupported CSS combinator ${part.name}`); }
     else if (part.type === 'PseudoElementSelector') {
-      if (part.name === 'before' || part.name === 'after') throw new Error(`Unsupported CSS pseudo-element ::${part.name}`);
+      if ((part.name === 'before' || part.name === 'after') && content) throw new Error(`Unsupported CSS pseudo-element ::${part.name} with content`);
       state = true;
     } else if (part.type === 'PseudoClassSelector') {
       if (STATE.test(part.name) && !part.children) state = true;
       else if (LOGICAL.has(part.name)) {
-        const inner = args(part).map(isSourceOnly);
+        const inner = args(part).map((item) => isSourceOnly(item));
         if (part.name === 'not') { if (inner.some(Boolean)) throw new Error('Unsupported CSS selector :not() with a state pseudo-class'); }
         else if (inner.every(Boolean)) state = true;
         else if (inner.some(Boolean)) throw new Error(`Unsupported CSS selector :${part.name}() mixing resting and state alternatives`);
@@ -66,8 +67,8 @@ export function specificity(selector: SelectorAst): Specificity {
 }
 
 function attribute(node: TreeNode, part: css.AttributeSelector): boolean {
-  const actual = node.attrs[part.name.name];
-  if (actual === undefined) return false;
+  if (!Object.hasOwn(node.attrs, part.name.name)) return false;
+  const actual = node.attrs[part.name.name]!;
   if (!part.matcher) return true;
   const expected = part.value ? (part.value.type === 'String' ? part.value.value : part.value.name) : '';
   switch (part.matcher) {
@@ -82,7 +83,6 @@ function attribute(node: TreeNode, part: css.AttributeSelector): boolean {
 }
 
 function compound(node: TreeNode, parts: css.CssNode[]): boolean {
-  if (node === OUTSIDE) throw new Error('Context-dependent CSS selector on a shared component needs a preview adapter');
   return parts.every((part) => {
     switch (part.type) {
       case 'TypeSelector': return part.name === '*' || part.name.toLowerCase() === node.tag;
@@ -92,13 +92,12 @@ function compound(node: TreeNode, parts: css.CssNode[]): boolean {
       case 'PseudoElementSelector': return true;
       case 'PseudoClassSelector':
         if (part.name === 'root') return node.parent === null;
-        if (part.name === 'first-child' || part.name === 'last-child') {
-          if (node.parent === OUTSIDE) throw new Error('Context-dependent CSS selector on a shared component needs a preview adapter');
-          return part.name === 'first-child' ? node.index === 0 : node.index === node.siblings - 1;
-        }
+        if (part.name === 'first-child') return node.index === 0;
+        if (part.name === 'last-child') return node.index === node.siblings - 1;
         if (part.name === 'not') return !args(part).some((inner) => matchSelector(node, inner));
         if (part.name === 'is' || part.name === 'where') return args(part).some((inner) => matchSelector(node, inner));
-        return false; // State pseudo-classes never match at rest (R2).
+        if (STATE.test(part.name)) return false; // State pseudo-classes never match at rest (R2).
+        throw new Error(`Unsupported CSS selector :${part.name}`);
       default: throw new Error(`Unsupported CSS selector ${css.generate(part)}`);
     }
   });
@@ -108,7 +107,10 @@ export function matchSelector(node: TreeNode, selector: SelectorAst): boolean {
   const compounds: css.CssNode[][] = [[]];
   const combinators: string[] = [];
   selector.children.forEach((part) => {
-    if (part.type === 'Combinator') { combinators.push(part.name); compounds.push([]); }
+    if (part.type === 'Combinator') {
+      if (part.name !== ' ' && part.name !== '>') throw new Error(`Unsupported CSS combinator ${part.name}`);
+      combinators.push(part.name); compounds.push([]);
+    }
     else compounds[compounds.length - 1]!.push(part);
   });
   function from(at: TreeNode, index: number): boolean {
