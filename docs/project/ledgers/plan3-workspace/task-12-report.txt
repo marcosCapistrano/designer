@@ -1,0 +1,181 @@
+TASK 12 REPORT: GitHub interface, fake and Octokit implementation (plan 3)
+==========================================================================
+
+Status: DONE_WITH_CONCERNS
+Worktree: /home/claude/wt-p3-12 (branch p3-12). Nothing pushed.
+Commit: ca15bb4 feat(server): GitHub interface with Octokit and fake implementations
+
+
+1. WHAT WAS IMPLEMENTED
+-----------------------
+apps/server/src/github/github.ts
+  - Types: RepoRef, PrInfo, CheckRun, CiStatus, MergeOutcome, GitHub interface.
+  - FAILED_CONCLUSIONS (exact list from the brief).
+  - summarizeChecks(runs): [] -> 'none'; any completed run with a failed conclusion
+    -> 'failure'; else any run not completed or completed with null conclusion
+    -> 'pending'; else 'success'.
+  - parseGitHubRemote(url): three anchored patterns (scp-style git@github.com:o/r,
+    ssh://git@github.com/o/r, https://[user[:pass]@]github.com/o/r), optional .git
+    and trailing slash; anything else -> null.
+
+apps/server/src/github/fake.ts
+  - FakeGitHub implements GitHub, exactly per the brief's rules:
+    createPr numbering from 1, url https://github.com/<o>/<r>/pull/<n>, headSha
+    head-<n>, duplicate open head throws; findOpenPr by headRef + open; getPr
+    unknown -> Error('Not Found'); merge checks not-open, then stale sha, then
+    merges (mergeSha merged-<n>, pushes to merges).
+  - setChecks, movePrHead, markMerged, closePr, autoGreenAfter as specified.
+  - calls records the five GitHub-interface method names in call order.
+
+apps/server/src/github/octokit.ts
+  - OctokitGitHub(token, fetchFn?) builds
+    new Octokit({ auth: token, request: { fetch: fetchFn } }).
+  - findOpenPr -> pulls.list({ owner, repo, head: owner:branch, state: 'open', per_page: 1 })
+  - createPr -> pulls.create (head, base, title, body)
+  - getPr -> pulls.get
+  - checkStatus -> checks.listForRef({ ref: sha, per_page: 100 }), state via summarizeChecks
+  - merge -> pulls.merge({ merge_method: 'squash', sha }); 405 and 409 errors become
+    { merged: false, sha: null, message: err.message }; other errors rethrow.
+  - PR mapping: number, html_url, state, merged ?? false, head.sha, head.ref,
+    base.ref; mergeSha = merge_commit_sha only when merged, else null.
+
+Tests (no network anywhere):
+  - apps/server/src/github/github.test.ts (summarizeChecks, parseGitHubRemote, FakeGitHub)
+  - apps/server/src/github/octokit.test.ts (OctokitGitHub, through an injected
+    recording fetch that returns canned Response objects; it never reaches
+    api.github.com, because every OctokitGitHub in the tests gets a fetch stand-in)
+
+
+2. TDD EVIDENCE
+---------------
+RED command:
+  cd /home/claude/wt-p3-12 && pnpm -F @hub/server exec vitest run src/github
+RED output (abridged, the two suites fail on their missing modules):
+  FAIL  src/github/github.test.ts [ src/github/github.test.ts ]
+  Error: Cannot find module './fake.js' imported from .../src/github/github.test.ts
+  FAIL  src/github/octokit.test.ts [ src/github/octokit.test.ts ]
+  Error: Cannot find module './octokit.js' imported from .../src/github/octokit.test.ts
+  Test Files  2 failed (2)
+  Tests  no tests
+
+GREEN command (same command, after implementation):
+  cd /home/claude/wt-p3-12 && pnpm -F @hub/server exec vitest run src/github
+GREEN output (final code):
+   RUN  v5.0.4 /home/claude/wt-p3-12/apps/server
+   Test Files  2 passed (2)
+        Tests  18 passed (18)
+
+Typecheck during development: one TS2352 error in octokit.ts (a cast from Error to
+{ status: number } in the refused-merge type guard). Fixed by narrowing the guard to
+isRefusedMergeError with a cast through Error & { status?: unknown }. Re-run clean.
+
+
+3. ROOT GATE (run before commit, and again on the final code)
+--------------------------------------------------------------
+  pnpm test       -> exit 0
+    packages/protocol   15 passed
+    packages/design-model 359 passed
+    apps/server         9 files, 75 passed (includes the 18 new GitHub tests)
+    packages/renderer   52 passed
+    apps/client         154 passed
+  pnpm typecheck  -> exit 0 (protocol, design-model, server, renderer, client)
+
+
+4. FILES CHANGED (commit ca15bb4, 5 files, all new, all under apps/server/src/github/)
+-----------------------------------------------------------------------------------
+  apps/server/src/github/github.ts
+  apps/server/src/github/fake.ts
+  apps/server/src/github/octokit.ts
+  apps/server/src/github/github.test.ts
+  apps/server/src/github/octokit.test.ts
+No package.json, pnpm-lock.yaml, docs/ or other .superpowers/ files were changed.
+The only write outside the worktree is this report file.
+
+
+5. SELF-REVIEW NOTES
+--------------------
+  - Commit trailer: the harness-supplied Co-Authored-By and Claude-Session lines
+    were used (the brief's trailer text was not used).
+  - No Date, Math.random or I/O in src. Inputs are not mutated: setChecks and
+    checkStatus copy runs, and returned PrInfo objects are fresh copies, so callers
+    cannot change the fake's internal state.
+  - FakeGitHub returns only the eight PrInfo fields. title and body stay internal
+    to the fake's prs map, so toEqual comparisons against PrInfo hold.
+  - Tokens: the token is only passed to Octokit's auth option. It is never placed in
+    an error message or a log line, and the Octokit RequestError redacts the
+    authorization header in any error it builds.
+  - Octokit's request.fetch falls back to globalThis.fetch when fetchFn is undefined
+    (checked in @octokit/request fetch-wrapper), so the production path needs no
+    fetch argument.
+
+
+6. CONCERNS
+-----------
+  a. Test count. The brief says "Expected: 12 pass". Its bullet list yields 18
+     separate cases (summarizeChecks 6, parseGitHubRemote 2, FakeGitHub 3,
+     OctokitGitHub 7, which adds findOpenPr-returns-null and a non-405/409 rethrow
+     case). All 18 pass. The count in the brief looks like a miscount, not a
+     missing behavior.
+  b. RequestError is not importable. @octokit/request-error is not a direct
+     dependency of apps/server, and pnpm will not resolve it, and I was not allowed
+     to change dependencies. The refused-merge check therefore tests
+     err.name === 'HttpError' and status 405 or 409. It matches RequestError's
+     shape exactly, but it is structural, not an instanceof check.
+  c. checkStatus reads one page (per_page 100, as the brief specifies). A commit with
+     more than 100 check runs would have its state computed over only the first 100,
+     which could report 'success' while later runs fail. The brief does not ask for
+     pagination. Flagging it for the controller to decide whether to paginate.
+  d. FakeGitHub interpretations where the brief is silent:
+     - merge and getPr on an unknown PR number throw Error('Not Found') (the same as
+       getPr). merge on an unknown number does not return a not-open outcome.
+     - setChecks(sha, []) is an explicit empty result and wins over autoGreenAfter.
+     - calls holds only the five GitHub-interface methods. The helper methods
+       (setChecks, movePrHead, markMerged, closePr) are not recorded.
+     - PRs are keyed by number only, and findOpenPr and the duplicate-head check
+       ignore the repo argument. Fine for single-repo tests, but it is not
+       multi-repo aware.
+     - markMerged does not add an entry to merges, because the merge did not happen
+       through the hub.
+  e. mergeSha uses the merge_commit_sha-when-merged rule for every PR-returning
+     method (createPr, findOpenPr, getPr), not only getPr. For open PRs this is
+     always null, so the result is the same as the brief.
+
+
+FIX ROUND 1
+===========
+Commit: a49c022 fix(server): CI summary fails closed on unread or unknown check runs
+Requested by the coordinator. Commit trailer: the harness-supplied Co-Authored-By and Claude-Session lines.
+
+1. OctokitGitHub.checkStatus reads one page (per_page 100, unchanged). When data.total_count is greater
+   than data.check_runs.length, the state is now 'pending' (fail closed). The checks array still holds the
+   runs that were read.
+   Note: when the unread case applies, a visible failed run is reported as 'pending', not 'failure'. Both
+   block the merge, and 'pending' is what the coordinator specified.
+2. summarizeChecks now fails closed (Ruling 8). Order: [] -> 'none'; any completed run with a
+   FAILED_CONCLUSIONS conclusion -> 'failure'; 'success' only when every run is completed with a conclusion
+   of 'success', 'skipped' or 'neutral' (PASSING_CONCLUSIONS, module-private); anything else -> 'pending'
+   (in progress, null conclusion, or an unknown conclusion). FAILED_CONCLUSIONS is exported unchanged.
+3. Tests added:
+   - github.test.ts: completed run with conclusion 'weird_new_value' -> 'pending'.
+   - github.test.ts: FakeGitHub happy path. createPr, then merge at 'head-1' -> { merged: true,
+     sha: 'merged-1', message: 'Merged' }; merges = [{ number: 1, sha: 'head-1' }]; getPr shows state 'closed',
+     merged true, mergeSha 'merged-1'; findOpenPr returns null.
+   - octokit.test.ts: merge refused with 409 -> merged false, sha null, message contains the GitHub message.
+   - octokit.test.ts: checkStatus with total_count 101 and one completed success run -> state 'pending'.
+
+TDD evidence
+------------
+RED command: cd /home/claude/wt-p3-12 && pnpm -F @hub/server exec vitest run src/github
+RED output (the two tests that encode the fixes fail; the 409 and FakeGitHub tests already pass):
+   × is pending when a completed run has a conclusion this code does not recognise
+   × checkStatus is pending when not every check run was read
+   AssertionError: expected 'success' to be 'pending' // Object.is equality (both)
+   Tests  2 failed | 20 passed (22)
+
+GREEN: the same focused command, then the coordinator's gate.
+   pnpm -F @hub/server exec vitest run src/github  -> exit 0, Test Files 2 passed (2), Tests 22 passed (22)
+   pnpm -F @hub/server test                        -> exit 0, Test Files 9 passed (9), Tests 79 passed (79)
+   pnpm -r typecheck                               -> exit 0 (no errors)
+
+Files changed in this round: apps/server/src/github/github.ts, github.test.ts, octokit.ts, octokit.test.ts.
+No dependency, lockfile, docs/ or other .superpowers/ changes.

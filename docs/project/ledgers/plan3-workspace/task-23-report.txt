@@ -1,0 +1,74 @@
+TASK 23 REPORT: Client routing and Build view state
+Status: DONE
+Branch: p3d (worktree /home/claude/wt-p3d)
+Commit: 28829a5 feat(client): hash routes and Build view state
+
+WHAT WAS IMPLEMENTED
+- apps/client/src/shell/route.ts
+  AREAS, AREA_LABEL, Area, Route, parseHash, formatRoute, exactly as the brief specifies.
+  parseHash: '' | '#' | '#/' -> apps; '#/apps/<enc>' -> build; '#/apps/<enc>/<area>' with unknown area -> build;
+  bad percent-escape, empty app name, more than two segments after 'apps/', or any other prefix -> apps.
+- apps/client/src/areas/build/state.ts
+  BuildView, EMPTY_VIEW, MAX_VIEW_MESSAGES (1000), STATUS_LABEL (exact copy), applyState, applyServerMsg,
+  lastMessageId, TaskSummary, summarizeTask.
+  Messages: merged by id (incoming row replaces an existing row with the same id), sorted ascending, newest 1000 kept.
+  Tasks: replaced when there is none, when id is greater, or when id is equal and updatedAt >= current.
+  summarizeTask: review label by CI state, other statuses via STATUS_LABEL; tone, canMerge and mergeHint
+  follow the brief's tables and rule order.
+- Tests: apps/client/src/shell/route.test.ts (5 tests), apps/client/src/areas/build/state.test.ts (8 tests).
+  Total 13, matching the brief's expected count.
+
+TDD EVIDENCE
+RED command: cd /home/claude/wt-p3d && pnpm -F @hub/client exec vitest run src/shell src/areas
+RED output (tail):
+   FAIL  src/areas/build/state.test.ts [ src/areas/build/state.test.ts ]
+  Error: Cannot find module './state.js' imported from /home/claude/wt-p3d/apps/client/src/areas/build/state.test.ts
+   Test Files  2 failed (2)
+        Tests  no tests
+  (route.test.ts also failed to load: ./route.js not found, before route.ts was written.)
+
+GREEN, first attempt (route.ts and state.ts written):
+   Test Files  1 failed | 1 passed (2)
+        Tests  1 failed | 12 passed (13)
+  Failing assertion was in MY test, not the implementation: I had asserted mergeHint null for
+  summarizeTask(task({status:'working'}), true). The brief's rule order (step 2: running -> 'Wait for Claude to finish.')
+  requires 'Wait for Claude to finish.'. The implementation already followed the brief; I corrected the test assertion.
+
+GREEN, final: cd /home/claude/wt-p3d && pnpm -F @hub/client exec vitest run src/shell src/areas
+   Test Files  2 passed (2)
+        Tests  13 passed (13)
+
+FULL CHECK (before commit): cd /home/claude/wt-p3d && pnpm test && pnpm typecheck
+   exit 0
+   packages/protocol     Tests 15 passed (15)
+   packages/design-model Tests 359 passed (359)
+   packages/renderer     Tests 52 passed (52)
+   apps/client           Test Files 18 passed (18), Tests 135 passed (135)
+   typecheck: packages/design-model, packages/protocol, packages/renderer, apps/client all clean (tsc --noEmit).
+
+FILES CHANGED (commit 28829a5, 4 files, all new, +311 lines)
+  apps/client/src/shell/route.ts
+  apps/client/src/shell/route.test.ts
+  apps/client/src/areas/build/state.ts
+  apps/client/src/areas/build/state.test.ts
+No package.json or pnpm-lock.yaml changes. Nothing created under apps/client/src/net/. Nothing touched in docs/ or .superpowers/ except this report.
+
+SELF-REVIEW NOTES (judgment calls where the brief is silent; please confirm)
+1. A stale build.task (lower id, or same id with updatedAt older than current) is ignored as a whole message, including its
+   running flag. Only an accepted task sets running. Reason: a stale running=false must not clear the running state of the
+   newer task that is actually in progress. The brief says "build.task sets running from the message"; I read this as
+   "for an accepted task".
+2. applyState uses the same replacement rule for the snapshot's task (a null snapshot task keeps the current task). This stops a
+   late snapshot from regressing the view to an older task after a newer build.task has already arrived. applyState sets
+   running from the snapshot unconditionally, as the brief says.
+3. Duplicate message ids: the incoming row overwrites the stored one. Message rows are immutable on the server, so this only
+   matters for the ordering race above.
+4. parseHash: a path with more than two segments after '#/apps/' is treated as "anything else" -> apps. A trailing slash
+   ('#/apps/x/') yields area '' -> build.
+5. summarizeTask: the running rule (step 2) applies to every status, so a running queued or merged task gets
+   'Wait for Claude to finish.' as its hint. This follows the brief's order literally.
+6. applyServerMsg returns v itself for other apps, stale tasks and non-Build messages (render.ready, pong).
+7. No Date, Math.random or I/O. Inputs are not mutated (mergeMessages builds a new Map and array).
+
+CONCERNS
+None blocking. Items 1 and 2 are interpretation calls; the brief's tests pass either way, so a reviewer may want to confirm them.

@@ -1,0 +1,68 @@
+TASK 11 REPORT: git wrapper and test repositories (plan 3)
+Worktree: /home/claude/wt-p3-11 (branch p3-11)
+Commit: 656b35b feat(server): git wrapper with header-only auth and test repos
+Status: DONE_WITH_CONCERNS
+
+Summary
+- Implemented apps/server/src/git/git.ts (gitEnv, authConfig, openRepo and the GitRepo methods), apps/server/src/git/test-repo.ts (TEST_IDENTITY, TEST_REMOTE, TestRepo, makeTestRepo, git) and apps/server/src/git/git.test.ts.
+- Test count: 9 (the 8 briefed tests plus one argv test added by ruling 5).
+
+History
+1. First pass stopped at NEEDS_CONTEXT, with no files written and no commit. Reason: the brief's authed instance (simpleGit({ config: authConfig(token) })) puts the base64 token header into git's argv as "-c", and constraints.txt says secrets never appear in a process argument list. Verified in a scratchpad probe (since removed): ps showed "git -c http.https://github.com/.extraheader=AUTHORIZATION: basic <B64> fetch origin --prune".
+2. Controller ruling 5 (option B): the authed instance passes the header through GIT_CONFIG_PARAMETERS in its .env() (single-quoted, merged into the minimal env). Never -c in argv, never written to .git/config. authConfig() and its test are kept exactly as briefed. Add an argv test.
+
+Implementation notes
+- gitEnv(identity?) returns exactly PATH, HOME, GIT_TERMINAL_PROMPT, plus GIT_AUTHOR_/GIT_COMMITTER_ NAME and EMAIL when identity is given.
+- authConfig(token) returns the briefed key=value string, or [] when token is null, undefined or ''.
+- openRepo builds two simple-git instances, both with .env(...). "local" uses gitEnv(identity). "authed" (used only by fetch and push) uses gitEnv(identity) plus GIT_CONFIG_PARAMETERS built from authConfig(token), each entry wrapped in single quotes with embedded quotes escaped as '\''.
+- defaultBranch, commitAll and the others follow the brief. The methods use closure helpers (isDirty, headSha), not this, so destructuring is safe.
+- remoteUrl returns null when origin is unset.
+
+TDD evidence
+RED: cd /home/claude/wt-p3-11/apps/server && pnpm exec vitest run src/git
+  Result: FAIL, before any implementation existed.
+  Output: "Error: Cannot find module './git.js' imported from .../src/git/git.test.ts"; Test Files 1 failed; Tests no tests.
+
+GREEN: cd /home/claude/wt-p3-11/apps/server && pnpm exec vitest run src/git --reporter=verbose
+  Output (summary): 9 passed.
+  - openRepo > knows the default and current branch: pass
+  - openRepo > creates a branch from origin: pass
+  - openRepo > commitAll commits everything or returns null: pass
+  - openRepo > push publishes the branch: pass
+  - openRepo > token never lands in git config: pass
+  - openRepo > keeps the token out of git argv and passes the header through the environment: pass
+  - openRepo > remote url is the configured one: pass
+  - authConfig > builds the basic auth extraheader from the token: pass
+  - gitEnv > is minimal: pass
+  Test Files 1 passed (1); Tests 9 passed (9).
+
+Mutation check (the argv test must catch the brief's original design)
+- Temporarily changed authed to simpleGit({ baseDir, config: authConfig(token) }).env(env), then ran vitest with -t argv.
+  Result: FAIL. "AssertionError: expected 'argv: [-c] [http.https://github.com/.…' not to contain 'eC1hY2Nlc3MtdG9rZW46c2VjcmV0LXRva2Vu'".
+- The file was restored from backup and diffed clean before committing.
+
+Argv test design
+- A "git" shell wrapper is placed first on PATH in a temp dir under the test's mkdtemp root. It appends "argv: [..]" and "GIT_CONFIG_PARAMETERS:<value>" lines to a log, then execs the real git (found once with command -v before PATH is stubbed).
+- openRepo(work, { token: 'secret-token' }).fetch() runs against the local bare origin through insteadOf.
+- Assertions: a fetch argv line exists; no argv line contains the token or its base64; the env line equals GIT_CONFIG_PARAMETERS:'http.https://github.com/.extraheader=AUTHORIZATION: basic <B64>'.
+
+Repo-wide check
+- cd /home/claude/wt-p3-11 && pnpm test: exit 0. apps/server 18 passed (2 files; config and git). design-model 359 passed. protocol passed. renderer 52 passed. client 122 passed.
+- pnpm typecheck: exit 0 (5 workspace projects).
+- Temp dirs: no /tmp/hub-git-* left behind after the test run (afterEach removes dirname(origin)).
+
+Files changed (all in commit 656b35b)
+- apps/server/src/git/git.ts (new)
+- apps/server/src/git/test-repo.ts (new)
+- apps/server/src/git/git.test.ts (new)
+No dependency or lockfile changes. No docs/ changes. Nothing pushed.
+
+Self-review notes
+- Corrected a gitEnv comment: simple-git refuses EDITOR, PAGER and GIT_CONFIG_COUNT (verified), not all GIT_CONFIG_* keys. GIT_CONFIG_PARAMETERS is accepted.
+- simple-git's argv-parser was checked directly: the "-c" value http.https://github.com/.extraheader is not on its blocked list, and GIT_CONFIG_PARAMETERS is not blocked either.
+
+Concerns
+1. GIT_CONFIG_PARAMETERS is git's internal -c transport format. The single-quoted key=value list has been stable since git 2.31, and the repo runs git 2.43 (verified). A future git could change it; the argv test and the env assertion would catch a regression in either direction.
+2. The token-derived header is in the authed git process environment, not argv. It is readable only by the same uid (/proc/<pid>/environ). That satisfies "never in a process argument list" as written.
+3. Seeding a bare origin on git 2.43 prints "fatal: expected 'acknowledgments', received 'packfile'" and "warning: push negotiation failed; proceeding anyway with push" to stderr. The push succeeds. Harmless noise, ignored per ruling.
+4. The "No I/O in src" convention does not apply literally to git.ts and test-repo.ts, since spawning git and creating temp dirs is their purpose, as the brief requires.

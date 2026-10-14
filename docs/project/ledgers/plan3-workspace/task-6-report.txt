@@ -1,0 +1,216 @@
+TASK 6 REPORT: Sessions, auth middleware, login routes (plan 3)
+=================================================================
+
+Status: DONE_WITH_CONCERNS
+Worktree: /home/claude/wt-p3-6 (branch p3-6)
+Commit: 636acf6 feat(server): hashed session cookies, auth middleware, login routes
+Trailers: Co-Authored-By: Claude Haiku 5.5 <noreply@anthropic.com>
+          Claude-Session: https://claude.ai/code/session_01EgHXhuc9bdgup2DFjf8JrU
+Not pushed. No dependency or pnpm-lock.yaml change.
+
+1. WHAT WAS IMPLEMENTED
+-----------------------
+apps/server/src/auth/sessions.ts
+  - SESSION_COOKIE = 'hub_session', SESSION_TTL_MS = 2_592_000_000 (verbatim).
+  - SessionStore(db, now = () => Date.now()):
+    - create(): randomBytes(32) as base64url. Stores sha256(token) hex with
+      created_at and expires_at = created + TTL. Returns the raw token.
+    - valid(token): false for undefined. Otherwise true only when a row with
+      that token_hash has expires_at > now().
+    - revoke(token): deletes the row for sha256(token).
+    - purgeExpired(): deletes rows with expires_at <= now(), returns the count.
+  - readCookie(header, name): splits on ';', returns the trimmed value of the
+    first matching name, undefined for a missing name or an undefined header.
+  - requireAuth(sessions): createMiddleware from hono/factory. Reads the
+    hub_session cookie. Without a valid session it returns 401
+    { error: 'Not logged in' }. Otherwise it calls next().
+
+apps/server/src/auth/routes.ts
+  - AuthDeps { sessions, limiter, passphraseHash, now? } and authRoutes(deps): Hono.
+  - POST /login, checked in this order:
+    1. limiter.blocked(now()) → 429 { error: 'Too many attempts. Try again in 15 minutes.' }.
+       Returns here. Neither the body nor verifyPassphrase is read, and fail() is not called.
+    2. Body is not JSON, or passphrase is not a string → 400 { error: 'passphrase is required' }.
+    3. verifyPassphrase fails → limiter.fail(now) → 401 { error: 'Wrong passphrase' }.
+    4. Success → limiter.reset(), setCookie(hub_session, sessions.create(),
+       { httpOnly, secure, sameSite: 'Strict', path: '/', maxAge: 2_592_000 }) → 204.
+  - POST /logout: revokes the cookie's token if present, deleteCookie(path '/') → 204.
+  - GET /session: 200 { ok: true } with a valid cookie, else 401 { error: 'Not logged in' }.
+
+apps/server/src/auth/routes.test.ts
+  - The 9 tests from the brief, with its names and setup verbatim. The helper
+    login() is async so that it returns Promise<Response> (see section 7).
+
+2. TDD EVIDENCE
+---------------
+RED command:
+  cd /home/claude/wt-p3-6 && pnpm -F @hub/server exec vitest run src/auth/routes.test.ts
+RED output (abridged):
+  FAIL  src/auth/routes.test.ts [ src/auth/routes.test.ts ]
+  Error: Cannot find module './routes.js' imported from /home/claude/wt-p3-6/apps/server/src/auth/routes.test.ts
+  Test Files  1 failed (1)
+  Tests  no tests
+  ERR_PNPM_RECURSIVE_EXEC_FIRST_FAIL  Command failed with exit code 1
+
+GREEN command:
+  pnpm -F @hub/server exec vitest run src/auth/routes.test.ts --reporter=verbose
+GREEN output (abridged):
+  ✓ login sets an httpOnly strict secure cookie
+  ✓ cookie opens protected routes
+  ✓ wrong passphrase is 401
+  ✓ sixth attempt is rate limited
+  ✓ logout revokes the session
+  ✓ expired sessions are rejected
+  ✓ tokens are stored hashed
+  ✓ readCookie parses a header
+  ✓ session reports login state
+  Test Files  1 passed (1)
+  Tests  9 passed (9)
+
+Server typecheck (first run) failed on one error in my test: login() was typed
+Promise<Response> but app.request returns Response | Promise<Response>. Fixed by
+making login() async. Re-run result below.
+
+Server typecheck: pnpm -F @hub/server typecheck → exit 0 (no output errors).
+
+Root suite: pnpm test → exit 0
+  protocol 15 tests, design-model 359, server 8 files / 66 tests, renderer 52,
+  client 154 (21 files). All pass.
+Root typecheck: pnpm typecheck → exit 0.
+
+3. EXTRA CHECKS (not committed; scratch scripts under the scratchpad)
+---------------------------------------------------------------------
+a) Non-JSON body and non-string passphrase both return 400
+   { error: 'passphrase is required' }.
+b) Raw Set-Cookie from a successful login:
+   hub_session=<token>; Max-Age=2592000; Path=/; HttpOnly; Secure; SameSite=Strict
+c) Lock behaviour on a controlled clock (coordinator note): five wrong attempts at
+   t=0..4 return 401 each. Ten further attempts at t=5..14, alternating wrong and
+   correct passphrases, all return 429. blocked(900_003) is true and blocked(900_004)
+   is false, so the lock is not extended. A correct passphrase after expiry returns 204.
+
+4. FILES CHANGED (commit 636acf6, 3 files, all new, under apps/server/src/auth)
+------------------------------------------------------------------------------
+  apps/server/src/auth/sessions.ts      (71 lines)
+  apps/server/src/auth/routes.ts        (75 lines)
+  apps/server/src/auth/routes.test.ts   (125 lines)
+Not touched: pnpm-lock.yaml, any package.json, docs/, .superpowers/ (other than this
+report), db.ts, passphrase.ts, limiter.ts, or any other module.
+
+5. CONTROLLER NOTE (lock handling)
+----------------------------------
+The note says that while blocked, the login route returns the locked response
+immediately, without verifyPassphrase or fail(), and that only a wrong passphrase
+while unblocked calls fail(). The brief already pins this order (step 1 is the
+blocked check). routes.ts follows it. No change was needed. The test count stays
+at the brief's 9, so the lock check lives in the scratch script (3c), not in the
+committed tests. If you want it as a committed regression test, that is a 10th test.
+
+6. SELF-REVIEW NOTES
+--------------------
+- Brief values are verbatim: the cookie name, TTL, 30-day Max-Age, cookie
+  attributes, every error string, and the 429/400/401/204 status codes.
+- Only sha256(token) reaches the database. The raw token is returned once from
+  create() and sent only as the Set-Cookie value.
+- valid() and purgeExpired() both use the same boundary (expires_at > now is valid,
+  expires_at <= now is expired), so a row is never valid and purgeable at once.
+- The login route reads now() once and uses that value for blocked() and fail().
+- readCookie is used for header parsing everywhere, not hono/cookie's getCookie.
+  Token values are base64url, so they never need percent-decoding.
+- Test helper tokenFrom() reads the raw token back from Set-Cookie. This is only
+  in the test file.
+
+7. CONCERNS
+-----------
+a) Clock default. The brief declares now as optional, and the route tests never
+   inject one, so sessions.ts and routes.ts default to Date.now. This breaks the
+   literal "no Date in src" convention. The same call was made for task 22
+   (apps/client/src/net/ws.ts, default now = Date.now). The controller should
+   confirm that this is accepted for modules whose brief takes an optional clock.
+b) purgeExpired() is not called anywhere in this task. Expired rows stay in
+   auth_sessions until whatever starts the server (main.ts, or a later task) calls
+   it. Expired rows are never accepted, so this only affects table size.
+c) The cookie is marked Secure. Tests run through app.request, so they never check
+   that the browser sends it back, and the production path is HTTPS through
+   tailscale serve, as the constraints require.
+
+FIX ROUND 1 (controller review)
+===============================
+
+Status: DONE
+Commit: 64c42b7 fix(server): re-check the login lock after reading the body
+Trailers: Co-Authored-By: Claude Haiku 5.5 <noreply@anthropic.com>
+          Claude-Session: https://claude.ai/code/session_01EgHXhuc9bdgup2DFjf8JrU
+Files: apps/server/src/auth/routes.ts, apps/server/src/auth/routes.test.ts (2 files, 77 insertions, 4 deletions)
+
+1. FIX 1 (important): concurrent wrong logins bypassed the lock
+---------------------------------------------------------------
+Cause: the first limiter.blocked() check ran before `await readPassphrase(c)`. Requests
+that passed that check before any failure was recorded all went on to verifyPassphrase,
+so 8 concurrent wrong logins all got 401 (verified bypass).
+
+Change: POST /login now runs
+  1. blocked(now()) → 429 (before the body is read; unchanged brief step 1)
+  2. await readPassphrase(c)
+  3. at = now(); blocked(at) → 429 (new re-check after the body read)
+  4. 400 when the passphrase is missing, then verify → fail(at) → 401, or reset() → cookie → 204
+From step 3 through fail() or reset() there is no await. verifyPassphrase and
+sessions.create are synchronous, so no other request can interleave.
+The first check (step 1) stays because the brief pins it as step 1.
+
+2. TDD EVIDENCE for FIX 1
+-------------------------
+RED command: pnpm -F @hub/server exec vitest run src/auth/routes.test.ts --reporter=verbose
+RED output (abridged, before the routes.ts change):
+  × concurrent wrong logins cannot exceed the limit
+    → expected [ 401, 401, 401, 401, 401, 401, …(2) ] to have a length of 5 but got 8
+  Tests  1 failed | 15 passed (16)
+
+GREEN command: pnpm -F @hub/server exec vitest run src/auth/routes.test.ts --reporter=verbose
+GREEN output (abridged, after the change):
+  ✓ concurrent wrong logins cannot exceed the limit
+  ✓ locked attempts do not extend the lock
+  ✓ a body without a string passphrase is 400
+  ✓ readCookie accepts no space after the semicolon
+  ✓ readCookie accepts spaces around the equals sign
+  ✓ readCookie returns the first of duplicate cookies
+  ✓ readCookie does not match a longer name
+  ... (all others pass)
+  Tests  16 passed (16)
+The concurrency test was re-run 3 times with -t concurrent: 1 passed each time.
+
+3. TESTS ADDED OR CHANGED (controller items 2 to 5)
+---------------------------------------------------
+- Item 1, regression: 'concurrent wrong logins cannot exceed the limit'. A fresh
+  LoginLimiter and a fixed clock (1_000). 8 wrong logins through Promise.all → exactly
+  5 × 401 and 3 × 429. This is the RED test above.
+- Item 2: 'locked attempts do not extend the lock'. Injected clock, fresh limiter.
+  5 wrong at t=0..4 → 401 each. At t=600_000, six alternating wrong and correct attempts
+  → 429 each. At t=900_004 the correct passphrase → 204.
+- Item 3: 'a body without a string passphrase is 400'. Non-JSON body, and
+  { passphrase: 42 } → 400 { error: 'passphrase is required' }.
+- Item 4: the logout test also asserts that the Set-Cookie contains 'Max-Age=0' and
+  'Path=/'. It passes.
+- Item 5: readCookie tests for no space after ';', spaces around '=', duplicates
+  (first wins), and 'xhub_session' not matching 'hub_session'. Each is its own
+  test. The original 'readCookie parses a header' test is kept.
+- The login() helper is now a wrapper over loginVia(target, passphrase). appWith(limiter,
+  now) builds a separate app for the tests that need their own limiter or clock.
+- Test count is now 16 (the brief's 9 plus 7). The brief's "9 pass" is superseded
+  by the controller's fix list.
+
+4. VERIFICATION COMMANDS (final state, commit 64c42b7)
+------------------------------------------------------
+pnpm -F @hub/server test    → exit 0. Test Files 8 passed (8). Tests 73 passed (73).
+pnpm -r typecheck           → exit 0. No error TS lines.
+pnpm test (root)            → exit 0. protocol 15, design-model 359, server 73,
+                              renderer 52, client 154. All pass.
+
+5. CONCERNS (unchanged from the first report, plus one note)
+--------------------------------------------------------
+a) The Date.now default clock (sessions.ts, routes.ts) still conflicts with the literal
+   "no Date in src" convention. Same as task 22. Controller to confirm.
+b) purgeExpired() still has no caller in this task.
+c) New: the limiter state lives in memory, so a server restart clears an active lock.
+   This assumes one hub process, which the task 4 report also assumes. Not a regression;
+   flagged for the controller.

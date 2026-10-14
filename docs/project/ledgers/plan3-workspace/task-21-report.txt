@@ -1,0 +1,198 @@
+TASK 21 REPORT: startHub, production entry, fake hub (+ controller additions)
+Worktree /home/claude/wt-p3-21, branch p3-21, off feat/hub-server 2ae0c74. Not pushed.
+Commit: 13f7942 feat(server): startHub wiring, production entry, fake hub for e2e
+Status: DONE_WITH_CONCERNS (concerns at the end are small and informational)
+
+==============================================================================
+WHAT I BUILT
+==============================================================================
+New files (apps/server/src):
+  server.ts              startHub(opts): HubOptions / RunningHub as in the brief, plus two optional options
+                         (now, heartbeatMs, see decisions).
+  main.ts                production entry.
+  dev/fake-hub.ts        fake hub for the Playwright specs (pnpm -F @hub/server dev:fake).
+  server.test.ts         20 tests.
+  main.test.ts           7 tests (spawns main.ts under tsx).
+  dev/fake-hub.test.ts   1 test (spawns the fake hub, drives a whole Build task through the HTTP API).
+Changed (controller additions 5 and 6, Task 8 / Task 4 / Task 20 files, their tests kept green):
+  ws/attach.ts           per-socket cookie memory, recheck() (heartbeat sweep + on demand), Origin check (403).
+  auth/routes.ts         optional onLogout callback, called after the session is revoked.
+  app.ts                 AppDeps.onLogout, passed to authRoutes.
+  ws/ws.test.ts, auth/routes.test.ts, app.test.ts   new tests for the above.
+
+startHub steps, as built:
+  1 mkdir dataDir, openDb(dataDir/hub.sqlite).
+  2 SessionStore(db, now), LoginLimiter, AppRegistry(appsDir), SocketHub, BuildService (store BuildStore(db, now),
+    runner, hub, registry, openRepo, github, runCommand, now, onMerged).
+    openRepo defaults to d => openRepo(d, { token: config.githubToken }); runCommand defaults to Task 14's runCommand.
+  3 sessions.purgeExpired() once before listening (controller addition 2).
+  4 build.recover(); when > 0 logs `Marked ${n} interrupted build task(s) as failed`.
+  5 createApp({ ..., clientDir, now, onLogout: () => recheckSockets() }); serve({ fetch, port, hostname: bind }) and
+    awaits the listening callback (a listen error rejects; after listening, a server 'error' is logged, not thrown).
+    The real port comes from server.address().
+  6 attachWebSocket(server, hub, { isAuthed: h => sessions.valid(readCookie(h, SESSION_COOKIE)), heartbeatMs });
+    recheckSockets is assigned from its recheck() (createApp is needed before the server exists, so the logout
+    callback is a closure over a variable assigned right after attach).
+  7 Three unref'd intervals: build.pollCi() every ciPollMs (30 s), build.retryQueued() every retryPollMs (60 s),
+    sessions.purgeExpired() hourly. Each tick catches and logs `<label> failed: "<message>"`; a tick is skipped while
+    the previous one of the same timer is still running; errors are not logged once close() has begun.
+  8 Logs `Hub listening on http://${bind}:${port}`.
+  close(): idempotent (same promise). Clears timers; starts server.close() FIRST (stop accepting; idle keep-alives
+    drop) but awaits it LAST; awaits build.stopAll(); then closes the WebSocket side (clients terminated), calls
+    server.closeAllConnections(), awaits the server close, db.close(). The finally block makes sure sockets, server
+    and db are closed even if stopAll threw. A failure while starting (port taken, bad bind) closes the db and rejects.
+
+main.ts:
+  - installs process.on('uncaughtException') / ('unhandledRejection') first: logs ONE line
+    `Uncaught exception: "<message>"` / `Unhandled rejection: "<message>"` (message only, JSON.stringify'd,
+    cut at 500 chars, no stack, no error object) and process.exit(1). Same helper for `Failed to start: ...`
+    (startHub rejected, e.g. EADDRINUSE) and `Shutdown failed: ...`.
+  - loadConfig(process.env); ConfigError prints err.message (console.error) and exit(1).
+  - github = config.githubToken ? new OctokitGitHub(token) : null.
+  - clientDir = fileURLToPath(new URL('../../client/dist', import.meta.url)) when index.html exists; otherwise null
+    and logs `Client build not found; run pnpm -F @hub/client build`.
+  - startHub({ config, runner: new SdkClaudeRunner({ oauthToken: config.claudeOauthToken }), github, clientDir,
+    runCommand }) with Task 14's real runCommand passed explicitly (controller addition 3). ANTHROPIC_API_KEY is
+    never read or set; the token is never in argv (SdkClaudeRunner scrubs the env via buildQueryOptions, unchanged).
+  - SIGINT and SIGTERM: await hub.close(), exit(0); a second signal during shutdown is ignored; a close() that
+    rejects logs one line and exits 1.
+
+dev/fake-hub.ts: as the brief. Temp root hub-fake-*, makeTestRepo with workDir root/apps/demo and .hub/app.json (the
+  spec example named demo, build commands 'true'), config bind 127.0.0.1, HUB_FAKE_PORT (default 8787), HUB_DEV_PASSPHRASE
+  (default hub-dev-passphrase), FakeClaudeRunner script from the brief, FakeGitHub({ autoGreenAfter: 1 }),
+  openRepo with TEST_IDENTITY, ciPollMs 1000, clientDir null. Logs
+  `Fake hub on http://127.0.0.1:${port} (passphrase: ${passphrase})`. Addition: SIGINT/SIGTERM closes the hub and removes
+  BOTH scratch directories (the hub-fake-* root and makeTestRepo's hub-git-* dir, which holds the bare origin); a
+  failed start also removes them.
+
+==============================================================================
+DECISIONS AND DEVIATIONS (all small, all deliberate)
+==============================================================================
+1. HubOptions gained `now?` (required by controller addition 1) and `heartbeatMs?` (mine). heartbeatMs lets
+   server.test.ts exercise "session expiry closes the socket on the heartbeat" through the real startHub path with
+   an injected clock, without exposing a recheck method on RunningHub. Default 30_000 (attach.ts's HEARTBEAT_MS).
+2. close() order: the brief lists stopAll, then ws close, then server.close. I call server.close() first (and await it
+   last) so that no new request can start a run after stopAll has taken its snapshot of runs. WebSockets stay up
+   through stopAll, so clients still receive the runs' final messages. End state is the brief's.
+3. Origin check runs after the path check and before the session check (cheaper, no DB read); the response is
+   403 via the same refuse() path as 401. Compared: new URL(origin).host against Host.toLowerCase(), so scheme is
+   ignored (hub sees plain http behind tailscale serve). Origin present but unparsable ('null', '') is refused. No
+   Origin is allowed.
+4. recheck fails closed: an isAuthed that throws during a recheck terminates the socket (same stance as upgrade).
+   A transient DB error would therefore drop every socket once; clients reconnect.
+5. Sweep order on heartbeat: recheck() then hub.sweep().
+6. changeOrigin: NO change to apps/client/vite.config.ts. Fake hub default port 8787 equals the proxy target in
+   vite.config.ts (/api and /ws -> http://127.0.0.1:8787). The proxy must keep the default changeOrigin:false.
+   Verified empirically (see below): with false the browser's Host (localhost:4173) and Origin
+   (http://localhost:4173) still agree at the hub, so csrf's Origin check and the new WebSocket Origin check both
+   pass; with changeOrigin:true the Host becomes 127.0.0.1:8787 while Origin stays the page's, so the WebSocket
+   upgrade is refused with 403 and a bodyless POST with only Origin gets 403. Task 28 must NOT add changeOrigin.
+7. Extra tests beyond the brief's three in server.test.ts (and two extra spawn-based test files) because the
+   controller additions (clock injection, startup purge, logout/expiry socket closing, Origin check, crash
+   handlers, SIGTERM exit 0) are requirements and are otherwise unobserved. The brief's three are present with
+   their exact names.
+
+==============================================================================
+TDD EVIDENCE
+==============================================================================
+RED 1 (attach / auth / app additions written first):
+  cmd: pnpm -F @hub/server exec vitest run src/ws/ws.test.ts src/auth/routes.test.ts src/app.test.ts
+  result: Test Files 3 failed (3); Tests 9 failed | 67 passed (76). Failures:
+    app.test.ts      logout calls onLogout
+    routes.test.ts   logout calls onLogout once the session is revoked, and a missing cookie still calls it
+    ws.test.ts       origin check > refuses a cross-site Origin with 403 even when the session is valid
+    ws.test.ts       origin check > refuses the same host on another port, and an Origin that is not a URL
+    ws.test.ts       session recheck x5  (e.g. "TypeError: attached.recheck is not a function")
+GREEN 1 (after attach.ts / routes.ts / app.ts):
+  same command: Test Files 3 passed (3); Tests 76 passed (76).
+
+RED 2 (server.test.ts):
+  cmd: pnpm -F @hub/server exec vitest run src/server.test.ts
+  result: FAIL src/server.test.ts: Error: Cannot find module './server.js' imported from .../server.test.ts
+          Test Files 1 failed (1); Tests no tests
+GREEN 2 (after server.ts): Test Files 1 passed (1); Tests 20 passed (20).
+
+RED 3 (main.test.ts):
+  cmd: pnpm -F @hub/server exec vitest run src/main.test.ts
+  result: Tests 7 failed; ERR_MODULE_NOT_FOUND: Cannot find module '.../src/main.ts'
+GREEN 3 (after main.ts): Tests 7 passed (7).
+
+RED 4 (dev/fake-hub.test.ts):
+  cmd: pnpm -F @hub/server exec vitest run src/dev/fake-hub.test.ts
+  result: 1 failed, "Test timed out in 10000ms" (the fake hub file did not exist, so no banner ever appeared). I then
+          made the test fail fast when the child exits early.
+GREEN 4 (after fake-hub.ts): 1 passed (1), repeated 3 times, all passed.
+
+Mutation checks (each applied to the implementation, tests run, implementation restored, diff clean):
+  no onLogout wiring           -> "closes a socket within a second of its session logging out" fails
+  no startup purgeExpired      -> "purges expired sessions before listening" fails
+  SessionStore without now     -> purge test and "closes a socket once its session expires" fail
+  BuildStore without now       -> "stamps tasks with the injected clock" fails
+  no recover log               -> "marks tasks a restart interrupted as failed and says so" fails
+  no CI poll timer             -> "polls CI on its own timer until a green PR is announced" fails
+  authRoutes without now       -> "locks logins out by the injected clock" fails
+  Origin check disabled        -> "connects with a matching Origin ... refuses a cross-site Origin" fails
+  fake hub not removing scratch-> "cleans up after itself" fails (hub-fake-* and hub-git-* left in TMPDIR)
+
+==============================================================================
+VERIFICATION
+==============================================================================
+pnpm test (root, all packages):
+  packages/protocol      15 passed
+  packages/design-model  811 passed
+  packages/renderer      94 passed
+  apps/server            Test Files 27 passed; Tests 848 passed | 1 skipped (849)   (baseline before: 809 passed | 1 skipped, 24 files; +39 tests)
+  apps/client            235 passed
+  exit 0.
+pnpm typecheck (root): exit 0 (all 5 packages, including apps/server).
+pnpm -F @hub/server test run two more times: 27 files, 848 passed | 1 skipped each time (no flakes).
+
+Brief step 4 manual check:
+  pnpm -F @hub/server dev:fake printed
+    Hub listening on http://127.0.0.1:8787
+    Fake hub on http://127.0.0.1:8787 (passphrase: hub-dev-passphrase)
+  curl -s http://127.0.0.1:8787/api/health -> {"ok":true}
+  SIGINT to the node process: exited, port freed, /tmp/hub-fake-* and the hub-git-* dir for that run were removed.
+  (The "fatal: expected 'acknowledgments', received 'packfile'" lines printed while the fake hub seeds its repo are
+  this sandbox's git noise from makeTestRepo's push to the local bare repo; they appear in the baseline test run too.)
+
+Proxy / Origin / csrf check (controller addition 8). lsof -i :4173 was empty before I started. I ran the fake hub
+(8787) and `vite --port 4173` (dev server; same proxy table as vite preview) in apps/client, then:
+  POST /api/login through localhost:4173 with Origin http://localhost:4173            -> 204, Secure cookie set
+  bodyless POST /api/apps/demo/build/stop via proxy, Origin = page origin, no Sec-Fetch-Site -> 200
+  same with Origin https://evil.example                                                      -> 403
+  WebSocket ws://localhost:4173/ws via proxy, cookie + Origin http://localhost:4173         -> OPEN, ping answered with pong
+  same with Origin https://evil.example                                                      -> refused 403
+  WebSocket direct to :8787 with cookie and no Origin                                        -> OPEN
+  Control experiment (vite on a scratch port with changeOrigin:true on both proxy entries): bodyless POST with only
+  Origin -> 403; WebSocket with page Origin -> refused 403. Hence the default must stay.
+  Both servers were stopped afterwards; lsof -i :4173 -i :8787 is empty. I did not run Playwright (no browser
+  binaries are installed in this sandbox, see concerns).
+
+==============================================================================
+SELF-REVIEW NOTES
+==============================================================================
+- No Date/Math.random in server.ts beyond `opts.now ?? Date.now`; the same `now` goes to SessionStore, createApp
+  (-> authRoutes -> limiter) and BuildService/BuildStore. Nothing else in startHub reads the clock.
+- No secret reaches a log line: startHub logs only the address and counts; timers log messages only; main logs
+  messages only. No token in argv or in any env the hub sets; the Claude runner env is still scrubbed in sdk.ts.
+- attachWebSocket's existing guards are untouched (path check, throwing isAuthed refused, 64 KiB payload cap,
+  error listener on refused sockets); upgrade handling is not re-implemented in server.ts.
+- attach.ts: recheck iterates a copy of the cookie map, tolerates throwing terminate(), and forgets a socket on 'close'.
+- The three timers are unref'd, so only the listening server keeps the process alive.
+
+==============================================================================
+CONCERNS (informational)
+==============================================================================
+1. Not verified in a real browser: no Chromium/Playwright browsers exist in this sandbox. The login cookie is
+   `Secure`; Chromium and Firefox accept Secure cookies set over http://localhost, but Task 28 should confirm that
+   with the first Playwright run (and that its helpers do not use a request context that drops Secure cookies).
+2. Task 28: keep the proxy at default changeOrigin (see decision 6); webServer for the fake hub can be
+   `pnpm -F @hub/server dev:fake` (HUB_FAKE_PORT unset = 8787 = proxy target). Playwright's SIGKILL of the
+   webServer would skip the fake hub's scratch cleanup (SIGTERM/SIGINT clean up).
+3. close() does not wait for an in-flight CI-poll or retry tick (they have no abort signal and may be waiting on
+   GitHub). A tick that touches the db after db.close() throws inside its own catch, which stays silent once
+   close() has begun. A queued-retry tick racing close() could in theory start one run after stopAll's snapshot; the
+   window is the length of git preparation and the process is exiting anyway.
+4. Other sessions' vite processes are running on this machine (ports 4174 preview, 5199 dev). I did not touch them.
+5. A heartbeat or logout recheck that finds isAuthed throwing (db error) drops every socket (fail closed).

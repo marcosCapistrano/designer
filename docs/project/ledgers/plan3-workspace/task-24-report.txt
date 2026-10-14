@@ -1,0 +1,44 @@
+Task 24 report: move canvas harness to /harness.html, proxy /api and /ws, app-shell service worker
+Branch p3-24, BASE a999e0e, worktree /home/claude/wt-p3-24
+
+STATUS: DONE_WITH_CONCERNS (all brief verification passed; proxy paths not exercised against a live hub)
+
+COMMIT
+- f272d71 chore(client): move canvas harness to /harness.html, proxy /api and /ws, cache the app shell
+  Trailers: Co-Authored-By: Claude Haiku 5.5 <noreply@anthropic.com>; Claude-Session: https://claude.ai/code/session_01EgHXhuc9bdgup2DFjf8JrU
+  Files: apps/client/harness.html (new), apps/client/src/harness.tsx (new), apps/client/vite.config.ts,
+         apps/client/public/sw.js, apps/client/e2e/canvas.spec.ts, apps/client/e2e/perf.spec.ts
+
+WHAT CHANGED
+- harness.html: copy of index.html, title "Hub canvas harness", script /src/harness.tsx.
+- src/harness.tsx: main.tsx content without the service worker registration. main.tsx unchanged.
+- vite.config.ts: build.rollupOptions.input = { main: index.html, harness: harness.html }; hubProxy
+  ('/api' -> http://127.0.0.1:8787; '/ws' -> same, ws: true) used as server.proxy and preview.proxy; plugins kept.
+- public/sw.js: the brief's exact app-shell worker (hub-shell-v1; caches '/' and /assets/*; never /api, /ws, tiles).
+- e2e/canvas.spec.ts, e2e/perf.spec.ts: all 6 page.goto('/?debug=1') -> page.goto('/harness.html?debug=1').
+- Not touched: src/main.tsx, src/canvas/CanvasView.tsx.
+
+VERIFICATION (worktree apps/client unless noted)
+- pnpm -F @hub/client typecheck: exit 0.
+- pnpm -F @hub/client test: 21 files, 154 tests passed.
+- pnpm -F @hub/client build: exit 0; emits dist/harness.html and dist/index.html (plus sw.js copied to dist).
+- pnpm -F @hub/client size: "JS gzip total: 15888 bytes (limit 150000)", exit 0.
+- pnpm -F @hub/client test:e2e e2e/canvas.spec.ts e2e/perf.spec.ts: exit 0, "6 passed (14.6s)":
+    fixtures {"pages":50,"rendered":150,"reused":0,"failed":0}
+    ok canvas 1 shows 50 pages x 3 devices and draws tiles
+    ok canvas 2 tap selects the node under the pointer
+    ok canvas 3 drag in select tool selects a box
+    ok canvas 4 device toggle hides frames
+    ok canvas 5 reload serves visible tiles from IndexedDB
+    ok perf  6 pans 50 pages x 3 devices at >= 50 fps median with 4x CPU throttle
+    perf medians: scale 0.3 = 60 fps, scale 0.08 = 60 fps
+    Log: /tmp/claude-0/-home-claude/d289a493-967d-56ba-9311-db4aba7933de/scratchpad/e2e-1.log
+- Repo root: pnpm test exit 0 (all packages; client 154/154; renderer 52/52); pnpm typecheck exit 0.
+
+TDD
+- The brief has no unit-test steps and this is config/e2e only, so no RED run was captured.
+
+CONCERNS
+1. The proxy to 127.0.0.1:8787 (HTTP and WebSocket) is configured with the brief's exact values but was not exercised against a live hub. The harness makes no /api or /ws calls.
+2. Vite preview's SPA fallback could serve index.html for /harness.html if the harness input were missing, so a green e2e alone would not prove the harness entry. dist/harness.html is emitted by the build, which covers this.
+3. Commit trailer is the harness-provided Claude Haiku 5.5 line, per the controller ruling, not the Opus 5.5 line in the brief.

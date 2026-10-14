@@ -1,0 +1,287 @@
+TASK 27 REPORT: shell root, passphrase login, entry point
+
+Worktree: /home/claude/wt-p3-27 (branch p3-27, BASE 09d2368)
+Commit:   88899b9 feat(client): shell with passphrase login, routing and reconnect on wake
+Status:   DONE_WITH_CONCERNS
+Not pushed.
+
+================================================================
+1. WHAT WAS IMPLEMENTED
+================================================================
+
+apps/client/src/shell/App.tsx (new)
+- export function App(): JSX.Element.
+- auth state 'checking' | 'in' | 'out' | 'offline'.
+- api = useMemo(() => new ApiClient({ onUnauthorized: () => setAuth('out') }), []) and
+  ws = useMemo(() => new WsClient({ url: wsUrl(location) }), []). Both are created once and
+  passed down unchanged (the Task 25 carry-over: BuildArea effects keyed on [app, api, ws]).
+- Mount: api.session() sets 'in' or 'out'; a rejection sets 'offline'.
+- Retry (offline screen) re-runs the same session check.
+- auth === 'in': ws.connect(). Leaving 'in' or unmounting: ws.close() (effect cleanup).
+- route = parseHash(location.hash), updated on hashchange.
+- visibilitychange to 'visible': ws.kick().
+- Logout button: api.logout(), then setAuth('out') (see concern 1).
+- Render: checking -> <p data-testid="loading">Loading…</p>;
+  offline -> <div data-testid="offline"> with the exact copy and a Retry button;
+  out -> <Login api onDone={() => setAuth('in')} />;
+  in -> header with title "Hub" and <button data-testid="logout">Log out</button>,
+        then <AppView> (route.name === 'app') or <AppList> (apps).
+  AppView gets area and app from the route; BuildArea is still keyed by app inside AppView.
+
+apps/client/src/shell/Login.tsx (new)
+- export function Login({ api, onDone }).
+- <form data-testid="login">, <input data-testid="passphrase" type="password"
+  autocomplete="current-password" autofocus>, <button data-testid="login-submit">Unlock</button>.
+- Errors in <p role="alert" data-testid="login-error">.
+- export function loginErrorText(e): 401 -> 'Wrong passphrase.'; 429 -> the server message;
+  anything else -> 'Could not reach the Hub.'
+- Busy state disables the button while the request is in flight. Success calls onDone and
+  leaves busy set, since the form unmounts.
+
+apps/client/src/shell/shell.css (new)
+- Full-height flex column (.shell, height 100%). .shell-main is flex 1 1 0 with min-height 0
+  and overflow auto, so AppView's body (flex 1, min-height 0) gets a definite height.
+- .shell-center (loading, offline, login) is overflow auto and centers with margin auto.
+- Touch targets are min 44 px (buttons, the login input, header links). The login input is
+  17 px, so iOS does not zoom. System font stack. Palette matches AppList and AppView.
+
+apps/client/src/main.tsx (modified)
+- Now: import './shell/shell.css'; render(<App />, #app); the PROD service worker
+  registration is unchanged. The old static canvas demo was removed from main.tsx; it lives
+  on in harness.html / src/harness.tsx (Task 24).
+
+apps/client/src/shell/Login.test.ts (new; not in the brief, see section 2)
+- Unit tests for loginErrorText: 401, 429 (server text), and 500 / 400 / network error.
+
+Not changed: sw.js, AppList.tsx, AppView.tsx, route.ts, net/*, areas/*, package.json, lockfile.
+
+================================================================
+2. ADAPTATIONS AND DEVIATIONS FROM THE BRIEF TEXT
+================================================================
+
+- Added Login.test.ts. The brief has no unit-test step for this task, and the client's
+  unit tests run in node with no DOM. The only testable logic is the error mapping, so it
+  is extracted as loginErrorText and tested. The TDD step below uses this file.
+- The shell title is a <span class="shell-title">Hub</span>, not a heading. AppList and
+  AppView already render h1 headings, and a second h1 in the shell would duplicate them.
+- The offline container also has role="alert" and a class. Its text and button are as briefed.
+- The loading state is wrapped in a .shell-center div. The <p data-testid="loading"> is as briefed.
+
+================================================================
+3. TDD EVIDENCE
+================================================================
+
+RED: pnpm -F @hub/client test -- src/shell/Login.test.ts  (before Login.tsx existed)
+  FAIL  src/shell/Login.test.ts [ src/shell/Login.test.ts ]
+  Error: Cannot find module './Login.js' imported from .../src/shell/Login.test.ts
+  Test Files  1 failed | 21 passed (22)
+  Tests  154 passed (154)
+  ERR_PNPM_RECURSIVE_RUN_FIRST_FAIL  @hub/client@0.0.0 test
+
+GREEN: same command after Login.tsx was written.
+  Test Files  22 passed (22)
+  Tests  157 passed (157)            [154 existing + 3 new]
+  (The `-- <file>` filter did not narrow the run; vitest ran the whole client suite. The
+  count shows the 3 new tests pass.)
+
+App.tsx, shell.css and main.tsx have no unit-test step in the brief (DOM behavior is for
+Playwright; Task 28 covers it). They were verified in a browser, see section 4.
+
+================================================================
+4. VERIFICATION
+================================================================
+
+Brief step 2 (the four commands):
+- pnpm -F @hub/client typecheck  -> exit 0.
+- pnpm -F @hub/client test       -> Test Files 22 passed (22); Tests 157 passed (157).
+- pnpm -F @hub/client build      -> exit 0. main-*.js 17.75 kB (gzip 6.46 kB);
+  shared source-*.js gzip 14.53 kB; main-*.css gzip 1.42 kB.
+- pnpm -F @hub/client size       -> "JS gzip total: 21881 bytes (limit 150000)", exit 0.
+
+Repo root (run once before commit, then after the CSS change the client checks above were rerun):
+- pnpm test -> exit 0. protocol 15; design-model 644; server 225 passed, 1 skipped;
+  renderer 52; client 157 (all pass).
+- pnpm typecheck -> exit 0.
+
+Browser verification (throwaway, deleted before commit, nothing committed):
+- Built dist, served with vite preview on port 4399 (not 4173). /api and /ws were mocked
+  with page.route and page.routeWebSocket. Playwright 1.56.1, Chromium.
+- Run 1 (6 tests, passed): wrong / locked (429) / unreachable (500) login messages;
+  autofocus on the passphrase field; right passphrase opens the app list; the WebSocket
+  opens once (wsOpen 1) and is not reopened by hash changes; app click -> #/apps/demo/build,
+  tab-build aria-selected true; back link -> #/; #/apps/demo/deploy placeholder; visibilitychange
+  makes the socket send an immediate ping; logout -> login form and the socket closes; a
+  network failure on /api/session -> offline message, and Retry recovers; a 401 from a
+  later API call drops back to the login; 390 px width with no page scroll and 44 px touch
+  targets; the service worker registers (/sw.js) in the production build.
+  Result: "6 passed (4.5s)" with the height-chain check (composer inside viewport; .build-area
+  bottom = .shell-main bottom; message list height 505 px inside 747 px main region).
+- Run 2 after the CSS change (overflow auto on .shell-main and .shell-center, margin-auto
+  centering): 4 passed. Login card centered within 2 px in a 1280x800 viewport; 390x700 no
+  page scroll; offline/Retry; service worker.
+
+Regression, canvas (the harness page is unaffected, but CanvasView is shared):
+- Generated dev renders with pnpm -F @hub/client dev:renders ({"pages":50,"rendered":150,"failed":0}).
+- Port check: 4173 connect refused and lsof empty. Then:
+  CI=1 pnpm -F @hub/client exec playwright test e2e/canvas.spec.ts -> "5 passed (7.8s)".
+- Note: an earlier 4173 probe reported busy for a moment (another lane's server), then free.
+  The canvas run was started after a fresh check.
+
+Throwaway files (e2e/tmp-shell.spec.ts, tmp-shell.config.ts) were deleted; git status is clean.
+Generated artifacts (dist/, .dev-renders/, test-results/) are gitignored.
+
+================================================================
+5. FILES CHANGED (commit 88899b9)
+================================================================
+  apps/client/src/main.tsx              (modified)
+  apps/client/src/shell/App.tsx         (new)
+  apps/client/src/shell/Login.tsx       (new)
+  apps/client/src/shell/Login.test.ts   (new)
+  apps/client/src/shell/shell.css       (new)
+
+================================================================
+6. SELF-REVIEW NOTES
+================================================================
+- Checked every brief requirement, including exact copy ("Loading…" with the ellipsis,
+  "Can't reach the Hub. Check that Tailscale is connected.", "Wrong passphrase.",
+  "Could not reach the Hub.", "Unlock", "Log out", "Retry").
+- No setState on an unmounted component: Login does not call setBusy after onDone; App is
+  never unmounted (it is the root).
+- ws lifecycle: connect on 'in', close on leaving 'in' or unmount, kick on wake. kick and
+  close are no-ops outside their states (WsClient rules from Task 22). Logging in again after
+  logout reconnects (verified in browser: wsOpen counts the sockets).
+- api and ws identities are stable (useMemo with [] deps); no effect re-runs because of renders.
+- The Build area's messages list keeps its own scroll; the composer stays inside the viewport.
+
+================================================================
+7. CONCERNS
+================================================================
+1. Logout: if POST /api/logout fails (network), the screen still goes to the login form. The
+   server-side session then lasts until it expires. The brief does not say what to do on
+   failure. This is a judgment call. Say if you want a visible error instead.
+2. The URL hash is kept on logout, so the next login returns to the same app view. The brief
+   does not say to reset it. Not changed.
+3. Committed coverage of the shell is none, apart from loginErrorText. The DOM behavior was
+   verified only with the throwaway spec above. Task 28's e2e (build.spec.ts, pwa.spec.ts)
+   is the committed coverage. It depends on these test ids and on the offline text.
+4. sw.js is unchanged. The Task 24 minors are still open (a 5xx on '/' is cached over the
+   shell; the cache name is never pruned). The offline pwa test in Task 28 will exercise that
+   path.
+5. The e2e run at 4173 was guarded by a connect check. Another lane's listener was seen on
+   4173 moments earlier; my run was after a clear check, and it passed.
+
+================================================================
+FIX ROUND 1 (controller review: two Important issues and minors)
+================================================================
+
+Worktree: /home/claude/wt-p3-27 (branch p3-27)
+Commit:   6c7ed6d fix(client): shell logout waits for the server, expired sockets end the session
+Base:     88899b9 (the original Task 27 commit)
+
+----------------------------------------------------------------
+A. WHAT CHANGED
+----------------------------------------------------------------
+
+1. Important: logout waits for the server (Ruling 12).
+- App.tsx logout(): clears logoutError, then awaits api.logout(). setAuth('out') runs only
+  after the request succeeds. On failure, logoutLocks(e) decides: a 401 locks the shell (the
+  ApiClient's onUnauthorized has already done so); any other failure keeps the user 'in' and
+  sets logoutError to LOGOUT_ERROR_TEXT = 'Could not log out. Try again.'
+- Shown inline in the header: <span role="alert" data-testid="logout-error"> next to the
+  Log out button (wrapped in .shell-header-actions). Cleared at the start of each attempt.
+- The decision is the pure function logoutLocks(e) in the new shell/logout.ts, unit-tested in
+  shell/logout.test.ts.
+
+2. Important: an expired session ends the UI even when the socket cannot tell (WsClient
+   retries forever otherwise).
+- App.tsx, the auth === 'in' effect now subscribes ws.onStatus(s => ...). On 'closed'
+  (WsStatus is 'connecting' | 'open' | 'closed', checked in net/ws.ts), it calls
+  api.session(): ok === false -> setAuth('out'); a rejection is ignored (the network is down
+  and the socket's backoff continues).
+- The cleanup unsubscribes (offStatus()) before ws.close(), so closing never triggers a check.
+- The listener is subscribed before ws.connect(), so an immediate refused upgrade is caught.
+
+3. Minors:
+- Login.tsx: the passphrase input is focused on every mount (useRef + useEffect). autofocus is
+  kept.
+- Login.tsx: submit is ignored when the passphrase is empty (passphrase === '' return). The
+  input has required and name="password".
+- App.tsx: window 'online' calls ws.kick(); the visibility effect now removes both listeners
+  on cleanup.
+- AppList.tsx: subscribes ws.onStatus and calls load() on 'open'; the subscription is removed
+  on unmount, alongside the build.task listener.
+- shell.css: .shell-header-actions and .shell-header-error (the error wraps at phone width).
+
+Files changed: App.tsx, AppList.tsx, Login.tsx, shell.css (modified); logout.ts, logout.test.ts (new).
+
+----------------------------------------------------------------
+B. TDD EVIDENCE
+----------------------------------------------------------------
+
+RED: pnpm -F @hub/client test  (logout.test.ts written before logout.ts existed)
+  FAIL  src/shell/logout.test.ts [ src/shell/logout.test.ts ]
+  Error: Cannot find module './logout.js' imported from .../src/shell/logout.test.ts
+  Test Files  1 failed | 22 passed (23)
+  Tests  157 passed (157)
+
+GREEN: same command after logout.ts was written.
+  Test Files  23 passed (23)
+  Tests  160 passed (160)            [157 + 3 new logoutLocks tests]
+
+The WebSocket expiry, online, focus and AppList reload changes have no unit tests (they are
+DOM and socket behavior). They are covered by the browser checks in section C.
+
+----------------------------------------------------------------
+C. VERIFICATION
+----------------------------------------------------------------
+
+Brief commands (run after the fix):
+- pnpm -F @hub/client typecheck -> exit 0.
+- pnpm -F @hub/client test -> Test Files 23 passed (23); Tests 160 passed (160).
+- pnpm -F @hub/client build -> exit 0.
+- pnpm -F @hub/client size -> "JS gzip total: 22046 bytes (limit 150000)", exit 0.
+- pnpm test (repo root) -> exit 0: protocol 15; design-model 644; server 225 passed, 1 skipped;
+  renderer 52; client 160 (all pass).
+- pnpm typecheck (repo root) -> exit 0.
+
+Browser checks (throwaway spec and config, deleted before commit; mocked /api and /ws with
+page.route and page.routeWebSocket; vite preview on port 4399, not 4173). Playwright 1.56.1:
+  Command: CI=1 pnpm -F @hub/client exec playwright test -c tmp-shell.config.ts
+  Output:  Running 9 tests using 1 worker / 9 passed (13.1s)
+Tests:
+  1. login: autofocus, name/required/autocomplete attributes; an empty submit sends no
+     request; 'Wrong passphrase.', lockout text (429), 'Could not reach the Hub.' (500); the
+     right passphrase opens the list.
+  2. routing: Build tab, the .build-area bottom equals the .shell-main bottom, back link,
+     #/apps/demo/deploy placeholder.
+  3. logout: a 500 keeps the user in and shows 'Could not log out. Try again.'; the second
+     click clears the error at once and brings it back when the (delayed) response fails; the
+     third, confirmed logout locks, focuses the passphrase field and closes the socket.
+  4. phone width (390 px): logout-error fits, no page scroll, 44 px logout button.
+  5. expired session: the server closes the socket and the session is gone -> login shown and
+     focused.
+  6. network down: the socket closes while /api/session is unreachable -> the user stays on the
+     list (no login, no offline screen); the socket reconnects.
+  7. reconnect: the list reloads when the socket reopens (/api/apps called again).
+  8. 'online' sends an immediate ping on the open socket.
+  9. service worker registers (/sw.js) in the production build.
+Canvas regression (the shared CanvasView): CI=1 pnpm -F @hub/client exec playwright test
+  e2e/canvas.spec.ts -> "5 passed (5.5s)" on 4173, after a clear port check.
+
+Process note: some scratch output was written outside the scratchpad, to /tmp/unused, /tmp/unused-tc
+and /home/claude/claude-task27-fix-pw.log. Those were deleted. The throwaway files were
+removed from the worktree, and git status is clean.
+
+----------------------------------------------------------------
+D. CONCERNS (fix round)
+----------------------------------------------------------------
+1. Each socket close makes one GET /api/session. With the exponential backoff (1 s up to
+   30 s) the rate is bounded, but a server that stays down produces one check per backoff step.
+   Each check ignores its rejection.
+2. The first 'open' of the list (AppList) repeats the initial /api/apps load, so an app-list
+   visit makes two apps requests. This is harmless and follows the instruction.
+3. The expired-session and online paths are covered only by the throwaway browser spec.
+   Task 28's committed e2e is the only committed coverage of the shell (login, routing,
+   offline). A dedicated expiry e2e could be added there.
+4. Logout keeps the URL hash (as before). A 401 during logout is treated as a locked session
+   (no error shown), which matches the ruling.

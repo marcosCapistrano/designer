@@ -1,0 +1,143 @@
+TASK 25 REPORT: Build area UI
+=============================
+
+Status: DONE_WITH_CONCERNS
+Branch: p3-25 (worktree /home/claude/wt-p3-25), not pushed.
+Commit: f201e9e feat(client): Build chat with streaming, PR and CI status, Merge
+
+1. WHAT WAS IMPLEMENTED
+-----------------------
+
+apps/client/src/areas/build/BuildArea.tsx
+- export BuildArea({ app, api, ws }): JSX.Element
+- Mount: api.buildState(app) -> applyState. ws.on(m => applyServerMsg(v, app, m)).
+- Catch-up: ws.onStatus(s => s === 'open' -> refetch with after=lastMessageId(viewRef.current)).
+  With no messages held yet, the refetch passes no cursor (after=0 would return the OLDEST page,
+  because the server returns "id > after, first 500"; no cursor returns the NEWEST 500).
+  After a cursor, the fetch keeps paging while a page comes back full (500 rows), so a long
+  disconnect does not leave a gap. Verified in the browser: 1200 missed messages arrived as
+  after=8, after=508, after=1008 and the view kept the newest 1000 (MAX_VIEW_MESSAGES).
+- viewRef is kept in step with the state by an update() helper, so back-to-back updates never
+  read a stale view.
+- Unsubscribes both listeners on unmount. A generation counter drops responses that arrive after
+  unmount or after an app change.
+- Layout: full-height flex column: TaskCard (when view.task is set), message list, composer.
+- Message list: data-testid="build-messages", role="log", scrollable. One element per message,
+  data-testid="msg-<kind>". user right-aligned; assistant left with white-space: pre-wrap;
+  tool small, gray, monospace; status small, italic; error red.
+- Auto-scroll: a scroll listener records whether the list was within 80 px of the bottom; new
+  messages scroll to the bottom only when it was.
+- Composer: textarea data-testid="build-input" with placeholder "Ask Claude to change this app…"
+  (U+2026); button data-testid="build-send" text "Send". Disabled when the trimmed text is empty,
+  view.running, or a send is pending. Ctrl/Cmd+Enter sends. On success the input is cleared (only
+  if it still holds the sent text, so typing during the request is kept). Errors show in
+  data-testid="build-error".
+- data-testid="build-stop" "Stop": only while view.running; calls api.stopBuild(app).
+
+apps/client/src/areas/build/TaskCard.tsx
+- export TaskCard({ task, running, onMerge, onClose }): JSX.Element
+- export errorText(e): ApiError -> its message; anything else -> "Could not reach the hub. Try again."
+- data-testid="task-card": title; branch in <code> (monospace); task-status = summarizeTask(...).label
+  with class tone-<tone>; pr-link (<a target=_blank rel=noreferrer>, "PR #<n>") when prUrl is set;
+  ci-state = raw task.ci; task-error when task.error is set.
+- merge: disabled while !canMerge or merging; text "Merging…" (U+2026) while pending; mergeHint
+  below it; errors in merge-error.
+- close-task: only when isOpenTask(status) && !running; disabled while closing.
+- onMerge/onClose throw on failure. TaskCard catches and shows the error, so BuildArea does not
+  have to know about TaskCard's error state.
+
+apps/client/src/areas/build/build.css
+- Plain CSS, no Tailwind. Tone colors, bubble styles, 44px minimum touch targets, 16px input font
+  (stops iOS zoom on focus), safe-area bottom padding, focus-visible outlines.
+
+2. TDD EVIDENCE
+---------------
+The brief has no unit-test step (Step 1 Implement, Step 2 Verify, Step 3 Commit), so there was no
+RED/GREEN unit test. Verification was:
+
+a) Client typecheck, build, size (required by the brief):
+
+   $ pnpm -F @hub/client typecheck      -> exit 0 (tsc tsconfig.json and tsconfig.node.json)
+   $ pnpm -F @hub/client build          -> exit 0 (vite: 26 modules, index JS 14.69 kB gzip)
+   $ pnpm -F @hub/client size           -> JS gzip total: 14801 bytes (limit 150000), exit 0
+
+   Note: main.tsx does not import the Build area yet, so Vite does not bundle these files. The
+   size figure therefore does not include the Build UI. For scale, a scratch bundle that includes
+   BuildArea, TaskCard, state, api, ws and preact (plus a fake hub) gzips to 13095 bytes of JS and
+   1202 bytes of CSS.
+
+b) Repo-wide, from the root (required by the implementer instructions):
+
+   $ pnpm test       -> exit 0
+       apps/server:    Test Files 7 passed, Tests 57 passed
+       packages/renderer: Test Files 7 passed, Tests 52 passed
+       apps/client:    Test Files 21 passed, Tests 154 passed
+   $ pnpm typecheck  -> exit 0 (design-model, protocol, server, renderer, client)
+
+c) Browser check of the real components (scratch harness, NOT committed):
+
+   Harness: /tmp/claude-0/-home-claude/d289a493-967d-56ba-9311-db4aba7933de/scratchpad/build-harness/
+   (entry.tsx mounts the real BuildArea with the real ApiClient and WsClient over an in-memory
+   fake hub and a fake socket; drive.mjs runs headless Chromium 1194 via playwright-core).
+   Final run output saved in run-final.txt in that folder:
+
+   59/59 checks passed (exit 0). They cover: initial load and catch-up with no cursor; the task
+   card (Waiting for CI, PR link, merge hint, close visible); send with Ctrl+Enter (trimmed text,
+   input cleared, Stop shown, Send disabled while running); live messages, pre-wrap, duplicate
+   delivery ignored; Stop POST; socket drop then reopen with after=<lastId> and no duplicate
+   bubbles; repeat reopen adds nothing; 1200-message catch-up paging and 1000 cap; auto-scroll
+   pinned at bottom and not forced when scrolled up; send error text shown and draft kept; close
+   task; merge disabled when CI is pending; merge enabled when CI is green; merge error shown;
+   "Merging…" while pending; Merged status; task error line; no horizontal scroll at 1024 and
+   390 px; send and merge at least 44 px tall; no page errors.
+
+   Screenshot of the 1024 px layout was checked visually.
+
+   Last line of run-final.txt: "59/59 checks passed"
+
+3. FILES CHANGED (commit f201e9e, 3 files, all new)
+---------------------------------------------------
+  apps/client/src/areas/build/BuildArea.tsx   (215 lines)
+  apps/client/src/areas/build/TaskCard.tsx    (114 lines)
+  apps/client/src/areas/build/build.css       (288 lines)
+No dependency, lockfile, docs or .superpowers changes. Nothing else touched in the worktree.
+
+4. SELF-REVIEW NOTES
+--------------------
+- Deviations from the brief, all small:
+  * User bubbles also use white-space: pre-wrap, so a multi-line prompt keeps its line breaks.
+    The brief only names assistant bubbles.
+  * Non-ApiError failures (for example a network TypeError) show "Could not reach the hub. Try
+    again." instead of the raw browser text. This is new copy that the brief does not quote.
+  * Close-task errors show in data-testid="close-error". The brief does not name a place for them.
+  * TaskCard is keyed by task id so its local merge and close state resets when a new task starts.
+  * Send, merge and close apply the returned task through applyServerMsg with a synthetic
+    build.task message. That reuses the newer-task rule and leaves running as it was. Send does
+    not set running itself.
+- On app change, the effect resets view, draft, sending, error and the scroll-stick flag, and
+  bumps the generation so in-flight responses for the old app are ignored.
+- Verified by reading and by the browser run: no DOM access outside refs; no Date, Math.random or
+  I/O in src; imports use .js extensions; no new runtime dependency.
+
+5. CONCERNS
+-----------
+1. The server build routes are not in this worktree (apps/server has no build routes yet), so the
+   server contract was taken from the task-13 and task-20 briefs: GET ?after=N means id > N,
+   first 500; no after means the newest 500; POST messages returns 202 { task }; stop returns
+   { stopped }. Please confirm against the server when it lands.
+2. Stop and send do not change the running flag locally. Running goes false on Stop and true on
+   send only when the server broadcasts build.task with running. If the server does not broadcast
+   on those transitions, the Stop button will stay visible or Send will stay enabled until the
+   next build.task or reconnect.
+3. Overlapping responses (the initial load and a catch-up that starts before it returns) can land
+   out of order. Messages and the task merge safely in any order, but a stale running flag could
+   persist until the next build.task. Low risk; a per-request sequence number would close it if
+   needed.
+4. The Build area is not yet mounted by main.tsx (that belongs to the shell tasks), so Vite's
+   current bundle does not include it.
+5. The browser harness is scratch only and is not part of the commit. Browser tests belong to
+   Task 28.
+
+6. REPORT FILE
+--------------
+This file: /home/claude/wt-p3/.superpowers/sdd/2026-10-14-hub-server-build/task-25-report.txt

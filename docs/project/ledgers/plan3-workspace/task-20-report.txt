@@ -1,0 +1,155 @@
+Task 20: HTTP app composition and API routes
+Worktree /home/claude/wt-p3-20, branch p3-20, base 9f0bdab.
+Commit: 31eb2aa feat(server): HTTP composition with auth, apps, build, render and static client
+(Co-Authored-By and Claude-Session trailers from the harness.) Not pushed.
+
+STATUS: DONE_WITH_CONCERNS (see Concerns)
+
+WHAT WAS IMPLEMENTED
+- apps/server/src/apps/routes.ts: toSummary(e, buildStatus, running) and appsRoutes({registry, build}).
+  GET / answers a bare AppSummary[] (what ApiClient.apps() reads). GET /:app answers one AppSummary,
+  or 404 {error:'Unknown app'} (same wording as BuildError('Unknown app') and the render routes).
+- apps/server/src/build/routes.ts: buildRoutes(build).
+  GET /:app/build?after=N     after used only for /^\d+$/ safe integers, else undefined.
+  POST /:app/build/messages   body without a string text (also non-JSON body) -> 400 {error:'text is required'}; else 202 {task}.
+  POST /:app/build/stop       {stopped}.
+  POST /:app/build/tasks/:id/merge|close   id not /^-?\d+$/ (or not a safe integer) -> 400 {error:'Bad task id'}; else {task}.
+  Service errors are not caught here; they reach app.onError.
+- apps/server/src/app.ts: createApp(deps), in the brief's order: secureHeaders, GET /api/health, authRoutes at /api
+  (now passed through), requireAuth on /api/*, appsRoutes + buildRoutes + renderRoutes({dataDir, hasApp}) at /api/apps,
+  app.all('/api/*') 404, static client (only when clientDir is set), app.onError.
+  onError: BuildError -> {error: e.message} with e.status; anything else -> console.error of the message string only
+  ("Unhandled error on METHOD /path: <message>", no Error object, no stack) and {error:'Internal error'} 500.
+- apps/server/src/app.test.ts: 17 tests (the brief's 11 plus 6, listed below).
+
+AUTH CHECK
+Only /api/health, /api/login, /api/logout and /api/session are before requireAuth. Appsroutes, buildRoutes and renderRoutes
+are all mounted after app.use('/api/*', requireAuth). Test "build routes are behind login" hits all five build endpoints,
+GET /api/apps/demo and an unknown /api path without a cookie: all 401, and none of state/send/stop/merge/close was called.
+Test "render routes are behind login": 401 without cookie, 200 {version:1,pages:[]} with one, 404 for an unknown app.
+Unknown /api path with a cookie -> 404 {error:'Not found'}.
+
+TDD EVIDENCE
+RED: pnpm -F @hub/server exec vitest run src/app.test.ts  (app.ts did not exist yet)
+  Error: Cannot find module './app.js' imported from /home/claude/wt-p3-20/apps/server/src/app.test.ts
+  Test Files  1 failed (1)   Tests  no tests
+Second RED (genuine behaviour failure after first implementation, using the brief's onFound/c.header mechanism):
+  FAIL serves the client without login: expected null to be 'no-cache'  (cache-control header absent)
+GREEN: pnpm -F @hub/server exec vitest run src/app.test.ts
+  Test Files  1 passed (1)   Tests  17 passed (17)
+Full: pnpm test (root) exit 0:
+  protocol 15 passed; design-model 644 passed; renderer 52 passed; server 478 passed | 1 skipped (23 files); client 160 passed.
+  pnpm typecheck (root): all six projects Done.
+Real-HTTP check (tsx script with @hono/node-server serve, since removed): GET / -> 200 no-cache; HEAD /assets/a.js -> 200
+  immutable; GET /assets/missing.js -> 404 no cache header; GET /api/apps unauthenticated -> 401; x-content-type-options: nosniff on all.
+
+TESTS (17)
+Brief's 11: health is public; api requires login; lists apps with build status; unknown app is 404 (combined with the
+single-app 200 case); send returns 202 with the task (+ missing text -> 400); BuildError maps to its status;
+after must be a number; merge and close parse the id; render routes are behind login; serves the client without login;
+sets security headers.
+Added: other errors are a generic 500 and never leak (merge rejects with Error containing a token-like string; body is exactly
+{error:'Internal error'}, console.error called once with string-only args); stop reports whether a run was stopped;
+build routes are behind login; unknown api paths are 404 once logged in; caches by position under clientDir, not by where
+clientDir lives; serves no client when clientDir is unset.
+The "unknown app is 404" test also covers the 200 single-app case, so the count of test cases is 17, not 11.
+
+FILES CHANGED
+apps/server/src/app.ts, app.test.ts, apps/routes.ts, build/routes.ts (4 new files, 509 lines).
+
+SELF-REVIEW NOTES
+- Real signatures matched the brief's Interfaces block: authRoutes({sessions, limiter, passphraseHash, now}), requireAuth(sessions),
+  SessionStore(db, now?), LoginLimiter, AppRegistry.list()/get(), BuildService.state/send/stop/merge/close/latestStatus/isRunning,
+  BuildError(message, 400|404|409) in build/ci.ts, renderRoutes({dataDir, hasApp}) in design/render-files.ts, AppSummary in
+  packages/protocol/src/api.ts. No differences.
+- BuildTask in protocol has no pendingPrompt (my first test fixture did; typecheck caught it; fixed).
+- No Date/Math.random/IO in src beyond the static file serving. Inputs not mutated.
+
+CONCERNS
+1. The brief's static-file code does not work with the installed @hono/node-server 2.1.5. serveStatic builds its response with
+   c.body(...) BEFORE it awaits onFound, and c.body() does not finalize the context, so c.header() inside onFound writes to
+   prepared headers that the already-built response never sees. Result: no Cache-Control header at all (test failed with null,
+   and I confirmed with a stand-alone script). Fix used: onFound only records the served path in a WeakMap keyed by the
+   Context; a small wrapper middleware around serveStatic sets Cache-Control on the Response that serveStatic returns.
+   Header values are exactly as in the brief ('public, max-age=31536000, immutable' for assets, 'no-cache' otherwise).
+2. Deviation from the brief's condition p.includes('/assets/'): that test is applied to the absolute file path, so a clientDir
+   such as /srv/assets/client would make index.html immutable for a year. The condition is now "first path segment of the
+   file relative to clientDir is assets" (same result for the normal layout; covered by the "caches by position" test).
+3. Extra behaviours beyond the brief: a non-JSON body to POST /build/messages is 400 'text is required' (not a 500);
+   `after` accepts only /^\d+$/ (so '', '-1', '1.5', '1e3' are ignored); task id accepts /^-?\d+$/ so a negative integer reaches
+   the service (404 Task not found) while 'x', '1.5', '1e3', '0x10' give 400 'Bad task id'.
+4. The static handler has no SPA fallback (unknown non-file paths under / return 404). The brief does not ask for one, and the
+   client uses its own route handling, but if the shell uses path-based routes an index.html fallback will be needed in main.ts
+   wiring or a later task.
+5. Flaky and unrelated: packages/design-model src/perf.test.ts ("median under 150 ms") failed twice under full-repo parallel load
+   (151.8 ms) and passes when run alone or on re-run; the final root `pnpm test` was green.
+6. AppDeps has no `config`/GITHUB wiring and createApp is not yet called by anything; main.ts wiring is a later task.
+
+
+=====================================================================
+FIX ROUND 1 (review ad27785257b12ea28)
+=====================================================================
+Branch p3-20. First `git merge --no-ff feat/hub-server` -> 66b175a (the integration branch only added my own lane merge, so the
+tree was unchanged). Then three commits, one per item group:
+  f1b6773 fix(server): cap request bodies, add CSRF layer, harden error handling         (I1, I2, M1, M6)
+  03180f5 fix(server): refuse dotfiles and symlink escapes in the static client          (M2, M4, M5)
+  f1d4de6 fix(server): stop on an unknown app is 404                                     (M3)
+Not pushed.
+
+I1 Body limit. app.use('/api/*', bodyLimit({maxSize: 256*1024, onError: 413 {error:'Request too large'}})) from hono/body-limit.
+   Tests: 300 KB POST to /api/login with no cookie -> 413 (with and without an explicit Content-Length); 300 KB POST to
+   /api/apps/demo/build/messages with a cookie -> 413 (both forms) and build.send not called; a chunked ReadableStream body of
+   3 x 100 KB with no Content-Length -> 413 (app.request accepts a stream with duplex:'half'); a 250 000-char message still 202.
+I2 CSRF. app.use('/api/*', csrf()) after secureHeaders; onError starts with `if (err instanceof HTTPException) return err.getResponse();`.
+   Tests: cookie + sec-fetch-site same-site + text/plain on /messages -> 403 (nosniff present), send not called; bodyless same-site
+   merge/close/stop POSTs -> 403, service not called; cross-site and "no origin info at all" bodyless POST -> 403; same-origin +
+   application/json -> 202; same-origin bodyless merge -> 200; Origin-only (no Sec-Fetch-Site) bodyless stop -> 200; logout same-origin -> 204.
+   Test helpers now behave like ApiClient: cookie() returns {cookie, 'sec-fetch-site': 'same-origin'}, post() sets a JSON content type
+   only when there is a body (the client's bodyless merge/close/stop/logout POSTs have none).
+   Order: secureHeaders, M1 wrapper, csrf, bodyLimit. csrf runs before the body limit so a forged request is rejected before its
+   body is buffered (hono's bodyLimit reads a chunked body into memory up to the cap). That puts bodyLimit one step later than "right
+   after secureHeaders"; both still precede authRoutes.
+M1 Non-Error throws. A wrapper middleware turns any non-Error into new Error(String(e)). errorText() is gone (onError uses err.message).
+   PLACEMENT DEVIATION: the brief says "register first". I registered it immediately AFTER secureHeaders. Verified by experiment: with the
+   wrapper first, the string-rejection response has no x-content-type-options (the error unwinds past secureHeaders, which sets its
+   headers only after next()), and the new test "a non-Error rejection is a generic 500 with security headers" fails with
+   "expected null to be 'nosniff'". Inside secureHeaders it passes: 500, application/json, `{"error":"Internal error"}`, nosniff.
+M2 Static. clientFiles(clientDir) refuses (c.notFound()) any GET/HEAD whose request path has a segment starting with '.', and any file
+   whose realpath is outside realpath(clientDir), including a directory's index.html that is itself a link out. Missing paths pass
+   through so serveStatic gives its normal 404. Tests: /.env, /%2eenv, /.git/config, /%2egit/config, /assets/.hidden/x.js, a symlinked
+   file, a symlinked directory (/linkdir/secret.txt and /linkdir/), and a sub/index.html symlinked out: all 404 with no secret in the
+   body. A symlink that stays inside clientDir is still served. Also checked over real HTTP with serve() and raw request paths.
+M3 Stop. buildRoutes(build, hasApp) now takes the registry lookup as a second argument (signature change from the brief's one-argument
+   form); POST .../build/stop on an unknown app -> 404 {error:'Unknown app'} and build.stop is not called. APP_NAME_RE is not used.
+   createApp builds one hasApp and shares it with renderRoutes. Edge: if an app folder disappeared while a run was still active, stop
+   would 404 instead of aborting it; send() only runs for registered apps and stopAll() still aborts everything on shutdown.
+M4 Traversal. Tests: /%2e%2e/x, /..%2fx, /../x, /%2e%2e%2fx, /assets/..%2f..%2fx -> 404 and the file above clientDir is never returned
+   (these already passed before the fix; they are regression guards). HEAD /assets/app-1.js -> 200, empty body, immutable Cache-Control.
+M5 Comment corrected (it now lives on clientFiles): serveStatic builds its response before awaiting onFound, so with a native Response
+   (the app.request() test path) a header set there is lost, while under serve() the onFound form works; the wrapper is kept because it is
+   right under both. I confirmed the reviewer is right: a stand-alone run of the brief's original onFound/c.header code gives
+   cache-control null via app.request() and the header via serve(). This corrects my Concern 1 in the first report, which said the brief's
+   code failed in general; it fails only on the app.request() path. Only the comment text changed for M5; the wrapper logic is as before.
+M6 Log line: `Unhandled error on ${method} ${JSON.stringify(path)}: ${JSON.stringify(message.slice(0, 500))}`, one string argument.
+   Tests: exact line for a short message; a 2000-char message with a newline gives a single-line log under 700 chars with the newline escaped.
+
+TEST EVIDENCE
+RED (new tests against the pre-fix app.ts): `pnpm -F @hub/server exec vitest run src/app.test.ts`
+  13 failed | 22 passed (35): other errors / long-message log / non-Error rejection / stop unknown app / 3 body-limit tests / 3 csrf tests /
+  3 static tests (dotfiles, symlinked file+dir, symlinked index.html). The traversal and HEAD tests passed already, as expected.
+GREEN per group: group 1 28 passed (28); group 2 34 passed (34); group 3 35 passed (35).
+Full: `pnpm -F @hub/server test` -> 23 files passed, 496 passed | 1 skipped (497).
+`pnpm test` (root) exit 0: protocol 15, design-model 644, renderer 52, server 496 (+1 skipped), client 160.
+`pnpm typecheck` (root): all five projects Done (tsc --noEmit clean for apps/server).
+E2E: `lsof -i :4173` empty before and after; `CI=1 pnpm test:e2e` in apps/client -> 6 passed (14.9s). Note those Playwright specs drive
+  the vite preview server (canvas/perf) and make no /api calls, so they say nothing about the CSRF change; the same-origin request shapes
+  ApiClient sends (JSON POST login/messages; bodyless POST logout/stop/merge/close with no content-type) are covered by the app.test.ts csrf tests.
+
+CONCERNS
+1. csrf() blocks non-browser callers (curl, scripts) that send a bodyless or form-typed write without Sec-Fetch-Site: same-origin or an
+   Origin equal to the request URL's origin (derived from the Host header). Browsers always send Sec-Fetch-Site, so the shell is fine;
+   an Origin-only client behind `tailscale serve` depends on the proxy passing the original Host. Not tested here (no main.ts yet);
+   worth a smoke test when the hub is wired up behind Tailscale.
+2. hono's csrf only inspects form-typed (or missing) content types; a cross-site JSON POST is stopped by the browser's CORS preflight
+   (the hub sends no CORS headers), not by csrf(). That is hono's documented behaviour.
+3. The M3 behaviour on a vanished app folder during an active run (see above).

@@ -1,0 +1,177 @@
+TASK 17 REPORT: CI refresh, CI poll and green-only merge (plan 3)
+=================================================================
+
+Status: DONE_WITH_CONCERNS
+Worktree: /home/claude/wt-p3-17 (branch p3-17, base 0336081). Nothing pushed. finish.ts and docs/ untouched.
+
+Commits
+-------
+10eb77f feat(server): CI tracking and green-only merge pinned to the PR head
+
+Files changed
+-------------
+- apps/server/src/build/ci.ts         (new, 188 lines)
+- apps/server/src/build/ci.test.ts    (new, 22 tests)
+
+What was implemented
+--------------------
+- BuildError (status 400 | 404 | 409), exported.
+- refreshCi(deps, taskId): returns null for a missing task; returns the stored task unchanged when
+  it is not in review, has no prNumber, deps.github is null, or the app / RepoRef cannot be found.
+  Reads getPr. Merged -> status merged, mergeSha, "Pull request #n was merged on GitHub.", onMerged
+  when mergeSha is set. Closed -> status closed, "Pull request #n was closed.". Otherwise reads
+  checkStatus(headSha) and stores {ci, headSha} when either changed (publishTask). A CI state change
+  to success posts "CI passed. Ready to merge." (status); to failure posts "CI failed: <names>"
+  (error), names = checks whose conclusion is in FAILED_CONCLUSIONS. GitHub errors are caught,
+  logged with console.warn (message text only, no token), and the stored task is returned.
+- pollCi(deps, isRunning): refreshes every review task whose app is not running, in sequence.
+  Poll cap: see Concerns 1.
+- mergeTask(deps, app, taskId, running): checks in the brief's order (404, 409 running, merged
+  returns it, 409 no open PR, 409 GITHUB_TOKEN, getPr). Merged on GitHub -> recorded as above.
+  Closed -> status closed, then 409 "The pull request is closed.". Open -> checkStatus on the
+  current head, stores {ci, headSha}, refuses unless success with the brief's message. Then
+  github.merge(ref, n, headSha) pinned to that head; a refusal (merged false) -> 409
+  "GitHub refused the merge: <message>". On success: status merged, mergeSha, error null,
+  "Merged pull request #n.", publishTask, onMerged({app, taskId, prNumber, sha}).
+
+TDD evidence
+------------
+RED:   pnpm -F @hub/server exec vitest run src/build/ci.test.ts
+       FAIL src/build/ci.test.ts [ src/build/ci.test.ts ]
+       Error: Cannot find module './ci.js' imported from .../src/build/ci.test.ts
+       Test Files  1 failed (1) / Tests no tests
+
+GREEN: first run after implementing: 18 passed, 4 failed. The four failures were in the test
+       helper, not ci.ts: reviewTask() calls github.createPr, which put "createPr" in
+       github.calls before tests that assert no GitHub calls. Fixed by clearing the call log at
+       the end of the helper. Re-run:
+       pnpm -F @hub/server exec vitest run src/build/ci.test.ts
+       Test Files  1 passed (1)
+       Tests  22 passed (22)
+
+Mutation check (cap test is load-bearing): CI_POLL_LIMIT set to 1e9 ->
+       FAIL > pollCi > stops checking a status that stays pending after 120 polls
+       AssertionError: expected [ Array(122) ] to have a length of 120 but got 122
+       ci.ts restored afterwards (diffed against backup, identical).
+
+Full checks (run after the commit's code was final, import tidy included)
+-------------------------------------------------------------------------
+- pnpm -F @hub/server typecheck: exit 0
+- pnpm test (repo root): exit 0
+    apps/server: Test Files 20 passed (20); Tests 206 passed | 1 skipped (207)
+    packages/renderer: 52 passed; apps/client: 154 passed
+- pnpm typecheck (repo root): exit 0 (all packages Done)
+
+Self-review notes
+-----------------
+- ci.ts imports from ../github/github.js only types plus FAILED_CONCLUSIONS. No I/O beyond the
+  injected deps, no Date, no Math.random.
+- The poll counter is a module-level WeakMap keyed by the BuildStore instance, so tests and
+  separate stores do not share counts. No schema change was needed.
+- refreshCi and mergeTask share readRemote(), so both read getPr then checkStatus(headSha) in
+  the same order.
+
+Concerns
+--------
+1. Poll limit (brief defines none). The brief gives no poll limit or timeout, and pollCi takes no
+   interval. I used the Task 21 default ciPollMs = 30 000 ms x 120 attempts = about one hour.
+   The rule: a task whose CI stays pending on the same head is checked at most 120 times by
+   pollCi (see CI_POLL_LIMIT). The count resets when the stored headSha changes, which Task 16's
+   finish does for a new commit. The count is in memory, so a restart gives a fresh 120. A GitHub
+   error during a poll counts as a poll when the stored ci is pending (minor).
+2. Outcome of the cap. The task stays review with ci 'pending'. The brief defines no timed-out
+   outcome or copy, so no status message is posted when polling stops; please decide whether the
+   lead wants one. mergeTask still rechecks CI on the current head, so a stopped PR can be merged
+   once green. Task 18's on-demand refresh (refreshCi on a state read) is not capped and still calls
+   GitHub.
+3. CI state 'none' is not capped. The brief only caps pending. A repo with no check runs keeps
+   being polled every 30 s per review task. Decide whether 'none' should count too.
+4. Copy not in the brief (my choices, please confirm):
+   - mergeTask 409 "This app has no GitHub remote." when the app or its origin is not a GitHub
+     remote (the brief gives no error for this case).
+   - mergeTask's merged-on-GitHub path reuses refreshCi's "Pull request #n was merged on GitHub."
+     and its closed path posts "Pull request #n was closed.". The brief specifies no messages there.
+5. GitHub errors in mergeTask (getPr or checkStatus failing, or a merge error other than
+   405/409, which OctokitGitHub already maps to merged false) propagate as plain errors, not
+   BuildError. The brief only specifies the refusal mapping. refreshCi catches its errors. The
+   route layer needs to map mergeTask's thrown non-BuildError to a 5xx.
+6. In mergeTask, a merge result of merged true with sha null is treated as a refusal. This keeps
+   onMerged's sha typed as string without a non-null assertion. OctokitGitHub always returns the
+   sha on a successful merge, so this path is not reachable with the real adapter.
+7. Commit trailer. The controller's dispatch asked for "Co-Authored-By: Claude Opus 5.5 (1M
+   context)". The harness attribution for this session, which constraints.txt says to use, gives
+   "Co-Authored-By: Claude Haiku 5.5 <noreply@anthropic.com>", and I am running as Haiku 5.5. I used
+   the harness trailer, with the Claude-Session line. If Opus is wanted, the commit needs a
+   reword (I did not amend).
+8. pollCi overlap. If one poll runs longer than ciPollMs and the timer starts another, the two can
+   both increment a task's count, so the cap would arrive sooner (about 30 minutes). Harmless; noted
+   for Task 21.
+
+FIX ROUND 1: headline safety property tested; merge recorded once
+=================================================================
+
+Commit: 949731b fix(server): record a merge once and cover the merged head in tests
+Files:  apps/server/src/build/ci.ts (+10 -1), apps/server/src/build/ci.test.ts (+78)
+
+Changes
+-------
+1. Tests added in describe('mergeTask'):
+   - merges the current head when the stored head is stale: stored head h1, PR head moved to h2
+     (green), merges [{ number: 1, sha: 'h2' }].
+   - refuses when a push lands between the CI read and the merge: checkStatus spied so that after
+     the real call the PR head moves to h2. Rejects 409 "GitHub refused the merge: ...", merges
+     empty, task still review.
+2. Idempotence (review Minor 2). recordMergedOnGitHub and mergeTask's final step re-read the task
+   and return it unchanged when it is already merged, so onMerged fires once. New describe
+   'a merge is recorded once' with three tests:
+   - fires onMerged once for a PR already recorded merged (sequential: refresh, merge, refresh).
+   - fires onMerged once when a poll records the merge while the merge is in flight.
+   - fires onMerged once when a merge lands while a poll reads GitHub.
+
+RED (before the guards)
+-----------------------
+pnpm -F @hub/server exec vitest run src/build/ci.test.ts
+  FAIL > a merge is recorded once > fires onMerged once when a poll records the merge while the merge is in flight
+  AssertionError: expected "vi.fn()" to be called 1 times, but got 2 times
+  FAIL > a merge is recorded once > fires onMerged once when a merge lands while a poll reads GitHub
+  AssertionError: expected "vi.fn()" to be called 1 times, but got 2 times
+  Tests  2 failed | 25 passed (27)
+The two new head tests passed on the existing code (they guard behaviour that already held).
+
+GREEN (after the guards)
+------------------------
+pnpm -F @hub/server exec vitest run src/build/ci.test.ts
+  Test Files  1 passed (1)
+  Tests  27 passed (27)
+
+Mutants (each applied to ci.ts alone, test file run, ci.ts restored and diffed identical)
+-----------------------------------------------------------------------------------------
+M1 merge with the stored task.headSha (task.headSha ?? pr.headSha):
+   FAIL > mergeTask > merges the current head when the stored head is stale
+   Tests 1 failed | 26 passed
+M2 re-fetch the PR head with getPr just before merge, merge that head:
+   FAIL > mergeTask > refuses when a push lands between the CI read and the merge
+   Tests 1 failed | 26 passed
+   (M2 is not caught by the stale-head test by design: merging the current head is the expected
+   behaviour there. The push-race test is the one that catches an unchecked head.)
+M3 remove both already-merged guards:
+   FAIL > a merge is recorded once > fires onMerged once when a poll records the merge while the merge is in flight
+   FAIL > a merge is recorded once > fires onMerged once when a merge lands while a poll reads GitHub
+   Tests 2 failed | 25 passed
+
+Full checks
+-----------
+- pnpm -F @hub/server test: exit 0. Test Files 20 passed (20); Tests 211 passed | 1 skipped (212).
+- pnpm -r typecheck: exit 0 (no TS errors).
+
+Concerns (fix round)
+--------------------
+1. The sequential idempotence test passes without the guards, because the top-of-function status
+   checks already return early. The two race tests are what prove the guards.
+2. Not guarded: refreshCi's open-PR branch still writes ci/headSha after its GitHub read, so a
+   merge recorded during that read could take a CI write and a "CI" message on a merged task.
+   It changes no status and fires no hook. Not covered; a re-read there would close it.
+3. Two concurrent mergeTask calls: if the second's getPr ran before the first's merge landed, the
+   second's merge is refused by GitHub and returns 409 "GitHub refused the merge: ...", although the
+   PR did merge. The user sees an error for a merge that succeeded. The next read records it as
+   merged. Not changed in this round.

@@ -1,0 +1,203 @@
+Task 18 report: BuildService (plan 3)
+Worktree /home/claude/wt-p3-18, branch p3-18, base 09d2368.
+Commit: 6ef5f29 feat(server): BuildService with one chat per app, stop, queue and recovery
+Files: apps/server/src/build/service.ts (new, 341 lines), apps/server/src/build/service.test.ts (new, 45 tests)
+
+STATUS: DONE_WITH_CONCERNS (see Concerns; none blocks)
+
+WHAT WAS IMPLEMENTED
+- MAX_MESSAGE_CHARS = 20_000 and class BuildService with every method of the brief's interface:
+  isRunning, latestStatus, state, send, stop, close, merge, idle, stopAll, recover, retryQueued, pollCi.
+- send(): trim -> 400 empty / 400 too long -> registry (404 'Unknown app') -> 409 if running ->
+  reserve the app synchronously (check and reserve have no await between them) -> prepare git
+  (open task, refreshCi on a review task, a no-longer-open task counts as none; checkout the task branch,
+  or for a new task: dirty -> 409, fetch, defaultBranch, createTask, branch build/<branchSlug>, updateTask, createBranchFrom)
+  -> user message + publishTask(true) -> background work() -> returns store.task(id).
+  Any git failure is 409 'Git: <msg>'; a task created by this send and then failed is marked failed.
+  The reservation is released on any error in steps 5-7 (finally with a `launched` flag).
+- work(): status working (error/retryAt/pendingPrompt cleared) + publish; runTurn; limited -> queueAfterLimit;
+  !ok -> failed ('Stopped by you.' for 'aborted') + error message; ok -> finishTask. A throw anywhere ->
+  failed 'Unexpected error: <msg>' + error message. finally: release the app, then publishTask(task, false).
+  work never rejects: the failure handling and the final broadcast are each guarded (logged with console.warn,
+  never thrown), so `running` always ends false and `idle` always resolves.
+- state(): 404 for an unknown app. CONTROLLER RULING (mid-task message) implemented: when the app is idle and its
+  open task is `review` with stored ci 'pending', state() calls refreshCi(deps, task.id) before building the snapshot;
+  a rejection is logged (console.warn) and the stored snapshot is returned. refreshCi's real signature
+  (deps, taskId) made this direct, no workaround needed. Snapshot = { running, task: latestTask, messages(app, after) }.
+- close(), merge() (mergeTask(deps, app, id, isRunning(app))), recover(), retryQueued(), pollCi(), stopAll(): as in the brief.
+- Internals: one Map<app, Run> where Run = { controller, ended promise, end() }. It replaces the brief's two maps
+  (running + inflight): the `ended` promise exists from the moment of reservation, so idle()/stopAll() also cover a
+  send that is still preparing git. release() deletes the entry and then resolves `ended`.
+
+TDD EVIDENCE
+RED  (test written first, no service.ts):
+  $ cd apps/server && pnpm exec vitest run src/build/service.test.ts
+   FAIL  src/build/service.test.ts [ src/build/service.test.ts ]
+  Error: Cannot find module './service.js' imported from .../src/build/service.test.ts
+GREEN:
+  $ pnpm exec vitest run src/build/service.test.ts --reporter=verbose
+   Test Files  1 passed (1)
+        Tests  45 passed (45)
+  Full gate from the repo root (once, before commit): `pnpm test` exit 0 (server: 22 files, 270 passed | 1 skipped;
+  client 154, design-model 644, renderer 52, protocol 15) and `pnpm typecheck` exit 0 (all 5 workspaces).
+Mutation checks (service.ts restored afterwards, verified by diff):
+  - removing the state() CI refresh fails 4 state tests;
+  - removing the release() in work's finally makes the suite hang (idle never resolves), so the running-flag tests do bite.
+
+TESTS (45) cover
+- The brief's list: new branch + PR (kinds user/assistant/status, runner cwd, branch checked out, origin main SHA unchanged),
+  second prompt continues the task (resume 's1', one PR), concurrent prompt 409, dirty checkout 409, stop aborts ->
+  failed 'Stopped by you.', usage limit queue + retryQueued at 4000/6000 with the original prompt, recover, merged PR ->
+  task 2 on build/...-2 with resume still 's1', close then new branch, empty/unknown 400/404, state after an id.
+- Lead's requirements: a runner whose stream throws (sync throw and mid-stream throw) -> failed 'Unexpected error: boom',
+  running false, final build.task running=false, error message in the feed; finishTask rejecting (openRepo throws on its
+  second call) -> failed; stop while verifying -> failed 'Stopped by you.'; stop while pushing -> not left in
+  working/verifying/pushing; stopAll (also while git is still preparing); hub broadcast throwing on the final publish
+  -> app still released, task not stuck, warning logged.
+- Controller ruling: review task with stored ci 'pending' whose GitHub checks are now green -> state() returns ci 'success'
+  (and the stored row is updated); merged-on-GitHub PR shows as merged; no GitHub call while a run is active or when ci
+  is already known; refreshCi failure (GitHub error, and a rejection from the store) -> snapshot returned + warn.
+- Extras: two simultaneous sends (exactly one wins), trim + exactly 20000 chars accepted, 20001 rejected, checkout of the
+  task branch when the checkout sits elsewhere, git failure on an existing task (409, app released), fetch failure (no
+  task created), createBranchFrom failure (task failed, 409), close of merged/closed no-op, close 404/409 guards,
+  merge success (onMerged fired) and merge 409 while running, retryQueued skipping a running app / closed task /
+  missing pendingPrompt fallback / checkout failure, recover skipping a running app, pollCi delegation.
+
+SELF-REVIEW NOTES
+- No Date/Math.random/I/O in src: time via deps.now (used only by retryQueued's due check); no new dependencies.
+- No input mutated; tasks are re-read from the store at each hand-off (requireTask) instead of reusing stale rows.
+- Real signatures of Tasks 15/16/17 matched the brief: runTurn(deps, TurnInput), queueAfterLimit(deps, task, prompt, result),
+  finishTask(deps, { task, dir, manifest, signal }), refreshCi(deps, taskId), pollCi(deps, isRunning), mergeTask(deps, app, id, running),
+  BuildError(message, 400|404|409) exported from ci.ts.
+- No hearthbot tools used, no subagents, no push.
+
+CONCERNS
+1. state() cost: every state() call while a review task's CI is 'pending' and the app is idle makes two GitHub requests
+   (getPr + checkStatus). If the client polls state() frequently, that is rate-limit pressure; there is no throttle
+   (the ruling did not ask for one). A short per-task cooldown would be a cheap follow-up.
+2. A task created by a send whose createBranchFrom fails is left `failed` with a branch name that does not exist locally
+   (brief behaviour). The next send continues that open (failed) task, fails on checkout with 409 'Git: ...' until the user
+   closes the task. Close works on failed tasks, so it is recoverable from the UI, but it is a sticky state.
+3. Stop during `pushing`: git push is not cancellable (finishTask passes no signal to repo.push), so the push completes,
+   the PR is opened and the task ends `review`, not `failed`. Not stuck, but "Stopped by you." only applies to working and
+   verifying. Likewise a stop in the window after Claude finishes and before finishTask only takes effect if a build
+   command runs (no signal check before pushing when there are no commands).
+4. Small deviations from the brief's wording (all behaviour-compatible with its tests):
+   - one `runs` map instead of two maps; idle waits on a promise created at reservation (covers git preparation);
+   - recover() skips an app that is currently running (the brief says every task in working/verifying/pushing); a fresh
+     service at startup behaves exactly as specified;
+   - retryQueued checks out the task branch BEFORE adding the 'Retrying after the usage limit.' status message, so a
+     failed checkout does not leave a misleading "Retrying" line; a checkout failure marks the task failed with
+     'Git: <msg>' (otherwise it would be retried on every tick) and is not counted; one task's failure does not stop the others;
+   - when a send fails after creating a task, its error is 'Git: <msg>' (the same text as the 409) and an error message with the same text is added to the feed
+     (corrected in fix round 1: the first version of this report said nothing was added; abandon()/failTask always adds an error message);
+   - recover()/failures publish the changed task over the hub.
+5. Tests make a real git repo each (45 tests, about 38 s for the file). The stderr lines "fatal: expected 'acknowledgments',
+   received 'packfile'" come from makeTestRepo's seed push in this sandbox; they are harmless and pre-existing.
+
+
+FIX ROUND 1
+Commits: 61c9911 merge: feat/hub-server into p3-18 (clean merge, no conflicts; brings Task 16 fix round and Task 17 fix),
+         54c9902 fix(server): BuildService CI refresh single-flight, close task on failed branch creation, test gaps
+
+Merged-code baseline: after the merge, service.test.ts had exactly one red test (the hub-mock one in item 1), 44 others green.
+
+1. Hub-mock test. The throw is now `m.type === 'build.task' && !m.running && !s.svc.isRunning('demo')`, so only the service's final publish
+   (after release()) throws; finishTask's own review publish (running=false while the app is still reserved) passes through.
+   It still proves its purpose: with the final publish unguarded in service.ts, the test fails (assertion on console.warn and an
+   unhandled 'socket gone' rejection). With the guard it passes: app released, task review, warning logged.
+
+2. CI refresh single-flight (service.ts).
+   - refreshes: Map<taskId, Promise<void>>. refreshOnce(taskId, needed) is the only way the service reads CI (state() and the
+     review-task refresh in send()'s prepare). Concurrent callers for one task share one flight. Inside the flight the stored task is
+     re-read and `needed` re-checked (state(): still review and pending), so a task another refresh just brought up to date is not read again.
+   - ci.ts pollCi() calls refreshCi internally, so the service cannot wrap it per task. Instead the service orders polls and flights:
+     pollCi() waits for the flights in flight (and any earlier poll) before it starts, sets `polling`, and every flight started while
+     a poll runs waits for it (then re-checks `needed`). So a poll and a state()/send refresh never read one task at the same time.
+   - Tests ('BuildService CI refresh', 4 tests): two concurrent state() plus one pollCi on a green PR -> 'CI passed. Ready to merge.' exactly once;
+     with getPr gated: two state() calls share one GitHub read and the poll that waited makes exactly one more (2 reads, not 3), one announcement;
+     a state() arriving during a gated poll waits for it and does no read of its own (1 read, 1 announcement);
+     a send and a state() share one refresh.
+   - Mutation checks (service.ts restored each time): no single-flight fails the shared-read test; flight not waiting for the poll fails 2 tests;
+     poll not waiting for flights fails the shared-read test.
+   - Root cause note (for the controller): the duplicate comes from refreshCi in ci.ts reading `task` before its GitHub await and
+     comparing `ci.state !== task.ci` on that stale copy afterwards. A 3-line fix there (re-read the stored task after the await, as
+     recordMergedOnGitHub now does) would remove the race for every caller, including poll-vs-poll. I did not touch ci.ts (Task 17's file);
+     the service-level ordering above fixes it for all callers that go through BuildService.
+
+3. Failed createBranchFrom. prepare() now ends such a task as 'closed' (error null, published running=false) and adds the git error to the
+   feed as an 'error' message (new private discard()); the 409 `Git: <msg>` is still thrown. No fallback to createBranchFrom on a checkout
+   failure. Any failure between createTask and a successful createBranchFrom (including the store write of the branch name) takes this
+   path, since the task never had a branch. Test: send rejects 409, latest task closed, feed has ['error','Git: cannot branch'], app not running,
+   no Claude run; after the branch step works again the next send creates task id+1 and reaches review. (Mutation: using failed instead fails the test.)
+
+4. Test gaps.
+   (a) 'fails the new task when the user message cannot be stored': store.addMessage throws once on the user message -> send rejects 'disk full',
+       task failed with that error, isRunning false, no Claude run, final publish running=false.
+   (b) 'does not ask GitHub while a send has the app, even before Claude starts': the second send's checkout is gated; while the task is still
+       review/pending and the app reserved, state() returns running true and makes no GitHub call. Mutation: removing the isRunning guard in
+       refreshPendingCi fails it. (The old version of the test could not fail without the guard: the task was already 'working' by then.)
+       A separate test keeps 'no GitHub call once CI is known'.
+   (c) retry() re-read guards: 'one closed while the registry answered is not restarted' (registry.get held; close() runs; retryQueued -> 0, no run);
+       'does not start a second run when a send took the app meanwhile' (send is reserved and gated in checkout while the task is still queued;
+       retryQueued -> 0; exactly 2 Claude calls). Mutations: dropping the isRunning check and dropping the re-read each fail their test.
+   (d) 'stop while pushing' now pins review with prNumber 1. New 'stop after the checks pass but before the push fails the task without pushing':
+       the last build command calls svc.stop() and returns ok -> task failed 'Stopped by you.', no build/* branch on origin, no PR, no createPr call.
+
+5. Report corrected (see the concern 4 line above).
+
+Verification on the merged result:
+  $ pnpm -F @hub/server test   -> Test Files 22 passed (22); Tests 461 passed | 1 skipped (462); exit 0
+  $ pnpm -r typecheck          -> all workspaces Done; exit 0
+  service.test.ts alone: 54 tests (45 before this round + 9 new).
+
+New concerns / notes:
+- send() now waits for an in-flight poll before its own review-task refresh (the same ordering rule); a send can therefore be delayed by the
+  length of one poll cycle. Short in practice (one GitHub read per review task).
+- state() on a task that a poll is currently refreshing waits for the poll to finish before answering (so it returns the fresh value).
+
+
+FIX ROUND 2
+Commits: c32418f merge: feat/hub-server into p3-18 (clean),
+         461a965 fix(server): honor a Stop during the pre-push branch check, decouple apps from the CI poll
+
+1. Stop dropped during the pre-push branch check (finish.ts). After `const beforePush = await blockedReason(); if (beforePush !== null) return fail(...)`
+   finish now has `if (signal.aborted) return fail('Stopped by you.');` before `set({ status: 'pushing' })`.
+   Tests: service.test.ts 'a stop issued during the branch check before the push fails the task without pushing' (from probe P6: stop() fires inside the
+   first currentBranch() after the last check; stop returned true; task failed 'Stopped by you.', no build/* branch on origin, no PR, no createPr call),
+   and finish.test.ts 'stops before the push when stopped during the branch check just before it' (the 2nd currentBranch read aborts the signal).
+
+2. Cross-app coupling. The global `polling` gate that send()/state() waited on is gone.
+   - Every per-task CI read goes through refreshOnce (the per-task single-flight Map<taskId, Promise<BuildTask|null>>), including the poll's.
+     To route the poll through it I made one additive change in ci.ts: pollCi(deps, isRunning, refresh = taskId => refreshCi(deps, taskId)).
+     Default behaviour and every existing ci.test.ts test are unchanged; BuildService.pollCi passes `taskId => this.refreshOnce(taskId)`.
+   - state() and send() wait only on their own task's in-flight read. `polling` now only guards poll against poll: a pass that starts while another
+     is running gets the same promise back.
+   - A poll and a state()/send on one task share one GitHub read and announce a green PR once; a hung read for another app stalls only the poll.
+   Tests (service.test.ts, describe 'BuildService CI refresh'):
+   (a) 'a send on one app is not held up by a hung GitHub read for another app' (from P4; PR 2 of app 'other' hangs, send on demo returns, state runs);
+       plus 'a state() call on one app is not held up by a hung GitHub read for another app' (pending CI forces state() to read GitHub itself);
+   (b) 'announces a green PR once for concurrent state() calls and a poll' (kept), 'shares one GitHub read between two state() calls and a poll that
+       starts during it' (was 'then lets a poll run after it': now 1 read, not 2), 'shares the poll's read with a state() call that arrives while it is in
+       flight' (was 'wait for it'; still 1 read, 1 announcement), and 'a second poll pass joins the one in flight';
+   (c) 'reads GitHub once for two state() calls on one task and announces once' (from P1, GitHub read gated and counted).
+
+3. Test names. 'shares a refresh between a send and state()' is now 'a send that refreshes the task keeps state() from reading GitHub, and reads once'
+   and asserts the read count (1) and one announcement. 'stop after the checks pass but before the push ...' is now
+   'a stop issued during the last check fails the task without pushing'.
+
+Which tests fail on the previous service.ts/finish.ts (HEAD before this commit, same tests) and pass after:
+   finish.test.ts   'stops before the push when stopped during the branch check just before it'
+   service.test.ts  'a stop issued during the branch check before the push fails the task without pushing'
+   service.test.ts  'shares one GitHub read between two state() calls and a poll that starts during it'
+   service.test.ts  'a second poll pass joins the one in flight'
+   service.test.ts  'a send on one app is not held up by a hung GitHub read for another app'
+   service.test.ts  'a state() call on one app is not held up by a hung GitHub read for another app'
+   (6 failed, 76 passed on the old code; all pass now. The P1 test passes on both, as the probe showed: it pins the behaviour.)
+
+Verification: `pnpm -F @hub/server test` -> 23 files passed, 484 passed | 1 skipped; `tsc --noEmit` (apps/server) exit 0. service.test.ts has 59 tests (54 before this round); finish.test.ts gained 1.
+
+Concerns: (1) the optional `refresh` parameter on ci.ts pollCi is the only way to route the poll through the service's single-flight without
+copying the poll's watch/limit logic; it touches Task 17's file additively. (2) A hung GitHub read still stalls the poll pass itself (and, by the
+join rule, later passes) until it ends; the Octokit request timeout is parked for the final wave. (3) A send/state on the SAME task whose read is hung
+waits for it (shared flight), by design.

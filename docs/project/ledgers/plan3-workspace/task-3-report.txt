@@ -1,0 +1,122 @@
+TASK 3 REPORT: Server scaffold and config
+Plan 3 (hub server), branch feat/hub-server, worktree /home/claude/wt-p3
+
+STATUS: DONE_WITH_CONCERNS
+
+COMMIT
+  41cc5ce feat(server): scaffold, config with credentials and env scrubbing
+
+WHAT WAS IMPLEMENTED
+  - apps/server/package.json: name @hub/server, private, type module, the five
+    scripts from the brief (test, typecheck, start, dev:fake, hash-passphrase).
+  - apps/server/tsconfig.json and apps/server/vitest.config.ts exactly as the brief.
+  - pnpm-workspace.yaml: appended allowBuilds (better-sqlite3: true).
+  - Dependencies installed in this one task (lockfile touched only here):
+      runtime: @hub/protocol (workspace:*), hono ^4.13.13, @hono/node-server ^2.1.5,
+               ws ^8.22.0, better-sqlite3 ^13.0.3, simple-git ^3.36.0,
+               @octokit/rest ^22.0.1, @anthropic-ai/claude-agent-sdk ^0.3.290,
+               zod ^4.6.7, tsx ^4.23.15
+      dev:     @types/node ^22, @types/ws ^8.18.2, @types/better-sqlite3 ^9.6.0,
+               vitest ^5.0.4, typescript ^7.0.2
+  - apps/server/src/config.ts: HubConfig, ConfigError, DEFAULT_PORT (8787),
+    CREDENTIAL_KEYS, SECRET_ENV_KEYS, loadConfig(env), scrubEnv(env).
+      loadConfig rules as in the brief:
+        - credential value = non-blank env[K], else trimmed contents of
+          ${CREDENTIALS_DIRECTORY}/K when that file exists, else absent.
+        - required HUB_BIND, HUB_DATA_DIR, HUB_APPS_DIR, HUB_PASSPHRASE_HASH;
+          all missing names reported in one ConfigError, in that order.
+        - wildcard bind check (0.0.0.0, ::, [::], *) with the exact message.
+        - HUB_PORT defaults to 8787; must match /^\d+$/ and be 1-65535.
+        - HUB_PASSPHRASE_HASH must start with "scrypt:" (exact message).
+        - dataDir and appsDir go through path.resolve.
+        - GITHUB_TOKEN, GITHUB_OWNER, CLAUDE_CODE_OAUTH_TOKEN are null when absent.
+      scrubEnv copies every defined entry whose key is not in SECRET_ENV_KEYS;
+      it does not mutate its input.
+  - apps/server/src/config.test.ts: 9 tests (the 8 named in the brief, with
+    "rejects wildcard binds" covering all four wildcard values and the
+    CREDENTIALS_DIRECTORY test also checking that an env value wins over the file).
+
+TDD EVIDENCE
+  RED command: pnpm -F @hub/server test
+  RED output (excerpt, exit 1):
+    FAIL  src/config.test.ts [ src/config.test.ts ]
+    Error: Cannot find module './config.js' imported from
+      /home/claude/wt-p3/apps/server/src/config.test.ts
+    Test Files  1 failed (1)
+    Tests  no tests
+  Full output: /tmp/claude-0/-home-claude/d289a493-967d-56ba-9311-db4aba7933de/scratchpad/t3-red.txt
+
+  GREEN command: pnpm -F @hub/server test
+  GREEN output (excerpt, exit 0):
+    Test Files  1 passed (1)
+    Tests  9 passed (9)
+  Full output: .../scratchpad/t3-green.txt
+
+  Typecheck: pnpm -F @hub/server typecheck  -> exit 0 (tsc --noEmit, no errors)
+
+  Root checks (required before commit): pnpm test && pnpm typecheck  -> both exit 0
+    packages/protocol   Test Files 3 passed, Tests 15 passed
+    packages/design-model Test Files 14 passed, Tests 359 passed
+    apps/server         Test Files 1 passed,  Tests 9 passed
+    packages/renderer   Test Files 7 passed,  Tests 52 passed
+    apps/client         Test Files 16 passed, Tests 122 passed
+    typecheck: all workspace packages exit 0
+
+NATIVE SQLITE CHECK (better-sqlite3 build)
+  pnpm -F @hub/server exec node -e "const D=require('better-sqlite3'); new D(':memory:').close(); console.log('sqlite ok')"
+    -> sqlite ok   (exit 0)
+  node -e "require('better-sqlite3')(':memory:').close(); console.log('sqlite fn ok')"  (run from apps/server)
+    -> sqlite fn ok   (exit 0)
+  SQLite library version reported by the module: 3.53.4
+  The install compiled the addon with node-gyp (build ran). Both allowBuilds in
+  pnpm-workspace.yaml and the global only-built-dependencies entry for
+  better-sqlite3 are present; the build ran.
+
+FILES CHANGED (commit 41cc5ce, 7 files, all additive)
+  apps/server/package.json
+  apps/server/tsconfig.json
+  apps/server/vitest.config.ts
+  apps/server/src/config.ts
+  apps/server/src/config.test.ts
+  pnpm-workspace.yaml          (+2 lines)
+  pnpm-lock.yaml               (+1165 lines, 0 deletions; new apps/server importer)
+  Nothing under docs/ or .superpowers/ was touched except this report (gitignored).
+
+SELF-REVIEW NOTES
+  - Specifiers: pnpm add rewrote two specifiers to the resolved version
+    (@anthropic-ai/claude-agent-sdk ^0.3.290 -> ^0.3.299, @types/node ^22 ->
+    ^22.20.5). I restored the brief's specifiers in apps/server/package.json and
+    re-ran pnpm install; the lockfile importer now records ^0.3.290 and ^22.
+    The resolved versions are unchanged: claude-agent-sdk 0.3.299 (the newest
+    registry version satisfying ^0.3.290; 0.3.290 itself exists but is not what
+    pnpm selects), @types/node 22.20.5.
+  - Trimming: loadConfig trims env values before use (blank counts as unset).
+    For credentials, a blank env value falls through to the file, and a file
+    whose trimmed contents are empty counts as absent (the brief says "absent"
+    only when the file does not exist; this is my reading so an empty secret
+    is reported as missing rather than accepted).
+  - Validation order: required names, then wildcard bind, then port, then hash
+    prefix.
+  - config.test.ts creates its credential temp dirs with mkdtempSync under
+    os.tmpdir() and removes them in afterEach. Scratch output for this task
+    (RED/GREEN logs) lives in the scratchpad directory.
+
+CONCERNS
+  1. The implementer conventions say "No Date, Math.random or I/O in src". config.ts
+     reads credential files with node:fs. The brief requires this (CREDENTIALS_DIRECTORY
+     is a required feature and loadConfig's signature takes only env), so I read the
+     convention as applying to the pure shared packages, not apps/server, which does
+     I/O by design. Controller to confirm.
+  2. The brief's specifiers were restored by hand (see self-review); the lockfile is
+     consistent with them.
+  3. During pnpm add, pnpm printed "Ignored build scripts: esbuild@0.28.2,
+     sharp@0.34.5". Neither is in allowBuilds, and the task did not touch them.
+     esbuild works (vitest transforms ran). sharp is an optional vite dependency that
+     nothing in this task uses.
+  4. apps/server/tsconfig.json has include ["src"] as the brief says, so
+     vitest.config.ts is not typechecked. packages/design-model includes it; the brief
+     chose otherwise.
+  5. The scripts start, dev:fake and hash-passphrase point at src/main.ts,
+     src/dev/fake-hub.ts and src/auth/hash-cli.ts, which later tasks create.
+  6. CREDENTIAL_KEYS is exported but not consumed in this task (it is a produced
+     interface; the consumer is expected in a later task).

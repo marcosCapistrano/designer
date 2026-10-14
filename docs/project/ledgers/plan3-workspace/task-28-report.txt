@@ -1,0 +1,141 @@
+TASK 28 REPORT: Playwright smoke tests for the shell and Build area
+Worktree /home/claude/wt-p3-28, branch p3-28 (off feat/hub-server 40f9a3b). Not pushed.
+
+STATUS: DONE_WITH_CONCERNS (concerns: plan 2 perf.spec.ts pan phases fail on this loaded machine, identically without my change; see below)
+
+COMMITS
+  f98c4bf fix(client): keep a draft typed before the Build area's mount effect runs
+  2dd39c0 test(client): e2e for login, Build flow to merge, offline shell
+
+WHAT I BUILT
+apps/client/playwright.config.ts
+  - webServer is now an array. Entry 1 is plan 2's preview entry, unchanged.
+  - Entry 2 (per controller addition 1): command 'node --import tsx src/dev/fake-hub.ts',
+    cwd = fileURLToPath(new URL('../server', import.meta.url)) (apps/server, resolved from the config file),
+    url 'http://127.0.0.1:8787/api/health', timeout 120_000, reuseExistingServer: !process.env.CI.
+  - One addition beyond the spec'd entry: gracefulShutdown { signal: 'SIGTERM', timeout: 5000 }. Playwright's default
+    is SIGKILL, which skips fake-hub's SIGTERM handler, so every run left /tmp/hub-fake-* and /tmp/hub-git-* behind
+    (I saw 4 such dirs after 4 runs). With SIGTERM the hub closes and removes its scratch dirs; verified: after a run,
+    ls /tmp/hub-fake-* is empty and ports 4173/8787 are free. Easy to drop if the controller wants the entry verbatim.
+  - vite.config.ts untouched (no changeOrigin, per addition 2). Live build updates over the WebSocket worked
+    through the preview proxy.
+apps/client/e2e/build.spec.ts (5 tests, helper login(page) as in the brief)
+  - wrong passphrase shows an error, the right one opens the app list
+  - a Build prompt streams, opens a PR, and merges after CI (all assertions and timeouts exactly as the brief lists)
+  - design tab shows the app's canvas (canvas visible, canvas-error count 0)
+  - deploy tab shows the placeholder (deploy-placeholder has text 'Deploy is not set up yet.')
+  - log out returns to the login screen (login visible, app-demo count 0)
+apps/client/e2e/pwa.spec.ts (1 test)
+  - the app shell loads offline after one visit: goto, wait for serviceWorker.ready, reload, setOffline(true), reload,
+    'offline' visible; setOffline(false) in a finally block.
+Test ids were checked in the code (Login.tsx, App.tsx, AppList.tsx, AppView.tsx, BuildArea.tsx, TaskCard.tsx), not assumed.
+All assertions are driven through the page; no `request` fixture calls, so the csrf layer (addition 3) never mattered.
+The Secure session cookie was accepted by Chromium on http://localhost (addition 4): login, session check, logout and the
+authenticated WebSocket all worked.
+
+CODE FIX THE TESTS EXPOSED (apps/client/src/areas/build/BuildArea.tsx, commit f98c4bf)
+First run: 5 of 6 passed; the Build flow timed out at `build-send` click because the Send button stayed disabled.
+Root cause: BuildArea's data effect began with an unconditional reset (setView(EMPTY_VIEW), setDraft(''), setSending(false),
+setError(null), ...). Preact runs effects after paint, and flushes a component's pending effects before its next render.
+So text entered between the first render and that effect (Playwright fill is that fast; a very fast typist could hit it)
+was queued by onInput first and then overwritten by the effect's setDraft(''). The textarea ended empty and Send disabled.
+Evidence: a throwaway probe spec (deleted) that filled build-input immediately after opening the app read back "" after
+500 ms before the fix and "immediate" after it.
+Fix: a stateApp ref records which app the state belongs to; the reset runs only when `app` actually changed
+(AppView already keys BuildArea on app, so a mount needs no reset). Nothing else in the effect changed.
+No unit test was added for it: client unit tests run in node with no DOM, and the Build flow e2e covers the behavior.
+No change to apps/server or to claude/.
+
+TDD / VERIFICATION EVIDENCE
+RED (first run, before the fix):
+  CI=1 pnpm test:e2e e2e/build.spec.ts e2e/pwa.spec.ts  (apps/client)
+  ->  1 failed (a Build prompt streams, opens a PR, and merges after CI: locator.click timeout, build-send "element is not enabled"),
+      5 passed (2.2m, dominated by the 120 s test timeout)
+GREEN (after the fix, final config):
+  CI=1 npx playwright test e2e/build.spec.ts e2e/pwa.spec.ts  ->  6 passed (11.5s)
+  Also 6 passed (10.8s) before the gracefulShutdown addition.
+Step 3 (CI=1):
+  pnpm typecheck                      -> all 5 workspace projects Done, exit 0
+  pnpm test (repo root, exit 0)       -> protocol 15, design-model 811, renderer 94, server 848 passed | 1 skipped, client 235 passed (24 files)
+  pnpm -F @hub/client build           -> ok (44 modules)
+  pnpm -F @hub/client size            -> JS gzip total: 23143 bytes (limit 150000)
+  pnpm -F @hub/client test:e2e        -> 17 tests: 15 passed, 2 failed, both in perf.spec.ts (see below). canvas.spec.ts and
+                                         the 6 new tests all pass.
+After every Playwright run: lsof -i :4173 and lsof -i :8787 were empty, and /tmp/hub-fake-* was empty (the two old
+/tmp/hub-git-NRi48z and -gwVTRd dirs predate my work, 04:43 and 04:50, and are not mine).
+
+PERF (plan 2's perf.spec.ts; thresholds untouched)
+Machine has 4 cores; a foreign loop process and my own runs kept load at 1-3.5.
+  Full e2e run, uptime before 06:37:40 load average 3.13, 2.27, 2.16 (after: 3.03, 2.36, 2.20):
+    FAIL pan @0.3  median 33.3 ms = 30 fps (needs >= 50)      p90 33.4 ms
+    FAIL pan @0.08 median 33.3 ms = 30 fps (needs >= 50)      p90 33.4 ms
+    PASS ctrl-wheel zoom
+  perf.spec.ts alone, rerun once, load 2.64, 2.30, 2.18 (after 2.88, 2.39, 2.21): the same two pan phases fail, same numbers (30 fps), zoom passes.
+  Control: perf.spec.ts alone with plan 2's ORIGINAL config (git show HEAD:playwright.config.ts, so no fake hub, no
+    gracefulShutdown), load 2.72, 2.36, 2.20: the same two pan phases fail (one also p90 49.9 ms > 34), zoom passes. So the
+    failures do not come from this task's config or the BuildArea fix; perf.spec.ts uses harness.html and never touches the hub.
+  Third run on a quieter machine (load 1.25, 1.89, 2.05 before; 1.83, 1.98, 2.08 after): pan @0.3 FAIL (30 fps), pan @0.08 PASS (60 fps, p90 33.4), zoom PASS.
+  So the result tracks machine load; it flips between runs without any code change. The throwaway control config was deleted.
+
+DEVIATIONS / THINGS TO KNOW
+  - gracefulShutdown on the fake-hub entry (above), not in the brief.
+  - The specs assume a FRESH fake hub, which is what Playwright starts under CI=1. The hub keeps its data across tests, and
+    only one test sends a prompt, so the msg-user locator is unique. Running the Build test more than once against the same
+    hub (--repeat-each=4 showed it: strict-mode violation, getByTestId('msg-user') resolved to 2-3 elements, the 3rd and 4th
+    iterations failed) or against a hub started by hand and reused (reuseExistingServer when CI is unset) fails on the
+    duplicate messages. --repeat-each=2 over all 6 tests passed. I kept the brief's plain locator rather than adding .last().
+  - Non-fatal git noise in the fake hub's output: "fatal: expected 'acknowledgments', received 'packfile'" / "push negotiation
+    failed; proceeding anyway" from the test-repo seed push. It appears in server unit tests too; not caused by this task.
+  - An unrelated vite "ws proxy error ECONNRESET" is logged when a test ends with its page still holding the socket; harmless.
+
+CONCERNS
+  1. perf.spec.ts pan phases fail in this environment regardless of this change (30 fps median under load). They need a quiet
+     machine or the real CI runner to be judged. I did not touch thresholds.
+  2. The BuildArea fix lives in client source (allowed by the controller additions). Controller may want a reviewer to glance at
+     the change: the effect no longer resets for a same-app rerun (api/ws/update identities are stable in App, so this never occurs
+     today).
+  3. gracefulShutdown addition (see above).
+
+FILES CHANGED
+  apps/client/playwright.config.ts (modified)
+  apps/client/e2e/build.spec.ts (new)
+  apps/client/e2e/pwa.spec.ts (new)
+  apps/client/src/areas/build/BuildArea.tsx (modified, separate fix commit)
+
+
+FIX ROUND 1 (from review acc34c0086682aae8; brief: task-28-fix1-brief.md)
+
+Setup: git merge --no-ff feat/hub-server into p3-28 (680ebdc). feat/hub-server already contained my two Task 28 commits (8b86a81), so the merge brought nothing new.
+Commits: 6d4c37e docs(client): note that BuildArea's reset relies on stable api and ws
+         e214d58 test(client): regression spec for the early Build draft, wait for manifest and shell cache
+perf.spec.ts was not run. Ports 4173/8787 were free before every Playwright run and after (lsof empty); /tmp/hub-fake-* empty; CI=1 throughout.
+
+I1 (regression spec, apps/client/e2e/build.spec.ts, placed before the Build-flow test; sends no prompt)
+  'a draft typed as the Build area mounts survives': the reviewer's spec, with the route '#/apps/demo/build' checked against route.ts formatRoute (it is
+  the real Build route). A MutationObserver types 'early' into build-input in the same task as the commit that mounts the Build area, then waits 500 ms,
+  then expects the value 'early' and build-send enabled.
+  RED (fix reverted locally with git show 40f9a3b:.../BuildArea.tsx, not committed):
+    CI=1 npx playwright test e2e/build.spec.ts -g "draft typed"
+    -> 1 failed: expect(getByTestId('build-input')).toHaveValue('early'), Expected "early", Received "" (build.spec.ts:44)
+  GREEN (fix restored; the file differs from the committed fix only by the M5 comment):
+    CI=1 npx playwright test e2e/build.spec.ts -g "draft typed"  ->  1 passed (6.9s)
+  The reverted file was restored from a copy and the revert was never committed.
+
+M1 design test: registers page.waitForResponse(/\/render\/manifest\.json/) before clicking tab-design, asserts the response is ok, then checks canvas visible
+  and canvas-error count 0. (Real path: /api/apps/demo/render/manifest.json; the hub answers an empty manifest with 200 for an app without renders.)
+M2 pwa.spec.ts: after the controlled reload, expect.poll (10 s) until navigator.serviceWorker.controller is set and '/' plus every /assets/ URL in
+  performance resource entries is among the cached request URLs, then goes offline. First attempt used caches.match(url) and never converged: the assets
+  were in the cache (keys listing confirmed it) but match() missed them, most likely because of the response's Vary header, so the check now compares
+  cache.keys() URLs instead. The poll fails if the assets are not cached, as that first attempt showed.
+M3 comment above the Build-flow test: needs a fresh fake hub, sends the only scripted prompt, no retries and no reuse.
+M4 Build-flow test also expects build-messages to match /Merged pull request #\d+\./ (the status message mergeTask in apps/server/src/build/ci.ts
+  writes: `Merged pull request #${n}.`).
+M5 one-line comment at BuildArea's reset effect: it relies on api and ws being stable (memoized in App).
+
+Verification (after the fix round):
+  pnpm -r typecheck                                   -> all 5 projects Done
+  pnpm -F @hub/client test                            -> 24 files, 235 tests passed
+  CI=1 npx playwright test e2e/build.spec.ts e2e/pwa.spec.ts, three times in a row -> 7 passed each (11.9s, 13.1s, 13.4s)
+  CI=1 npx playwright test e2e/canvas.spec.ts e2e/build.spec.ts e2e/pwa.spec.ts (after render-fixtures) -> 15 passed (16.6s)
+  Load average at the end of the runs: 1.79-2.08. Server tests untouched by this round (no server change), not rerun.
+Concerns: none new. The earlier concerns (perf.spec.ts pan phases under load, gracefulShutdown addition) stand.

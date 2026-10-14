@@ -1,0 +1,128 @@
+TASK 5 REPORT: Passphrase hashing, login limiter, hash CLI (plan 3)
+====================================================================
+
+Status: DONE
+Worktree: /home/claude/wt-p3-5 (branch p3-5)
+Commit: b0d782a feat(server): scrypt passphrase hashing, login limiter, hash CLI
+Trailers: Co-Authored-By: Claude Haiku 5.5 <noreply@anthropic.com>
+          Claude-Session: https://claude.ai/code/session_01EgHXhuc9bdgup2DFjf8JrU
+
+1. WHAT WAS IMPLEMENTED
+-----------------------
+apps/server/src/auth/passphrase.ts
+  - SCRYPT_PARAMS = { N: 16384, r: 8, p: 1, keylen: 32 } (as const)
+  - MIN_PASSPHRASE_LENGTH = 12
+  - hashPassphrase(passphrase, salt = randomBytes(16)) returns
+    `scrypt:16384:8:1:<salt base64url>:<key base64url>` (no '$').
+    Uses scryptSync with maxmem 64 MiB.
+  - verifyPassphrase(passphrase, stored) parses the six ':' fields, requires
+    the scheme 'scrypt' and decimal N/r/p, requires base64url salt and key,
+    derives a key of the stored key's length, and compares with
+    timingSafeEqual. Any malformed input returns false. The whole body is in
+    try/catch, so it never throws.
+
+apps/server/src/auth/limiter.ts
+  - LimiterOptions { maxFailures = 5, windowMs = 900_000, lockMs = 900_000 }
+  - class LoginLimiter: blocked(now) is now < lockedUntil.
+    fail(now) drops failures older than windowMs, records now, and at
+    maxFailures sets lockedUntil = now + lockMs and clears the failures.
+    reset() clears the failures.
+  - Time is passed in as a parameter. Nothing reads the clock.
+
+apps/server/src/auth/hash-cli.ts
+  - Reads all of stdin, strips exactly one trailing "\r\n" or "\n".
+  - If the result is shorter than 12 characters, it writes
+    "Passphrase must be at least 12 characters\n" to stderr and exits 1.
+    The passphrase is never echoed.
+  - Otherwise it writes hashPassphrase(input) + "\n" to stdout.
+  - Wired to the existing `hash-passphrase` script in apps/server/package.json
+    (added by Task 3). package.json was not edited.
+
+2. TDD EVIDENCE
+---------------
+Tests written first: passphrase.test.ts (7 tests) and limiter.test.ts (3 tests).
+The brief's names and values are used verbatim.
+
+RED command:  pnpm -F @hub/server exec vitest run src/auth
+RED output (abridged):
+  FAIL  src/auth/limiter.test.ts [ src/auth/limiter.test.ts ]
+  Error: Cannot find module './limiter.js' imported from .../src/auth/limiter.test.ts
+  FAIL  src/auth/passphrase.test.ts [ src/auth/passphrase.test.ts ]
+  Error: Cannot find module './passphrase.js' imported from .../src/auth/passphrase.test.ts
+  Test Files  2 failed (2)
+  Tests  no tests
+  ERR_PNPM_RECURSIVE_EXEC_FIRST_FAIL  Command failed with exit code 1
+
+GREEN command: pnpm -F @hub/server exec vitest run src/auth --reporter=verbose
+GREEN output (abridged):
+  ✓ limiter.test.ts > blocks after 5 failures within the window
+  ✓ limiter.test.ts > old failures expire
+  ✓ limiter.test.ts > reset clears failures
+  ✓ passphrase.test.ts > hash has the documented format
+  ✓ passphrase.test.ts > verifies only the right passphrase
+  ✓ passphrase.test.ts > random salt makes hashes differ
+  ✓ passphrase.test.ts > fixed salt is deterministic
+  ✓ passphrase.test.ts > malformed hashes never verify
+  ✓ passphrase.test.ts > cli prints a hash
+  ✓ passphrase.test.ts > cli rejects short passphrases
+  Test Files  2 passed (2)
+  Tests  10 passed (10)   exit 0
+
+Server typecheck (pnpm -F @hub/server typecheck): exit 0.
+Full server suite (pnpm -F @hub/server exec vitest run): 3 files, 19 tests
+passed (the 9 config tests from Task 3 plus the 10 new ones).
+
+3. MANUAL CHECKS (brief Step 4 and extras)
+------------------------------------------
+- printf 'a long passphrase' | pnpm --silent -F @hub/server hash-passphrase
+  printed one line starting "scrypt:16384:8:1:" and exited 0.
+- printf 'a long passphrase\r\n' | ... printed a single line (the CRLF was
+  stripped). A round trip through verifyPassphrase gave true for
+  'a long passphrase' and false for 'a long passphrase\r\n'.
+- printf 'short\n' | ... printed "Passphrase must be at least 12 characters"
+  and exited 1.
+
+4. ROOT CHECKS (run once before the commit, and again after a small
+   readability edit in passphrase.ts)
+------------------------------------------------------------------
+pnpm test       exit 0: protocol 15, design-model 359, server 19,
+                renderer 52, client 122 tests passed.
+pnpm typecheck  exit 0 across all workspace packages.
+
+5. FILES CHANGED (commit b0d782a, 5 files, all new, under apps/server/src/auth)
+---------------------------------------------------------------------------
+  apps/server/src/auth/passphrase.ts
+  apps/server/src/auth/passphrase.test.ts
+  apps/server/src/auth/limiter.ts
+  apps/server/src/auth/limiter.test.ts
+  apps/server/src/auth/hash-cli.ts
+Not touched: pnpm-lock.yaml, any package.json, any dependency, docs/, .superpowers/
+(other than this report), or any other module.
+
+6. SELF-REVIEW NOTES
+--------------------
+- The brief's values are used verbatim: the scrypt parameters, the 12-character
+  minimum, 5 failures, the 900_000 ms window and lock, and the exact stderr copy.
+- verifyPassphrase is generic over the stored key length, as the brief says.
+  Stored hashes come from the server's credential or environment, never from
+  request input, so this is safe here.
+- The CLI reads stdin with for-await, so it works for pipes and files. On Linux
+  stderr to a pipe is synchronous, so the message is flushed before process.exit(1).
+- Error paths never include the input passphrase. The top-level catch only
+  prints error.message, and scrypt errors do not contain the input.
+- Intentional I/O: hash-cli.ts does stdin and stdout I/O and passphrase.ts uses
+  randomBytes. The brief requires both, so this is a deliberate exception to the
+  "no I/O in src" convention and not an oversight.
+
+7. CONCERNS
+-----------
+a) reset() clears recorded failures only. It does NOT lift an active lock
+   (lockedUntil is untouched). The brief says "reset clears failures" and the
+   interface has no further comment, so I followed it literally. If the
+   controller intends reset() to also end a lockout, that is a one-line change.
+b) The login route (a later task) must check blocked(now) before calling
+   verifyPassphrase, and call reset() after a successful login. fail(now) still
+   records failures while locked, so this ordering is the caller's job.
+c) Running hash-cli.ts interactively on a TTY echoes the typed passphrase, because
+   it does not disable terminal echo. The brief's usage is piped stdin, so I did
+   not add termios handling.

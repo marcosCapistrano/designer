@@ -1,0 +1,133 @@
+TASK 19 REPORT: render file endpoints (plan 3)
+================================================
+
+Status: DONE_WITH_CONCERNS (no blocking issues; concerns listed below)
+Commit: 16782cf feat(server): render manifest, tile and hit map endpoints
+Branch: p3-19 (worktree /home/claude/wt-p3-19), not pushed.
+
+IMPLEMENTED
+-----------
+apps/server/src/design/render-files.ts
+- EMPTY_MANIFEST = { version: 1, pages: [] } (verbatim from the brief).
+- renderDir(dataDir, app) = join(dataDir, 'renders', app).
+- renderRoutes({ dataDir, hasApp }): Hono, to be mounted at /api/apps.
+  - A use() middleware on /:app/render/* runs first for every render route:
+    1. app must match APP_NAME_RE (from @hub/protocol/manifest, the same pattern
+       the app manifest schema uses: /^[a-z][a-z0-9-]{0,38}[a-z0-9]$/).
+       Failure -> 404 { error: 'Not found' }. hasApp is NOT called.
+    2. hasApp(app) false -> 404 { error: 'Unknown app' }.
+  - GET /:app/render/manifest.json: the file bytes, or EMPTY_MANIFEST when the
+    file is missing. content-type application/json, cache-control no-cache.
+  - GET /:app/render/tiles/:key/:tile: key must match /^[0-9a-f]{64}$/ and tile
+    must match /^\d+_\d+\.webp$/. Serves tiles/<key>/<tile> as image/webp with
+    cache-control "private, max-age=31536000, immutable". Missing -> 404 Not found.
+  - GET /:app/render/hitmaps/:file: file must match /^[0-9a-f]{64}\.json$/.
+    Serves hitmaps/<file> as application/json, same immutable cache-control.
+    Missing -> 404 Not found.
+- Paths are built with join() from validated segments only. No resolve(), so an
+  absolute segment cannot replace the base. The strict patterns forbid "/", "\",
+  "." segments and "%" after decoding.
+
+apps/server/src/design/render-files.test.ts (11 tests)
+- The 7 brief tests: manifest without caching; missing manifest is empty;
+  tiles as immutable webp; hit maps; unknown app is 404; rejects malformed names
+  (4 paths from the brief); missing tile is 404.
+- Added 4 security tests (path segments never reach outside the render dir):
+  - traversal, separators, backslash, double-encoded dots and absolute paths in
+    key, tile and file segments (10 URLs), all 404 Not found;
+  - encoded dot segments (%2e%2e) match no route (404);
+  - malformed app names (..%2F..%2Fdemo, %2Fdemo, Demo, -demo, %00, ...) are 404
+    and hasApp is never called (vi.fn asserted);
+  - secret files placed where a traversal would land (renders/<K>.json,
+    tiles/0_0.webp, dataDir/secret.txt) are not served.
+- Fixtures are written with tilePath(), hitMapPath() and MANIFEST_PATH from
+  @hub/protocol, so the tests use the same layout as FsTileStore.
+
+TDD EVIDENCE
+------------
+RED: pnpm -F @hub/server exec vitest run src/design
+  (test file written first, render-files.ts not yet created)
+  Output (tail):
+    FAIL  src/design/render-files.test.ts [ src/design/render-files.test.ts ]
+    Error: Cannot find module './render-files.js' imported from
+      /home/claude/wt-p3-19/apps/server/src/design/render-files.test.ts
+    Test Files  1 failed (1)
+    Tests  no tests
+
+GREEN: pnpm -F @hub/server exec vitest run src/design --reporter=verbose
+  Output (summary):
+    ✓ ... serves the manifest without caching
+    ✓ ... missing manifest is empty
+    ✓ ... serves tiles as immutable webp
+    ✓ ... serves hit maps
+    ✓ ... unknown app is 404
+    ✓ ... rejects malformed names
+    ✓ ... missing tile is 404
+    ✓ ... rejects traversal, separators and absolute paths in every URL segment
+    ✓ ... encoded dot segments do not match any route
+    ✓ ... rejects malformed app names before asking the registry
+    ✓ ... never serves files outside the render dir
+    Test Files  1 passed (1)
+    Tests  11 passed (11)
+
+Mutation check (not committed): with the three validation checks replaced by
+"if (false)", 3 security tests fail (traversal, malformed app names, outside-dir
+files). The original file was restored and confirmed identical (diff, no output).
+
+Repo-wide checks on the committed state (run from /home/claude/wt-p3-19):
+- pnpm test: exit 0. protocol 15 passed; design-model 359 passed; server 68 passed
+  (includes the 11 new tests); renderer 52 passed; client 154 passed.
+- pnpm typecheck: exit 0.
+- Server typecheck (pnpm -F @hub/server typecheck) was failing on the first try
+  because Hono's body Data type rejects Buffer<ArrayBufferLike> under TS 7. Fixed
+  by copying the bytes into Uint8Array<ArrayBuffer> in readOrNull (see concern 2).
+
+FILES CHANGED
+-------------
+- apps/server/src/design/render-files.ts (new, 83 lines)
+- apps/server/src/design/render-files.test.ts (new, 180 lines)
+No other files. No dependency or pnpm-lock.yaml change. docs/ and .superpowers/
+untouched in the worktree. The test runs set TMPDIR to the scratchpad directory
+so mkdtemp fixtures land there (tests otherwise use os.tmpdir(), as db.test.ts does).
+
+CLIENT CONTRACT CHECK (apps/client)
+-----------------------------------
+apps/client/src/canvas/source.ts (StaticTileSource) and
+apps/client/src/net/tile-source.ts (ServerTileSource) build:
+  /api/apps/<encodeURIComponent(app)>/render/manifest.json
+  /api/apps/<app>/render/tiles/<key>/<x>_<y>.webp   (tilePath)
+  /api/apps/<app>/render/hitmaps/<hash>.json         (hitMapPath)
+These match the three routes exactly. Keys are 64-char lowercase hex (sha256),
+tile names are <x>_<y>.webp, and hit map names are <hash>.json. No mismatch found.
+
+SELF-REVIEW NOTES
+-----------------
+- Every URL segment is checked before any fs call: app by APP_NAME_RE, key and
+  tile by KEY_RE and TILE_RE, file by HITMAP_RE. Hono's param decoding is
+  reflected in the tests: %2F decodes to "/" inside a single segment, so a
+  pattern check is needed (the router does not split on it).
+- ENOENT, ENOTDIR and EISDIR are treated as "missing". Other read errors are
+  rethrown (500).
+- No catch-all route was added under /api/apps: a catch-all would shadow routes
+  that plan 6 mounts there. Requests that match none of the three shapes (for
+  example extra path segments) therefore get Hono's default plain-text 404, not
+  the JSON body. Bad segments inside a matched shape always get the JSON body.
+
+CONCERNS
+--------
+1. Manifest bytes are served as stored. A corrupt (unparsable) manifest.json is
+   served as-is, while FsTileStore.readManifest treats it as missing (null). The
+   brief says "the file, or EMPTY_MANIFEST when it is missing", so I followed the
+   brief. If the controller wants the endpoint to match readManifest, it needs
+   JSON.parse and a version check, falling back to EMPTY_MANIFEST.
+2. Hono's body Data type is Uint8Array<ArrayBuffer>, so readOrNull copies each
+   file into a fresh Uint8Array. This costs one copy per request, which is small
+   for webp tiles of 512 px. If large files appear later, use a stream instead.
+3. Hit maps use the same cache-control as tiles ("private, max-age=31536000,
+   immutable"). The brief only said "immutable". They are hash-named, so this
+   seems right, but it is an interpretation.
+4. The app-name pattern is APP_NAME_RE from @hub/protocol/manifest; the brief
+   named no pattern for app. The middleware returns 404 Not found for a
+   malformed name and 404 Unknown app for a well-formed name that hasApp rejects.
+5. The brief said "Expected: 7 pass". The file has 11 tests: the 7 brief tests
+   plus 4 security tests. All 11 pass.

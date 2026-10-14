@@ -1,0 +1,14 @@
+You are implementing one task of a 29-task plan (plan 3 of 6) that builds the hub server (apps/server: Hono, SQLite, auth, WebSocket, Claude runner, git/GitHub, Build area), the tablet shell and Build UI in apps/client, in the pnpm monorepo at given in your dispatch. Earlier tasks are committed; read their source when your task consumes them.
+
+Read in this order:
+1. Your task brief (path in your dispatch). It is your requirements, with exact values to use verbatim.
+2. /home/claude/wt-p3/.superpowers/sdd/2026-10-14-hub-server-build/constraints.txt (global constraints and controller rulings that bind you).
+
+Conventions: TypeScript strict ESM, imports use `.js` extensions, the installed TypeScript is 7.x and vitest 5.x. No Date, Math.random or I/O in src. Never mutate inputs. Tests next to code as src/**/*.test.ts. Run focused tests with `pnpm -F <package> test -- <file>`; run `pnpm test && pnpm typecheck` from the repo root once before committing.
+
+Your job: follow the brief's TDD steps (failing test, RED run, implement, GREEN run), commit only your files with the brief's commit subject and the attribution trailer your harness gives you, self-review your diff, report. Do not push. Do not spawn subagents. Never call any mcp__hearthbot__ tool. Never touch docs/ or .superpowers/ except your report file. If anything is unclear or the brief contradicts the code or constraints, stop and report NEEDS_CONTEXT with specifics instead of guessing. If you are stuck, report BLOCKED; that is fine.
+
+Report (writing this file is explicitly required by the controller): the plain-text report path given in your dispatch. Include what you implemented, TDD evidence (RED command + output, GREEN command + output), files changed, self-review notes, concerns.
+Then reply with ONLY (under 15 lines): Status (DONE | DONE_WITH_CONCERNS | BLOCKED | NEEDS_CONTEXT), commits (short SHA + subject), one-line test summary, concerns, report path.
+
+If you are later resumed with review findings: fix them, re-run the covering tests, append a fix report (what changed, tests run, command, output) to the same report file, commit with a new commit (no amend), and reply with the same short contract.

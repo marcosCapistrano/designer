@@ -1,0 +1,63 @@
+TASK 2 REPORT: Build DTOs and WebSocket messages in @hub/protocol
+Status: DONE
+Worktree: /home/claude/wt-p3b (branch p3b)
+Commit: 6b49c283750aa050d74156e6f338f3afbf213314  feat(protocol): build DTOs, server/client WebSocket messages
+Parent: 5a625d2 docs: plan 3 (hub server, shell, Build area)
+
+IMPLEMENTED
+- packages/protocol/src/api.ts (new): BuildTaskStatus, OPEN_TASK_STATUSES, isOpenTask, CiState,
+  BuildMessageKind, BuildMessage, BuildTask, BuildState, AppSummary, LoginRequest, SendBuildRequest,
+  TaskResponse, StopResponse, ApiErrorBody. Names, field names, field order and values are verbatim from the brief.
+  isOpenTask = OPEN_TASK_STATUSES.includes(status).
+- packages/protocol/src/ws.ts: BuildMessageMsg, BuildTaskMsg, PongMsg; ServerMsg widened to
+  RenderReadyMsg | BuildMessageMsg | BuildTaskMsg | PongMsg (replaces the old single-variant alias);
+  SERVER_MSG_TYPES = ['render.ready','build.message','build.task','pong']; PingMsg; ClientMsg = PingMsg;
+  parseServerMsg(data) and parseClientMsg(data). DTOs come in via `import type` from ./api.js.
+  - parseServerMsg: JSON.parse inside try/catch; the result must be a non-null, non-array object whose
+    `type` is in SERVER_MSG_TYPES, else null. Returns the parsed object.
+  - parseClientMsg: same object check; accepts only type === 'ping' with typeof t === 'number';
+    returns a fresh { type: 'ping', t } so extra fields are dropped.
+- packages/protocol/src/index.ts: appended `export * from './api.js';`.
+- packages/protocol/src/ws.test.ts (new): the five tests from the brief, verbatim names and assertions.
+
+TDD EVIDENCE
+RED command: cd /home/claude/wt-p3b && pnpm -F @hub/protocol exec vitest run src/ws.test.ts
+RED result: exit 1; "Tests 5 failed (5)". Failures were from the missing exports:
+  FAIL src/ws.test.ts > parses known server messages   TypeError: parseServerMsg is not a function
+  FAIL src/ws.test.ts > parseClientMsg accepts ping only   TypeError: parseClientMsg is not a function
+  FAIL src/ws.test.ts > lists every server message type   AssertionError: expected undefined to deeply equal [...]
+  FAIL src/ws.test.ts > open task statuses   TypeError: isOpenTask is not a function
+  (full output: scratchpad t2-red.txt)
+
+GREEN command: pnpm -F @hub/protocol exec vitest run src/ws.test.ts
+GREEN result: "Test Files 1 passed (1)  Tests 5 passed (5)"
+
+Other verification, after the changes:
+- pnpm -F @hub/protocol test          -> Test Files 2 passed (2), Tests 7 passed (7)  (render.test.ts + ws.test.ts)
+- pnpm -F @hub/protocol typecheck     -> tsc --noEmit, exit 0
+- pnpm test (repo root, pnpm -r test) -> exit 0: design-model 359 passed, renderer 52 passed,
+                                         client 122 passed, protocol 7 passed
+- pnpm typecheck (repo root)          -> exit 0 (design-model, protocol, renderer, client)
+
+FILES CHANGED (commit 6b49c28, 4 files, +138 -2)
+- packages/protocol/src/api.ts       (new)
+- packages/protocol/src/ws.ts        (modified)
+- packages/protocol/src/ws.test.ts   (new)
+- packages/protocol/src/index.ts     (modified, +1 line)
+Not touched: package.json, pnpm-lock.yaml, docs/, .superpowers/ (other than this report), anything in /home/claude/wt-p3.
+
+SELF-REVIEW NOTES
+- No zod import anywhere; no Date, Math.random or I/O in src. Tests import from ./index.js like render.test.ts.
+- No code outside packages/protocol references ServerMsg, parseServerMsg or ClientMsg (grep of apps/ and
+  packages/), so the widened union breaks no consumer. The client typecheck passes.
+- api.ts interfaces are split over multiple lines for readability. Fields and their order are unchanged.
+- The ws.ts header comment is replaced with the brief's wording ("Plans 4 and 6 add variants here and to SERVER_MSG_TYPES").
+- api.ts has no runtime imports, so the client bundle gains only the small OPEN_TASK_STATUSES / isOpenTask code.
+
+CONCERNS
+- parseServerMsg checks only the `type` tag, as the brief specifies. A message such as {"type":"pong"}
+  with no `t`, or {"type":"build.task"} with no task, is accepted. Consumers in plans 3 and 4 must not
+  assume the payload shape from parseServerMsg alone. Adding per-variant field checks is a follow-up
+  decision for the controller, not part of this brief.
+- index.ts received a one-line append. If the Task 1 lane also appends to index.ts, the merge may
+  conflict on that line. Resolve it by keeping both exports.

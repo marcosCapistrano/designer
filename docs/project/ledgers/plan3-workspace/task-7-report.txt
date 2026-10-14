@@ -1,0 +1,169 @@
+TASK 7 REPORT: app registry
+===========================
+
+Status: DONE_WITH_CONCERNS (no blockers; concerns are judgment calls listed below)
+Worktree: /home/claude/wt-p3-7 (branch p3-7)
+Commit: fd81863 feat(server): app registry over git checkouts with manifest validation
+Base: 41cc5ce feat(server): scaffold, config with credentials and env scrubbing
+
+WHAT WAS IMPLEMENTED
+--------------------
+apps/server/src/apps/registry.ts
+  - export interface AppEntry { name, dir, adopted, manifest, manifestError }
+  - export class AppRegistry(appsDir)
+      list()     every git checkout directly in appsDir, sorted by name;
+                 a missing appsDir gives []. Rescans on every call, no cache.
+      get(name)  one app, or null for an unknown name or an unsafe name.
+                 Stats only that one directory.
+  - An app is a non-hidden directory directly in appsDir that contains a
+    .git entry (directory or file).
+  - Manifest read from <dir>/.hub/app.json via parseAppManifest from
+    '@hub/protocol/manifest' (APP_MANIFEST_FILE for the path):
+      absent                 -> adopted false, manifest null, manifestError null
+      unparsable / invalid   -> adopted false, manifestError = parser error
+      name != folder name    -> adopted false,
+                                manifestError = manifest name "X" does not match
+                                the folder name "Y"
+      otherwise              -> adopted true, manifest set, manifestError null
+
+apps/server/src/apps/registry.test.ts
+  - The six cases from the brief, using a copy of the Task 1 SPEC_EXAMPLE with
+    the name set per test. Temp dirs come from mkdtempSync(tmpdir()), as in
+    config.test.ts, and are removed in afterEach.
+  - Extra assertions folded into the existing get test (no seventh test, so
+    the count stays at six): '.', 'a\\b', '.hidden' and '' all return null.
+
+TDD EVIDENCE
+------------
+RED command:
+  pnpm -F @hub/server exec vitest run src/apps/registry.test.ts
+RED output (abridged):
+  FAIL  src/apps/registry.test.ts [ src/apps/registry.test.ts ]
+  Error: Cannot find module './registry.js' imported from
+         /home/claude/wt-p3-7/apps/server/src/apps/registry.test.ts
+  Test Files  1 failed (1)
+  Tests  no tests
+
+GREEN command (same command, after registry.ts was written):
+  pnpm -F @hub/server exec vitest run src/apps/registry.test.ts
+GREEN output (abridged):
+  RUN  v5.0.4 /home/claude/wt-p3-7/apps/server
+  Test Files  1 passed (1)
+  Tests  6 passed (6)
+
+Repo-wide check, run from the root before committing:
+  pnpm test       exit 0
+    apps/server     2 files, 15 tests passed (config.test.ts + registry.test.ts)
+    packages/renderer 7 files, 52 tests passed
+    apps/client     16 files, 122 tests passed
+    packages/design-model 14 files, 359 tests passed
+  pnpm typecheck  exit 0 (all 5 workspace projects with a typecheck script)
+
+Temp files: the test process was run with TMPDIR set to the scratchpad
+directory, so the mkdtemp dirs land there, not in /tmp.
+
+FILES CHANGED
+-------------
+  apps/server/src/apps/registry.ts        (new)
+  apps/server/src/apps/registry.test.ts   (new)
+No other files changed. No package.json, pnpm-lock.yaml, docs/ or
+.superpowers/ changes in the commit. The only write to the controller's
+repo is this report file.
+
+SELF-REVIEW NOTES
+-----------------
+  - Invariant: adopted === (manifest !== null). On the name-mismatch case the
+    parsed manifest is NOT returned (manifest stays null), matching the
+    unparsable case.
+  - list() sorts the candidate names with the default sort (UTF-16 code
+    unit order), not localeCompare, so the order does not depend on locale.
+  - list() filters names before stat, so hidden entries and plain files are
+    never stat'ed for .git.
+  - Symlinks are followed (stat, not lstat). A symlink to a git checkout is
+    listed under the link's name.
+  - Errors from readdir other than ENOENT are rethrown. A missing appsDir is
+    the only case treated as empty.
+  - A read error on .hub/app.json other than ENOENT does not throw. It is
+    reported in manifestError as ".hub/app.json could not be read (CODE)",
+    so one broken app does not fail list() for all apps. The message carries
+    only the errno code, not an absolute path.
+  - Checked by hand with a throwaway script in the scratchpad (not committed):
+      .hub is a regular file  -> manifestError ".hub/app.json could not be
+                                 read (ENOTDIR)"
+      no .hub directory       -> absent (no error)
+      symlink to a checkout   -> listed, followed
+      get('.hidden'), get('') -> null
+  - Input arrays are not mutated: filter() returns a new array before sort().
+
+CONCERNS (for the controller to decide; none block the commit)
+--------------------------------------------------------------
+  1. The non-ENOENT manifest read-error branch (the "could not be read (CODE)"
+     message) is not covered by a test. The brief specifies exactly six tests,
+     so I did not add one. A test with .hub as a plain file would cover it.
+  2. The brief's Conventions line says "No Date, Math.random or I/O in src".
+     registry.ts does filesystem I/O (readdir, stat, readFile) because the
+     brief's rules require it. config.ts does the same, so I read the rule as
+     meant for pure modules such as packages/protocol. Please confirm.
+  3. The brief does not say what manifest is when the name does not match. I
+     chose null, for the invariant above. If the UI should show the parsed
+     manifest on a mismatch, that changes the interface contract and the
+     tests.
+  4. Symlink handling (followed) and the sort order are my choices. The brief
+     is silent on both.
+
+FIX ROUND 1
+===========
+Commit: af2e885 test(server): registry guard tests that fail without the guard
+Files changed: apps/server/src/apps/registry.test.ts only (registry.ts unchanged; verified identical to HEAD after the mutation run)
+Test count: 8 (was 6): two new tests added, unsafe-name test rebuilt, not added.
+
+WHAT CHANGED
+------------
+1. Unsafe-name test rebuilt so each rejected name WOULD resolve without the guard.
+   appsDir = root/apps. Fixture: root/.git, apps/.git, apps/alpha/.git,
+   apps/alpha/sub/.git, apps/.hidden/.git, plus apps/alpha\sub/.git.
+   The last one is not in the coordinator's list. It is needed because on Linux
+   a backslash is an ordinary filename character, so get('alpha\\sub') only
+   resolves to a checkout if a directory literally named alpha\sub exists.
+   Asserts null for: 'nope' (unknown), '..', '.', '', 'alpha/sub', 'alpha\\sub',
+   '.hidden'. Positive control: get('alpha') returns the entry.
+2. Added assertions and tests:
+   - 'app without a manifest is not adopted': toMatchObject
+     { adopted: false, manifest: null, manifestError: null }.
+   - 'manifest name must match the folder': now also asserts manifest is null.
+   - 'a .hub that is a plain file reports the read error': manifestError is
+     '.hub/app.json could not be read (ENOTDIR)', adopted false, manifest null.
+
+RED RUN (guard removed: isPlausibleName temporarily replaced with `return true`)
+-----------------------------------------------------------------------------
+Probe first, to confirm every rejected name resolves to a real checkout:
+  ".." -> entry    "." -> entry    "" -> entry    "alpha/sub" -> entry
+  "alpha\\sub" -> entry (dir .../apps/alpha\sub)    ".hidden" -> entry
+Command: TMPDIR=<scratchpad> ./node_modules/.bin/vitest run src/apps/registry.test.ts --reporter=verbose
+Output (grep excerpt):
+  × src/apps/registry.test.ts > AppRegistry > lists git checkouts only, sorted
+    → expected [ '.hidden', 'alpha', 'zeta' ] to deeply equal [ 'alpha', 'zeta' ]
+  × src/apps/registry.test.ts > AppRegistry > get returns null for unknown or unsafe names
+    → expected { name: '..', …(4) } to be null
+  Tests  2 failed | 6 passed (8)
+  vitest exit 1
+The guard was then restored (Edit back to the original body); git status shows
+registry.ts unchanged, and the probe returns null for all six names again.
+
+GREEN RUN (guard restored)
+--------------------------
+Command: pnpm -F @hub/server exec vitest run src/apps/registry.test.ts --reporter=verbose
+Output: 8 of 8 registry tests passed.
+Command: pnpm -F @hub/server test   (run from the worktree root, TMPDIR = scratchpad)
+Output: Test Files 2 passed (2); Tests 17 passed (17); exit 0.
+Command: pnpm -r typecheck
+Output: all workspace typecheck scripts ran, exit 0.
+
+CONCERNS
+--------
+  - Concern 1 from the original report is resolved: the non-ENOENT branch
+    (ENOTDIR here) now has a test.
+  - The extra fixture apps/alpha\sub/.git is a Linux-specific detail (see
+    above), not a deviation from the guard rules.
+  - The mutation run also fails the 'lists git checkouts only' test, because
+    list() relies on the same guard to skip '.hidden'. That is expected.
