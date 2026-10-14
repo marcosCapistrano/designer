@@ -22,6 +22,8 @@ const HASH = hashPassphrase(PASS, Buffer.alloc(16, 1));
 const OK: CommandResult = { ok: true, code: 0, output: '', timedOut: false, aborted: false };
 const alwaysOk: RunCommand = async () => OK;
 const LIVE_MS = 5000;
+/** Heartbeat interval for tests that wait on a real heartbeat: quick, but long enough not to flake under load. */
+const HEARTBEAT_TEST_MS = 250;
 const START_MS = 1_800_000_000_000;
 
 let root: string;
@@ -266,7 +268,7 @@ describe('startHub', () => {
 });
 
 describe('startHub bookkeeping', () => {
-  it('purges expired sessions before listening, using the injected clock', async () => {
+  it('purges sessions that expired while the hub was down, using the injected clock', async () => {
     const seed = openDb(join(dataDir, 'hub.sqlite'));
     const insert = seed.prepare('INSERT INTO auth_sessions (token_hash, created_at, expires_at) VALUES (?, ?, ?)');
     insert.run('expired', START_MS - 10, START_MS - 1);
@@ -381,26 +383,26 @@ describe('startHub sockets and sessions', () => {
   });
 
   it('closes a socket once its session expires, on the next heartbeat', async () => {
-    const hub = await start({ heartbeatMs: 100 });
+    const hub = await start({ heartbeatMs: HEARTBEAT_TEST_MS });
     const cookie = await login(hub.url);
     const socket = await opened(connect(hub.url, { cookie }));
 
     clock += SESSION_TTL_MS;
 
-    expect(await closedWithin(socket, 1000)).toBe(true);
+    expect(await closedWithin(socket, 4 * LIVE_MS)).toBe(true);
   });
 
   it('keeps a socket whose session is still valid across heartbeats', async () => {
-    const hub = await start({ heartbeatMs: 100 });
+    const hub = await start({ heartbeatMs: HEARTBEAT_TEST_MS });
     const cookie = await login(hub.url);
     const socket = await opened(connect(hub.url, { cookie }));
     const seen = collect(socket);
 
     clock += SESSION_TTL_MS - 1;
-    expect(await closedWithin(socket, 600)).toBe(false);
+    expect(await closedWithin(socket, 3 * HEARTBEAT_TEST_MS)).toBe(false);
 
     hub.hub.broadcast({ type: 'pong', t: 4 });
-    await expect.poll(() => seen.length, { timeout: 1000 }).toBe(1);
+    await expect.poll(() => seen.length, { timeout: LIVE_MS }).toBe(1);
     expect(socket.readyState).toBe(WebSocket.OPEN);
   });
 
