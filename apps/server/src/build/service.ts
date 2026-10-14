@@ -39,6 +39,10 @@ interface Prepared {
 export class BuildService {
   private readonly deps: BuildDeps;
   private readonly runs = new Map<string, Run>();
+  /** CI refreshes in flight, by task id, so concurrent callers share one call. */
+  private readonly refreshes = new Map<number, Promise<void>>();
+  /** The poll in flight, so refreshes and polls never read one task's CI at the same time. */
+  private polling: Promise<void> | null = null;
 
   constructor(deps: BuildDeps) {
     this.deps = deps;
@@ -162,8 +166,39 @@ export class BuildService {
     return started;
   }
 
+  /**
+   * Polls CI of every idle review task. It starts after the refreshes already in flight (and any earlier poll)
+   * have settled, and refreshes requested while it runs wait for it, so one green PR is announced once.
+   */
   pollCi(): Promise<void> {
-    return pollCi(this.deps, (app) => this.isRunning(app));
+    const before = [this.polling, ...this.refreshes.values()];
+    const poll: Promise<void> = (async () => {
+      await Promise.allSettled(before);
+      await pollCi(this.deps, (app) => this.isRunning(app));
+    })().finally(() => {
+      if (this.polling === poll) this.polling = null;
+    });
+    this.polling = poll;
+    return poll;
+  }
+
+  /**
+   * Refreshes a task's CI from GitHub, sharing the call with concurrent callers and waiting out a poll.
+   * `needed` is checked on the stored task once the refresh may start, so a task a poll just brought up
+   * to date is not read again.
+   */
+  private refreshOnce(taskId: number, needed: (task: BuildTask) => boolean): Promise<void> {
+    const flying = this.refreshes.get(taskId);
+    if (flying !== undefined) return flying;
+    const flight: Promise<void> = (async () => {
+      if (this.polling !== null) await this.polling.catch(() => undefined);
+      const task = this.deps.store.task(taskId);
+      if (task !== null && needed(task)) await refreshCi(this.deps, taskId);
+    })().finally(() => {
+      this.refreshes.delete(taskId);
+    });
+    this.refreshes.set(taskId, flight);
+    return flight;
   }
 
   private reserve(app: string): Run {
@@ -208,12 +243,26 @@ export class BuildService {
     this.guarded(`cleanup of task ${taskId}`, () => this.failTask(taskId, errorText(err), false));
   }
 
+  /**
+   * Ends a task that never got its work branch. It is closed, not failed: a failed task would be continued
+   * by the next message, which would try to check out a branch that does not exist.
+   */
+  private discard(taskId: number, err: unknown): void {
+    this.guarded(`cleanup of task ${taskId}`, () => {
+      const closed = this.deps.store.updateTask(taskId, { status: 'closed', error: null });
+      addBuildMessage(this.deps, closed.app, taskId, 'error', errorText(err));
+      publishTask(this.deps, closed, false);
+    });
+  }
+
   /** Reads a review task's CI from GitHub when it is still pending and no run is in progress. */
   private async refreshPendingCi(app: string): Promise<void> {
     if (this.isRunning(app)) return;
     try {
       const open = this.deps.store.openTask(app);
-      if (open?.status === 'review' && open.ci === 'pending') await refreshCi(this.deps, open.id);
+      if (open?.status === 'review' && open.ci === 'pending') {
+        await this.refreshOnce(open.id, (task) => task.status === 'review' && task.ci === 'pending');
+      }
     } catch (err) {
       console.warn(`Build state refresh for ${app} failed: ${errorText(err)}`);
     }
@@ -223,7 +272,10 @@ export class BuildService {
   private async prepare(app: string, entry: AppEntry, prompt: string): Promise<Prepared> {
     const { store } = this.deps;
     let task = store.openTask(app);
-    if (task?.status === 'review') task = await refreshCi(this.deps, task.id);
+    if (task?.status === 'review') {
+      await this.refreshOnce(task.id, () => true);
+      task = store.task(task.id);
+    }
     if (task !== null && !isOpenTask(task.status)) task = null;
 
     const git = async <T>(step: () => Promise<T>): Promise<T> => {
@@ -254,7 +306,7 @@ export class BuildService {
       await git(() => repo.createBranchFrom(branch, base));
       return { task: named, created: true };
     } catch (err) {
-      this.abandon(created.id, err);
+      this.discard(created.id, err);
       throw err;
     }
   }
