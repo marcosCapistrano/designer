@@ -19,6 +19,17 @@ function sampleOps(): Op[] {
   ];
 }
 
+// The serialized sample with the home page's root replaced by `root`.
+function filesWithHomeRoot(root: unknown): Record<string, string> {
+  const files = serializeDoc(sampleDoc());
+  files['pages/home.json'] = canonicalStringify({ id: 'home', name: 'Home', route: '/', root });
+  return files;
+}
+
+function homeRoot(children: unknown[]): unknown {
+  return { id: 'n1', kind: 'element', tag: 'main', attrs: {}, style: { base: {} }, children };
+}
+
 describe('serializeDoc and parseDoc', () => {
   test('roundtrip', () => {
     const d = sampleDoc();
@@ -90,6 +101,94 @@ describe('serializeDoc and parseDoc', () => {
     const result = parseDoc(files);
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.error).toContain('tokens.json');
+  });
+
+  test('rejects a null child node', () => {
+    expect(parseDoc(filesWithHomeRoot(homeRoot([null])))).toEqual({
+      ok: false,
+      error: 'pages/home.json: node must be an object',
+    });
+  });
+
+  test('rejects an element without children', () => {
+    const root = { id: 'n1', kind: 'element', tag: 'main', attrs: {}, style: { base: {} } };
+    expect(parseDoc(filesWithHomeRoot(root))).toEqual({
+      ok: false,
+      error: 'pages/home.json: node n1: children must be an array',
+    });
+  });
+
+  test('rejects a root that is not an element', () => {
+    expect(parseDoc(filesWithHomeRoot({ id: 'n1', kind: 'text', text: 'x' }))).toEqual({
+      ok: false,
+      error: 'pages/home.json: root must be an element node',
+    });
+  });
+
+  test.each<[string, unknown, string]>([
+    ['an empty id', { id: '', kind: 'text', text: 'x' }, 'node id must be a non-empty string'],
+    ['an unknown kind', { id: 'n9', kind: 'span' }, 'node n9: kind must be element, text or instance'],
+    ['an element without a tag', { id: 'n9', kind: 'element', attrs: {}, style: { base: {} }, children: [] }, 'node n9: tag must be a string'],
+    ['an element with array attrs', { id: 'n9', kind: 'element', tag: 'p', attrs: [], style: { base: {} }, children: [] }, 'node n9: attrs must be an object'],
+    ['an element style without base', { id: 'n9', kind: 'element', tag: 'p', attrs: {}, style: {}, children: [] }, 'node n9: style must be an object with a base object'],
+    ['a null child inside an element', { id: 'n9', kind: 'element', tag: 'p', attrs: {}, style: { base: {} }, children: [null] }, 'node must be an object'],
+    ['a text node without text', { id: 'n9', kind: 'text' }, 'node n9: text must be a string'],
+    ['an instance without a component', { id: 'n9', kind: 'instance', props: {}, style: { base: {} } }, 'node n9: component must be a string'],
+    ['an instance without props', { id: 'n9', kind: 'instance', component: 'Card', style: { base: {} } }, 'node n9: props must be an object'],
+    ['an instance without style', { id: 'n9', kind: 'instance', component: 'Card', props: {} }, 'node n9: style must be an object with a base object'],
+  ])('rejects %s', (_label, child, reason) => {
+    expect(parseDoc(filesWithHomeRoot(homeRoot([child])))).toEqual({
+      ok: false,
+      error: `pages/home.json: ${reason}`,
+    });
+  });
+
+  test('ignores changes.jsonl, sync.json and archive/ entries', () => {
+    const d = sampleDoc();
+    const files = {
+      ...serializeDoc(d),
+      'changes.jsonl': 'not json at all',
+      'sync.json': '{ broken',
+      'archive/2026-10-01/pages/home.json': '{ broken',
+    };
+    expect(parseDoc(files)).toEqual({ ok: true, value: d });
+  });
+
+  test('rejects other unrecognised top-level files', () => {
+    const files = serializeDoc(sampleDoc());
+    files['notes.txt'] = 'hello';
+    expect(parseDoc(files)).toEqual({ ok: false, error: 'unexpected file "notes.txt"' });
+  });
+
+  test.each(['__proto__', 'constructor', 'prototype'])('rejects the reserved page key %s', (key) => {
+    const home = sampleDoc().pages['home'];
+    if (!home) throw new Error('fixture is missing the home page');
+    const files = serializeDoc(sampleDoc());
+    files[`pages/${key}.json`] = canonicalStringify({ ...home, id: key });
+    expect(parseDoc(files)).toEqual({
+      ok: false,
+      error: `pages/${key}.json: "${key}" is a reserved name`,
+    });
+  });
+
+  test('rejects the reserved component name __proto__', () => {
+    const card = sampleDoc().components['Card'];
+    if (!card) throw new Error('fixture is missing the Card component');
+    const files = serializeDoc(sampleDoc());
+    files['components/__proto__.json'] = canonicalStringify({ ...card, name: '__proto__' });
+    expect(parseDoc(files)).toEqual({
+      ok: false,
+      error: 'components/__proto__.json: "__proto__" is a reserved name',
+    });
+  });
+
+  test.each<[number | string]>([[-1], [1.5], [2 ** 53], ['9']])('rejects seq %s', (seq) => {
+    const files = serializeDoc(sampleDoc());
+    files['meta.json'] = canonicalStringify({ version: 1, seq });
+    expect(parseDoc(files)).toEqual({
+      ok: false,
+      error: 'meta.json: seq must be a non-negative integer',
+    });
   });
 
   test('rejects a file it does not recognise', () => {

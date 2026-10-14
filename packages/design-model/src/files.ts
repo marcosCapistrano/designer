@@ -6,6 +6,11 @@ const META = 'meta.json';
 const TOKENS = 'tokens.json';
 const PAGE_FILE = /^pages\/([^/]+)\.json$/;
 const COMPONENT_FILE = /^components\/([^/]+)\.json$/;
+// Files that sit beside the model in design/ but are not part of the document.
+const IGNORED_FILES = new Set(['changes.jsonl', 'sync.json']);
+const IGNORED_PREFIX = 'archive/';
+// Ids and names become object keys, so these would collide with Object.prototype.
+const RESERVED_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -25,14 +30,17 @@ export function serializeDoc(doc: DesignDoc): Record<string, string> {
   return files;
 }
 
-// Only the structure the rest of the engine relies on is checked. Nested nodes are not
-// validated, so malformed node contents can still throw during the duplicate-id scan.
+// Checks the meta, tokens, page and component files, and every node in them, before the
+// duplicate-id scan. Malformed input returns an error and never throws.
 export function parseDoc(files: Record<string, string>): Result<DesignDoc> {
   const meta = readJsonFile(files, META);
   if (!meta.ok) return meta;
   if (!isRecord(meta.value)) return { ok: false, error: `${META}: expected an object` };
   if (meta.value['version'] !== 1) return { ok: false, error: `${META}: unsupported version` };
-  if (typeof meta.value['seq'] !== 'number') return { ok: false, error: `${META}: seq must be a number` };
+  const seq = meta.value['seq'];
+  if (typeof seq !== 'number' || !Number.isSafeInteger(seq) || seq < 0) {
+    return { ok: false, error: `${META}: seq must be a non-negative integer` };
+  }
 
   const tokens = readJsonFile(files, TOKENS);
   if (!tokens.ok) return tokens;
@@ -41,21 +49,20 @@ export function parseDoc(files: Record<string, string>): Result<DesignDoc> {
   const pages: Record<string, Page> = {};
   const components: Record<string, ComponentDef> = {};
   for (const file of Object.keys(files).sort()) {
-    if (file === META || file === TOKENS) continue;
+    if (file === META || file === TOKENS || isIgnored(file)) continue;
     const pageFile = PAGE_FILE.exec(file);
-    const componentFile = COMPONENT_FILE.exec(file);
+    const match = pageFile ?? COMPONENT_FILE.exec(file);
+    if (match === null) return { ok: false, error: `unexpected file "${file}"` };
+    const key = match[1] ?? '';
+    if (RESERVED_KEYS.has(key)) return { ok: false, error: `${file}: "${key}" is a reserved name` };
     if (pageFile !== null) {
-      const id = pageFile[1] ?? '';
-      const page = readEntry<Page>(files, file, 'id', id);
+      const page = readEntry<Page>(files, file, 'id', key);
       if (!page.ok) return page;
-      pages[id] = page.value;
-    } else if (componentFile !== null) {
-      const componentName = componentFile[1] ?? '';
-      const component = readEntry<ComponentDef>(files, file, 'name', componentName);
-      if (!component.ok) return component;
-      components[componentName] = component.value;
+      pages[key] = page.value;
     } else {
-      return { ok: false, error: `unexpected file "${file}"` };
+      const component = readEntry<ComponentDef>(files, file, 'name', key);
+      if (!component.ok) return component;
+      components[key] = component.value;
     }
   }
 
@@ -79,8 +86,12 @@ function readJsonFile(files: Record<string, string>, name: string): Result<unkno
   }
 }
 
+function isIgnored(file: string): boolean {
+  return IGNORED_FILES.has(file) || file.startsWith(IGNORED_PREFIX);
+}
+
 // A page or component file must hold an object whose id (or name) equals the file name,
-// and whose root is an element node.
+// and whose root is a well-formed element node.
 function readEntry<T>(
   files: Record<string, string>,
   name: string,
@@ -95,11 +106,51 @@ function readEntry<T>(
     return { ok: false, error: `${name}: ${field} must be "${expected}" to match the file name` };
   }
   const root = value['root'];
-  if (!isRecord(root) || root['kind'] !== 'element' || !Array.isArray(root['children'])) {
+  if (!isRecord(root) || root['kind'] !== 'element') {
     return { ok: false, error: `${name}: root must be an element node` };
   }
-  return { ok: true, value: value as T };
+  const problem = nodeProblem(root);
+  return problem === null ? { ok: true, value: value as T } : { ok: false, error: `${name}: ${problem}` };
 }
+
+// Why `value` is not a well-formed node, or null when it is. Element children are checked recursively.
+function nodeProblem(value: unknown): string | null {
+  if (!isRecord(value)) return 'node must be an object';
+  const id = value['id'];
+  if (typeof id !== 'string' || id === '') return 'node id must be a non-empty string';
+  switch (value['kind']) {
+    case 'element':
+      return elementProblem(id, value);
+    case 'text':
+      return typeof value['text'] === 'string' ? null : `node ${id}: text must be a string`;
+    case 'instance':
+      return instanceProblem(id, value);
+    default:
+      return `node ${id}: kind must be element, text or instance`;
+  }
+}
+
+function elementProblem(id: string, node: Record<string, unknown>): string | null {
+  if (typeof node['tag'] !== 'string') return `node ${id}: tag must be a string`;
+  if (!isRecord(node['attrs'])) return `node ${id}: attrs must be an object`;
+  if (!hasBase(node['style'])) return `node ${id}: style must be an object with a base object`;
+  const children = node['children'];
+  if (!Array.isArray(children)) return `node ${id}: children must be an array`;
+  for (const child of children) {
+    const problem = nodeProblem(child);
+    if (problem !== null) return problem;
+  }
+  return null;
+}
+
+function instanceProblem(id: string, node: Record<string, unknown>): string | null {
+  if (typeof node['component'] !== 'string') return `node ${id}: component must be a string`;
+  if (!isRecord(node['props'])) return `node ${id}: props must be an object`;
+  if (!hasBase(node['style'])) return `node ${id}: style must be an object with a base object`;
+  return null;
+}
+
+const hasBase = (style: unknown): boolean => isRecord(style) && isRecord(style['base']);
 
 function fileOf(container: Container): string {
   return container.kind === 'page' ? `pages/${container.key}.json` : `components/${container.key}.json`;
