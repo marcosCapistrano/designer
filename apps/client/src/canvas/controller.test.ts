@@ -3,9 +3,12 @@ import { DEVICES, DEVICE_WIDTH } from '@hub/protocol';
 import type { Device, HitBox, PageRender, RenderManifest } from '@hub/protocol';
 import type { ControllerDeps } from './controller.js';
 import { CanvasController } from './controller.js';
+import { createNullCache } from './cache.js';
 import { fitRect } from './geom.js';
 import type { PointerIn } from './gestures.js';
+import { TileLoader } from './loader.js';
 import type { TileWant } from './loader.js';
+import { visibleTiles } from './tiles.js';
 import { fakeCtx } from './test-utils.js';
 import type { Call } from './test-utils.js';
 
@@ -344,6 +347,73 @@ describe('CanvasController', () => {
     expect(q.length).toBe(0);
   });
 
+  it('resetGestures drops a ghost contact, so the next one-finger drag pans instead of zooming', () => {
+    const { c } = ready();
+    const at = (id: number, kind: PointerIn['kind'], x: number, y: number): PointerIn => ({
+      id,
+      kind,
+      x,
+      y,
+      pointerType: 'touch',
+      button: 0,
+    });
+    c.pointer(at(1, 'down', 100, 100));
+    c.pointer(at(1, 'move', 120, 100));
+    // The pointer-up of finger 1 is lost; the window loses focus.
+    c.resetGestures();
+
+    const before = c.camera;
+    c.pointer(at(2, 'down', 300, 300));
+    c.pointer(at(2, 'move', 320, 300));
+    expect(c.camera.scale).toBe(before.scale);
+    expect(c.camera.x).toBe(before.x - 20 / before.scale);
+  });
+
+  it('resetGestures clears a marquee in progress', async () => {
+    const { c, flush, overlay } = ready();
+    c.setTool('select');
+    const at = (kind: PointerIn['kind'], x: number, y: number): PointerIn => ({
+      id: 1,
+      kind,
+      x,
+      y,
+      pointerType: 'touch',
+      button: 0,
+    });
+    c.pointer(at('down', 0, 0));
+    c.pointer(at('move', 200, 100));
+    flush();
+    expect(overlay.calls.some((call) => call.m === 'strokeRect')).toBe(true);
+    overlay.calls.length = 0;
+
+    c.resetGestures();
+    flush();
+    // The overlay was repainted without the marquee, and the late pointer-up selects nothing.
+    expect(overlay.calls.some((call) => call.m === 'clearRect')).toBe(true);
+    expect(overlay.calls.filter((call) => call.m === 'strokeRect')).toEqual([]);
+    c.pointer(at('up', 200, 100));
+    await settle();
+    expect(c.selection).toBeNull();
+  });
+
+  it('a camera set after the manifest but before the first frame survives the deferred fit', () => {
+    const { c, flush } = harness();
+    c.resize(800, 600, 1);
+    c.setManifest(M);
+    c.setCamera({ x: 120, y: -40, scale: 0.02 });
+    flush();
+    expect(c.camera).toEqual({ x: 120, y: -40, scale: 0.02 });
+  });
+
+  it('a camera set before the manifest arrives survives the first fit', () => {
+    const { c, flush } = harness();
+    c.resize(800, 600, 1);
+    c.setCamera({ x: 120, y: -40, scale: 0.5 });
+    c.setManifest(M);
+    flush();
+    expect(c.camera).toEqual({ x: 120, y: -40, scale: 0.5 });
+  });
+
   it('defers the first fit until a frame exists', () => {
     const { c, flush } = harness();
     c.resize(800, 600, 1);
@@ -355,5 +425,256 @@ describe('CanvasController', () => {
     c.setDevices(new Set<Device>(DEVICES));
     flush();
     expect(c.camera).toEqual(fitRect({ x: 0, y: 0, w: 2824, h: 1000 }, { w: 800, h: 600 }, 40));
+  });
+});
+
+describe('CanvasController with a real TileLoader', () => {
+  // 50 one-screen-tall pages on the Tab S6 Lite in portrait, at MIN_SCALE: every frame is in view and
+  // each has one 0.25 tile, so 150 tiles are visible and the 128-image cache cannot hold them all.
+  const render1 = (device: Device, hash: string): PageRender => ({
+    device,
+    hash,
+    width: DEVICE_WIDTH[device],
+    height: 1000,
+    levels: [
+      { zoom: 0.25, key: hash + 'q', cols: 1, rows: 1 },
+      { zoom: 0.5, key: hash + 'h', cols: 1, rows: 1 },
+      { zoom: 1, key: hash, cols: 3, rows: 2 },
+    ],
+  });
+  const BIG: RenderManifest = {
+    version: 1,
+    pages: Array.from({ length: 50 }, (_, i) => ({
+      pageId: `p${i}`,
+      name: `Page ${i}`,
+      route: `/p${i}`,
+      renders: {
+        base: render1('base', `b${i}`),
+        tablet: render1('tablet', `t${i}`),
+        mobile: render1('mobile', `m${i}`),
+      },
+    })),
+  };
+
+  it('a still camera at MIN_SCALE with more visible tiles than maxImages settles with bounded source calls', async () => {
+    const q: (() => void)[] = [];
+    const tick = async () => {
+      for (const cb of q.splice(0)) cb();
+      await settle();
+    };
+    const source = { tile: vi.fn(async (key: string, x: number, y: number) => new Blob([`${key}/${x}_${y}`])) };
+    const closed = vi.fn();
+    const loader = new TileLoader({
+      source,
+      cache: createNullCache(),
+      onLoad: (key, x, y) => c.tileLoaded(key, x, y),
+      decode: async () => ({ width: 512, height: 512, close: closed }),
+    });
+    const c = new CanvasController({
+      base: fakeCtx().ctx,
+      overlay: fakeCtx().ctx,
+      tiles: loader,
+      hitMaps: defaultHitMaps,
+      requestFrame: (cb) => {
+        q.push(cb);
+      },
+      now: () => 0,
+    });
+    c.resize(800, 1333, 1.5);
+    c.setManifest(BIG);
+    await tick();
+    const fitCalls = source.tile.mock.calls.length;
+    c.setCamera({ x: 0, y: 0, scale: 0.02 });
+    // 150 ids are visible; make sure the scenario really exceeds the cache.
+    const area = { x: 0, y: 0, w: 800 / 0.02, h: 1333 / 0.02 };
+    expect(visibleTiles(c.frames, area, 0.25).length).toBeGreaterThan(128);
+
+    const N = 40;
+    for (let i = 0; i < N; i++) await tick();
+    expect(q.length).toBe(0);
+    const calls = source.tile.mock.calls.length;
+    // The cache is 128 images; the first page's fit view loaded a few tiles of its own before the zoom out.
+    expect(calls).toBeLessThanOrEqual(128 + fitCalls);
+    expect(loader.stats().images).toBeLessThanOrEqual(128);
+
+    for (let i = 0; i < N; i++) await tick();
+    expect(q.length).toBe(0);
+    expect(source.tile.mock.calls.length).toBe(calls);
+  });
+});
+
+describe('CanvasController zoom preview', () => {
+  /** A ready controller whose layers can be moved: `show` records each transform the controller asks for. */
+  function previewReady(now: () => number) {
+    const q: (() => void)[] = [];
+    const flush = () => {
+      while (q.length) q.shift()!();
+    };
+    const base = fakeCtx();
+    const overlay = fakeCtx();
+    const show = vi.fn();
+    const c = new CanvasController({
+      base: base.ctx,
+      overlay: overlay.ctx,
+      setLayerTransform: show,
+      tiles: { get: () => undefined, request: vi.fn() },
+      hitMaps: defaultHitMaps,
+      requestFrame: (cb) => {
+        q.push(cb);
+      },
+      now,
+    });
+    c.resize(800, 600, 1);
+    c.setManifest(M);
+    flush();
+    c.setCamera({ x: 0, y: 0, scale: 0.5 });
+    flush();
+    show.mockClear();
+    return { c, q, flush, base, overlay, show };
+  }
+
+  it('scales the painted layers instead of repainting while the zoom is unsettled', () => {
+    let t = 1000;
+    const { c, q, base, show } = previewReady(() => t);
+    const painted = c.stats().framesPainted;
+    const calls = base.calls.length;
+    c.zoomAt(100, 100, 1.2);
+    q.shift()!(); // one frame only: an unsettled frame schedules the next one itself
+    expect(base.calls.length).toBe(calls);
+    expect(show).toHaveBeenCalledTimes(1);
+    const shown = show.mock.calls[0]![0] as { x: number; y: number; scale: number };
+    // The image was painted at (0, 0) x0.5; the point at screen (100, 100) stays put under the zoom.
+    expect(shown.scale).toBeCloseTo(1.2, 10);
+    expect(shown.x).toBeCloseTo(-20, 8);
+    expect(shown.y).toBeCloseTo(-20, 8);
+    expect(c.stats()).toMatchObject({ lastMode: 'preview', previewFrames: 1, framesPainted: painted + 1 });
+    expect(q.length).toBe(1);
+  });
+
+  it('follows a pan made during the zoom', () => {
+    const { c, q, show } = previewReady(() => 1000);
+    c.zoomAt(100, 100, 1.2);
+    c.panBy(-30, -10);
+    q.shift()!();
+    // Painted at (0, 0) x0.5; the camera is now at (83.3, 50) x0.6, so the image sits at (-50, -30) x1.2.
+    const shown = show.mock.calls[0]![0] as { x: number; y: number; scale: number };
+    expect(shown.x).toBeCloseTo(-50, 8);
+    expect(shown.y).toBeCloseTo(-30, 8);
+    expect(shown.scale).toBeCloseTo(1.2, 10);
+  });
+
+  it('repaints in full, smoothed, and clears the transform once the camera has settled', () => {
+    let t = 1000;
+    const { c, q, flush, base, show } = previewReady(() => t);
+    c.zoomAt(100, 100, 1.2);
+    q.shift()!();
+    show.mockClear();
+    const calls = base.calls.length;
+    t = 1200;
+    flush();
+    expect(c.stats().lastMode).toBe('full');
+    expect(base.calls.length).toBeGreaterThan(calls);
+    expect(lastFill(base.calls)?.smooth).toBe(true);
+    expect(show).toHaveBeenCalledTimes(1);
+    expect(show).toHaveBeenCalledWith(null);
+    // Later frames do not touch the layers again.
+    c.panBy(-5, 0);
+    flush();
+    expect(c.stats().lastMode).toBe('partial');
+    expect(show).toHaveBeenCalledTimes(1);
+  });
+
+  it('repaints at once when the scale leaves the preview range, and previews again from there', () => {
+    let t = 1000;
+    const { c, q, show, base } = previewReady(() => t);
+    c.zoomAt(100, 100, 1.5);
+    q.shift()!();
+    expect(c.stats().lastMode).toBe('preview');
+    show.mockClear();
+    c.zoomAt(100, 100, 1.5); // 2.25x the painted scale
+    q.shift()!();
+    expect(c.stats().lastMode).toBe('full');
+    expect(lastFill(base.calls)?.smooth).toBe(false);
+    expect(show).toHaveBeenCalledTimes(1);
+    expect(show).toHaveBeenLastCalledWith(null);
+    show.mockClear();
+    c.zoomAt(100, 100, 1.1);
+    q.shift()!();
+    expect(c.stats().lastMode).toBe('preview');
+    expect(show.mock.calls[0]![0]).toMatchObject({ scale: expect.closeTo(1.1, 10) });
+  });
+
+  it('repaints at once when zooming out past half the painted scale', () => {
+    const t = 1000;
+    const { c, q } = previewReady(() => t);
+    c.zoomAt(100, 100, 0.6);
+    q.shift()!();
+    expect(c.stats().lastMode).toBe('preview');
+    c.zoomAt(100, 100, 0.7); // 0.42x the painted scale
+    q.shift()!();
+    expect(c.stats().lastMode).toBe('full');
+  });
+
+  it('a change that needs the overlay at the current camera repaints instead of previewing', async () => {
+    const t = 1000;
+    const { c, q, show, overlay } = previewReady(() => t);
+    c.zoomAt(100, 100, 1.2);
+    q.shift()!();
+    show.mockClear();
+    const overlayCalls = overlay.calls.length;
+    await c.tap(15, 15); // selects n3: the highlight is drawn at the camera the user sees
+    q.shift()!();
+    expect(c.stats().lastMode).toBe('full');
+    expect(show).toHaveBeenCalledWith(null);
+    expect(overlay.calls.length).toBeGreaterThan(overlayCalls);
+  });
+
+  it('a resize repaints instead of previewing a cleared canvas', () => {
+    const t = 1000;
+    const { c, q, show } = previewReady(() => t);
+    c.zoomAt(100, 100, 1.2);
+    q.shift()!();
+    show.mockClear();
+    c.resize(800, 600, 1);
+    q.shift()!();
+    expect(c.stats().lastMode).toBe('full');
+    expect(show).toHaveBeenCalledWith(null);
+  });
+
+  it('a device toggle repaints instead of previewing stale frames', () => {
+    const t = 1000;
+    const { c, q, show } = previewReady(() => t);
+    c.zoomAt(100, 100, 1.2);
+    q.shift()!();
+    show.mockClear();
+    c.setDevices(new Set<Device>(['tablet', 'mobile']));
+    q.shift()!();
+    expect(c.stats().lastMode).toBe('full');
+    expect(show).toHaveBeenCalledWith(null);
+  });
+
+  it('does not preview the first frame, which has nothing painted yet', () => {
+    const q: (() => void)[] = [];
+    const show = vi.fn();
+    const c = new CanvasController({
+      base: fakeCtx().ctx,
+      overlay: fakeCtx().ctx,
+      setLayerTransform: show,
+      tiles: { get: () => undefined, request: vi.fn() },
+      hitMaps: defaultHitMaps,
+      requestFrame: (cb) => {
+        q.push(cb);
+      },
+      now: () => 0,
+    });
+    c.resize(800, 600, 1);
+    c.setManifest(M);
+    c.zoomAt(100, 100, 1.2);
+    // The clock never moves, so the zoom stays unsettled and each frame schedules the next.
+    q.shift()!();
+    expect(c.stats()).toMatchObject({ lastMode: 'full', previewFrames: 0 });
+    expect(show).not.toHaveBeenCalled();
+    q.shift()!();
+    expect(c.stats()).toMatchObject({ lastMode: 'preview', previewFrames: 1 });
   });
 });

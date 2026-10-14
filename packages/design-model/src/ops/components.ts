@@ -1,5 +1,13 @@
-import { resolveProps, substituteProps } from '../props.js';
-import { allIds } from '../tree.js';
+import {
+  editedAttrsIssue,
+  propAttrIssue,
+  resolveProps,
+  substituteProps,
+  templatedAttrsIn,
+  withProp,
+} from '../props.js';
+import { validateNodeId } from '../rules.js';
+import { allIds, depthOf, heightOf } from '../tree.js';
 import type {
   ComponentDef,
   DesignDoc,
@@ -12,6 +20,7 @@ import type { HandlerMap } from './handler.js';
 import { validateSubtree } from './structure.js';
 import {
   cycleError,
+  depthError,
   lookupNode,
   ownValue,
   requireNode,
@@ -100,7 +109,11 @@ export const componentHandlers: HandlerMap = {
       if (ownValue(doc.components, op.component) !== undefined) {
         return `Component ${op.component} already exists`;
       }
-      return allIds(doc).includes(op.instanceId) ? `Id ${op.instanceId} already exists` : null;
+      const idProblem = validateNodeId(op.instanceId);
+      if (idProblem !== null) return idProblem;
+      if (allIds(doc).includes(op.instanceId)) return `Id ${op.instanceId} already exists`;
+      // The body becomes a component root, so it is level 1 there.
+      return depthError(1, heightOf(node));
     },
     mutate(draft, op) {
       const { node, parent, index } = requireNode(draft, op.node);
@@ -129,8 +142,12 @@ export const componentHandlers: HandlerMap = {
       if (node.kind !== 'instance') return `Node ${op.node} is not an instance`;
       const def = ownValue(doc.components, node.component);
       if (def === undefined) return `Component ${node.component} not found`;
-      if (Object.hasOwn(def.props, op.prop)) return null;
-      return `Component ${node.component} has no prop "${op.prop}"`;
+      if (!Object.hasOwn(def.props, op.prop)) {
+        return `Component ${node.component} has no prop "${op.prop}"`;
+      }
+      // A value that ends up in an attribute must pass the attribute rules, with the other props as they are.
+      const props = withProp(node.props, op.prop, op.value);
+      return propAttrIssue(def, resolveProps(def, { ...node, props }));
     },
     mutate(draft, op) {
       const inst = requireInstance(draft, op.node);
@@ -155,7 +172,14 @@ export const componentHandlers: HandlerMap = {
       const unknown = Object.keys(op.idMap).find((key) => !known.has(key));
       if (unknown !== undefined) return `idMap has unknown key ${unknown}`;
       const copy = expand(def, node, op.idMap);
-      return validateSubtree(doc, copy) ?? cycleError(doc, container, [copy]);
+      // The copy takes the instance's level, so the body is measured from there.
+      return (
+        validateSubtree(doc, copy) ??
+        cycleError(doc, container, [copy]) ??
+        depthError(depthOf(doc, op.node), heightOf(copy)) ??
+        // Inside a component the copy's own placeholders stay, and the instances of that component fill them in.
+        editedAttrsIssue(doc, container, templatedAttrsIn(copy))
+      );
     },
     mutate(draft, op) {
       const { node, parent, index } = requireNode(draft, op.node);

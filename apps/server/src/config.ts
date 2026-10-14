@@ -23,6 +23,7 @@ export const CREDENTIAL_KEYS: readonly string[] = ['HUB_PASSPHRASE_HASH', 'GITHU
 export const SECRET_ENV_KEYS: readonly string[] = [
   'ANTHROPIC_API_KEY',
   'ANTHROPIC_AUTH_TOKEN',
+  'CLAUDE_CODE_OAUTH_TOKEN',
   'GITHUB_TOKEN',
   'GH_TOKEN',
   'HCLOUD_TOKEN',

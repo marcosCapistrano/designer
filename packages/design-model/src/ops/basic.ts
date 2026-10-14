@@ -1,4 +1,5 @@
 import { validateStyle } from '../css.js';
+import { validateAttrValue } from '../rules.js';
 import {
   DEVICES,
   type DesignDoc,
@@ -7,6 +8,8 @@ import {
   type StyleMap,
   type TextNode,
 } from '../types.js';
+import { editedAttrsIssue, templatedAttr } from '../props.js';
+import { isPlainObject } from '../shape.js';
 import type { HandlerMap } from './handler.js';
 import { lookupNode, ownValue, requireElement, requireNode, validateAttrName } from './util.js';
 
@@ -37,27 +40,26 @@ function assign<T>(record: Record<string, T>, key: string, value: T | null): voi
   else record[key] = structuredClone(value);
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
 // Restore entries come from stored history, so they are checked as unknown data.
 // Returns the reason an entry is malformed, or null.
 function entryProblem(entry: unknown): string | null {
-  if (!isRecord(entry)) return 'Invalid restore entry';
+  if (!isPlainObject(entry)) return 'Invalid restore entry';
   const { kind, key, value } = entry;
   if (kind !== 'page' && kind !== 'component' && kind !== 'tokens') {
     return `Invalid restore entry kind "${String(kind)}"`;
   }
   if (typeof key !== 'string' || key === '') return `Invalid restore entry key for ${kind}`;
+  // Assigning __proto__ would replace the prototype of the record it is written to. constructor and
+  // prototype are plain own keys, and token groups may use them, so undo must accept them.
+  if (key === '__proto__') return `Restore entry key "${key}" is reserved`;
   if (value === null) return null;
-  if (!isRecord(value)) return `Invalid restore value for ${kind} "${key}"`;
+  if (!isPlainObject(value)) return `Invalid restore value for ${kind} "${key}"`;
   if (kind === 'tokens') {
     return Object.values(value).every((v) => typeof v === 'string')
       ? null
       : `Invalid restore value for tokens "${key}"`;
   }
-  return isRecord(value.root) ? null : `Invalid restore value for ${kind} "${key}"`;
+  return isPlainObject(value['root']) ? null : `Invalid restore value for ${kind} "${key}"`;
 }
 
 export const basicHandlers: HandlerMap = {
@@ -98,7 +100,14 @@ export const basicHandlers: HandlerMap = {
       const found = lookupNode(doc, op.node);
       if (!found.ok) return found.error;
       if (found.hit.node.kind !== 'element') return `Node ${op.node} is not an element`;
-      return validateAttrName(op.name);
+      const nameProblem = validateAttrName(op.name);
+      if (nameProblem !== null) return nameProblem;
+      if (op.value === null) return null;
+      // Inside a component, a placeholder in the value is filled in by every instance of it.
+      return (
+        validateAttrValue(op.name, op.value) ??
+        editedAttrsIssue(doc, found.hit.container, templatedAttr(op.node, op.name, op.value))
+      );
     },
     mutate(draft, op) {
       writeEntry(requireElement(draft, op.node).attrs, op.name, op.value);
@@ -120,11 +129,15 @@ export const basicHandlers: HandlerMap = {
 
   setToken: {
     validate(_doc, op) {
+      // group and name become CSS custom property names, so they must match NAME_PATTERN.
       if (!NAME_PATTERN.test(op.group) || !NAME_PATTERN.test(op.name)) {
         return `Invalid token name: group "${op.group}", name "${op.name}"`;
       }
+      if (op.value === null) return null;
+      // validateStyle needs a string. opProblem reports other types first, so this only guards internal callers.
+      if (typeof op.value !== 'string') return 'Malformed op: setToken.value must be a string or null';
       // A token is emitted as a custom property, so its value gets the same checks.
-      return op.value === null ? null : validateStyle(`--${op.group}-${op.name}`, op.value);
+      return validateStyle(`--${op.group}-${op.name}`, op.value);
     },
     mutate(draft, op) {
       const existing = ownValue(draft.tokens, op.group);

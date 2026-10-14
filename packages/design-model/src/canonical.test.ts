@@ -33,6 +33,13 @@ test('sorts keys by code point, not by UTF-16 code unit', () => {
   );
 });
 
+test('sorts an astral key after U+E000 in either insertion order', () => {
+  // By code point U+E000 comes first. Its code unit (0xE000) is above the emoji's high surrogate (0xD83D).
+  const expected = '{\n  "": 2,\n  "\u{1F600}": 1\n}\n';
+  expect(canonicalStringify({ '\u{1F600}': 1, '': 2 })).toBe(expected);
+  expect(canonicalStringify({ '': 2, '\u{1F600}': 1 })).toBe(expected);
+});
+
 test('sorts integer-like keys as strings', () => {
   expect(canonicalStringify({ 2: 'b', 10: 'a' })).toBe('{\n  "10": "a",\n  "2": "b"\n}\n');
 });

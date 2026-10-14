@@ -1,13 +1,23 @@
 import { describe, expect, test } from 'vitest';
-import { applyOp } from '../apply.js';
+import { applyOp, applyOpInternal } from '../apply.js';
 import { canonicalStringify } from '../canonical.js';
 import { sampleDoc } from '../fixtures.js';
+import { nodeProblem } from '../shape.js';
 import type { DesignDoc, DesignNode, ElementNode, Op, Page } from '../types.js';
 
 type DuplicatePage = Extract<Op, { op: 'duplicatePage' }>;
 
+const TOO_DEEP = 'Node tree deeper than 64 levels';
+
 function applied(doc: DesignDoc, op: Op): DesignDoc {
   const result = applyOp(doc, op);
+  if (!result.ok) throw new Error(`expected ok, got: ${result.error}`);
+  return result.value.doc;
+}
+
+// Undo applies a restore op, which only the internal path accepts.
+function undoneBy(doc: DesignDoc, inverse: Op): DesignDoc {
+  const result = applyOpInternal(doc, inverse);
   if (!result.ok) throw new Error(`expected ok, got: ${result.error}`);
   return result.value.doc;
 }
@@ -35,6 +45,15 @@ function element(id: string, children: DesignNode[] = [], tag = 'section'): Elem
 
 function text(id: string, value = 'x'): DesignNode {
   return { id, kind: 'text', text: value };
+}
+
+// A chain of `height` levels: element nodes down to one text leaf. Ids are `${prefix}1` to `${prefix}${height}`.
+function chain(height: number, prefix: string): DesignNode {
+  let node: DesignNode = text(`${prefix}${height}`);
+  for (let level = height - 1; level >= 1; level--) {
+    node = element(`${prefix}${level}`, [node]);
+  }
+  return node;
 }
 
 const pricing: Page = {
@@ -82,7 +101,7 @@ describe('addPage', () => {
     })).toBe('Route / already used');
   });
 
-  test.each(['Pricing', 'pricing_page', 'pricing page', ''])('rejects the page id %j', (id) => {
+  test.each(['Pricing', 'Home', 'a/b', 'pricing_page', 'pricing page', ''])('rejects the page id %j', (id) => {
     expect(rejected(sampleDoc(), {
       op: 'addPage', page: { ...pricing, id },
     })).toBe(`Invalid page id "${id}"`);
@@ -94,11 +113,10 @@ describe('addPage', () => {
     })).toBe('Route pricing must start with /');
   });
 
-  test('accepts a page id named like an Object.prototype member', () => {
-    const next = applied(sampleDoc(), {
-      op: 'addPage', page: { ...pricing, id: 'constructor', route: '/c' },
-    });
-    expect(pageOf(next, 'constructor').route).toBe('/c');
+  test.each(['constructor', 'prototype'])('rejects the page id %s, an Object.prototype member', (id) => {
+    expect(rejected(sampleDoc(), {
+      op: 'addPage', page: { ...pricing, id, route: '/c' },
+    })).toBe(`Invalid page id "${id}"`);
   });
 
   test('rejects a root id that is already in the document', () => {
@@ -117,7 +135,7 @@ describe('addPage', () => {
     const doc = sampleDoc();
     const result = applyOp(doc, { op: 'addPage', page: pricing });
     if (!result.ok) throw new Error(result.error);
-    expect(content(applied(result.value.doc, result.value.inverse))).toEqual(content(doc));
+    expect(content(undoneBy(result.value.doc, result.value.inverse))).toEqual(content(doc));
   });
 });
 
@@ -204,11 +222,52 @@ describe('duplicatePage', () => {
     })).toBe('Invalid page id "Home B"');
   });
 
+  test.each(['constructor', 'a/b'])('rejects the page id %j', (id) => {
+    expect(rejected(sampleDoc(), {
+      ...homeCopy(), page: { id, name: 'Copy', route: '/c' },
+    })).toBe(`Invalid page id "${id}"`);
+  });
+
   test('undo removes the copy', () => {
     const doc = sampleDoc();
     const result = applyOp(doc, homeCopy());
     if (!result.ok) throw new Error(result.error);
-    expect(content(applied(result.value.doc, result.value.inverse))).toEqual(content(doc));
+    expect(content(undoneBy(result.value.doc, result.value.inverse))).toEqual(content(doc));
+  });
+});
+
+// Every id under `node`, in walk order.
+function idsOf(node: DesignNode): string[] {
+  return node.kind === 'element' ? [node.id, ...node.children.flatMap(idsOf)] : [node.id];
+}
+
+describe('duplicatePage whole-tree depth', () => {
+  // The home root gains a chain of 63 levels, so the root itself is 64 levels tall.
+  function homeWithDeepRoot(): DesignDoc {
+    return applied(sampleDoc(), { op: 'insertNode', parent: 'n1', index: 0, node: chain(63, 'd') });
+  }
+
+  function copyOfHome(doc: DesignDoc): DuplicatePage {
+    const ids = idsOf(pageOf(doc, 'home').root);
+    return {
+      op: 'duplicatePage',
+      source: 'home',
+      page: { id: 'home-b', name: 'Home B', route: '/b' },
+      idMap: Object.fromEntries(ids.map((id, i) => [id, `x${i}`])),
+    };
+  }
+
+  test('applies a copy whose root is exactly 64 levels tall', () => {
+    const doc = homeWithDeepRoot();
+    const next = applied(doc, copyOfHome(doc));
+    expect(nodeProblem(pageOf(next, 'home-b').root)).toBeNull();
+  });
+
+  test('rejects a copy whose root would be 65 levels tall', () => {
+    // The source is already past the limit, which the ops never allow. Only the copy's check can stop it.
+    const doc = sampleDoc();
+    pageOf(doc, 'home').root.children.push(chain(64, 'd'));
+    expect(rejected(doc, copyOfHome(doc))).toBe(TOO_DEEP);
   });
 });
 
@@ -219,7 +278,7 @@ describe('removePage', () => {
     if (!result.ok) throw new Error(result.error);
     expect(result.value.doc.pages).toEqual({});
 
-    const undone = applied(result.value.doc, result.value.inverse);
+    const undone = undoneBy(result.value.doc, result.value.inverse);
     expect(content(undone)).toEqual(content(doc));
   });
 

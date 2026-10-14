@@ -1,13 +1,23 @@
 import { describe, expect, test } from 'vitest';
-import { applyOp } from '../apply.js';
+import { applyOp, applyOpInternal } from '../apply.js';
 import { canonicalStringify } from '../canonical.js';
 import { sampleDoc } from '../fixtures.js';
-import { findNode } from '../tree.js';
+import { allocIds, findNode } from '../tree.js';
 import type { DesignDoc, DesignNode, ElementNode, Op } from '../types.js';
+import { nodeProblem } from '../shape.js';
 import { validateSubtree } from './structure.js';
+
+const TOO_DEEP = 'Node tree deeper than 64 levels';
 
 function applied(doc: DesignDoc, op: Op): DesignDoc {
   const result = applyOp(doc, op);
+  if (!result.ok) throw new Error(`expected ok, got: ${result.error}`);
+  return result.value.doc;
+}
+
+// Undo applies a restore op, which only the internal path accepts.
+function undoneBy(doc: DesignDoc, inverse: Op): DesignDoc {
+  const result = applyOpInternal(doc, inverse);
   if (!result.ok) throw new Error(`expected ok, got: ${result.error}`);
   return result.value.doc;
 }
@@ -45,6 +55,21 @@ function element(id: string, children: DesignNode[] = [], tag = 'section'): Elem
 
 function text(id: string, value = 'x'): DesignNode {
   return { id, kind: 'text', text: value };
+}
+
+// A chain of `height` levels: element nodes down to one text leaf. Ids are `${prefix}1` to `${prefix}${height}`.
+function chain(height: number, prefix: string): DesignNode {
+  let node: DesignNode = text(`${prefix}${height}`);
+  for (let level = height - 1; level >= 1; level--) {
+    node = element(`${prefix}${level}`, [node]);
+  }
+  return node;
+}
+
+function homeRoot(doc: DesignDoc): ElementNode {
+  const page = doc.pages['home'];
+  if (!page) throw new Error('fixture is missing the home page');
+  return page.root;
 }
 
 describe('insertNode', () => {
@@ -98,7 +123,7 @@ describe('insertNode', () => {
   test('rejects a negative index', () => {
     expect(rejected(sampleDoc(), {
       op: 'insertNode', parent: 'n2', index: -1, node: text('n9'),
-    })).toContain('out of range');
+    })).toBe('Malformed op: insertNode.index must be a non-negative integer');
   });
 
   test('rejects an invalid tag', () => {
@@ -118,6 +143,65 @@ describe('insertNode', () => {
       node: { id: 'n9', kind: 'instance', component: 'Missing', props: {}, style: { base: {} } },
     })).toBe('Component Missing not found');
   });
+
+  test('rejects an empty node id as a malformed op', () => {
+    expect(rejected(sampleDoc(), {
+      op: 'insertNode', parent: 'n2', index: 0, node: text(''),
+    })).toBe('Malformed op: insertNode.node: node id must be a non-empty string');
+  });
+
+  test.each(['a b', 'x"y', 'n5/n6', 'n9007199254740993'])('rejects the node id %j', (id) => {
+    expect(rejected(sampleDoc(), {
+      op: 'insertNode', parent: 'n2', index: 0, node: text(id),
+    })).toBe(`Invalid node id "${id}"`);
+  });
+
+  test('accepts the id n999999999999999, and allocIds then has no id left to give', () => {
+    const next = applied(sampleDoc(), {
+      op: 'insertNode', parent: 'n2', index: 0, node: text('n999999999999999'),
+    });
+    expect(allocIds(next, 0)).toEqual([]);
+    expect(() => allocIds(next, 1)).toThrow('allocIds would exceed the largest node id n999999999999999');
+  });
+
+  test.each(['script', 'style', 'iframe'])('rejects the denied tag %s', (tag) => {
+    expect(rejected(sampleDoc(), {
+      op: 'insertNode', parent: 'n2', index: 0, node: element('n9', [], tag),
+    })).toBe(`Tag "${tag}" is not allowed`);
+  });
+
+  test('rejects an unsafe URL attribute in the subtree', () => {
+    const node: ElementNode = { ...element('n9'), attrs: { href: 'javascript:alert(1)' } };
+    expect(rejected(sampleDoc(), { op: 'insertNode', parent: 'n2', index: 0, node }))
+      .toBe('Unsafe URL in attribute href');
+  });
+
+  test('rejects a srcdoc attribute in the subtree', () => {
+    const node: ElementNode = { ...element('n9'), attrs: { srcdoc: '<p>x</p>' } };
+    expect(rejected(sampleDoc(), { op: 'insertNode', parent: 'n2', index: 0, node }))
+      .toBe('Attribute srcdoc is not allowed');
+  });
+
+  test('rejects an insert into an img', () => {
+    const withImg = applied(sampleDoc(), {
+      op: 'insertNode', parent: 'n2', index: 0, node: element('n9', [], 'img'),
+    });
+    expect(rejected(withImg, { op: 'insertNode', parent: 'n9', index: 0, node: text('n10') }))
+      .toBe('Void element img cannot have children');
+  });
+
+  test('rejects an inserted img that has children', () => {
+    expect(rejected(sampleDoc(), {
+      op: 'insertNode', parent: 'n2', index: 0, node: element('n9', [text('n10')], 'img'),
+    })).toBe('Void element img cannot have children');
+  });
+
+  test('rejects an instance prop the component does not declare', () => {
+    expect(rejected(sampleDoc(), {
+      op: 'insertNode', parent: 'n1', index: 0,
+      node: { id: 'n9', kind: 'instance', component: 'Card', props: { subtitle: 'x' }, style: { base: {} } },
+    })).toBe('Component Card has no prop "subtitle"');
+  });
 });
 
 describe('removeNode', () => {
@@ -127,7 +211,7 @@ describe('removeNode', () => {
     if (!result.ok) throw new Error(result.error);
     expect(childIds(result.value.doc, 'n2')).toEqual([]);
 
-    const undone = applied(result.value.doc, result.value.inverse);
+    const undone = undoneBy(result.value.doc, result.value.inverse);
     expect(content(undone)).toEqual(content(doc));
   });
 
@@ -162,6 +246,14 @@ describe('moveNode', () => {
     expect(rejected(sampleDoc(), {
       op: 'moveNode', node: 'n2', parent: 'n3', index: 0,
     })).toContain('descendant');
+  });
+
+  test('rejects a move into an img', () => {
+    const withImg = applied(sampleDoc(), {
+      op: 'insertNode', parent: 'n2', index: 0, node: element('n9', [], 'img'),
+    });
+    expect(rejected(withImg, { op: 'moveNode', node: 'n5', parent: 'n9', index: 0 }))
+      .toBe('Void element img cannot have children');
   });
 
   test('rejects a move into itself', () => {
@@ -245,6 +337,12 @@ describe('wrapNodes', () => {
     })).toBe('wrapper must be an element with no children');
   });
 
+  test('rejects a void wrapper', () => {
+    expect(rejected(sampleDoc(), {
+      op: 'wrapNodes', nodes: ['n5'], wrapper: element('n9', [], 'img'),
+    })).toBe('Void element img cannot have children');
+  });
+
   test('rejects a wrapper id that is already in use', () => {
     expect(rejected(sampleDoc(), {
       op: 'wrapNodes', nodes: ['n5'], wrapper: element('n2'),
@@ -262,7 +360,7 @@ describe('wrapNodes', () => {
     const doc = sampleDoc();
     const result = applyOp(doc, { op: 'wrapNodes', nodes: ['n2', 'n5'], wrapper: element('n9') });
     if (!result.ok) throw new Error(result.error);
-    expect(content(applied(result.value.doc, result.value.inverse))).toEqual(content(doc));
+    expect(content(undoneBy(result.value.doc, result.value.inverse))).toEqual(content(doc));
   });
 });
 
@@ -286,6 +384,71 @@ function shellDoc(): DesignDoc {
   doc.components.Shell = { name: 'Shell', props: {}, root: element('n20', [instance('n21', 'Card')]) };
   return doc;
 }
+
+describe('whole-tree depth', () => {
+  test('insertNode applies a payload that ends at level 64 under a level-2 parent', () => {
+    const next = applied(sampleDoc(), { op: 'insertNode', parent: 'n2', index: 1, node: chain(62, 'd') });
+    expect(nodeProblem(homeRoot(next))).toBeNull();
+  });
+
+  test('insertNode rejects a payload that would end at level 65 under a level-2 parent', () => {
+    expect(rejected(sampleDoc(), {
+      op: 'insertNode', parent: 'n2', index: 1, node: chain(63, 'd'),
+    })).toBe(TOO_DEEP);
+  });
+
+  test('insertNode applies a 63-level payload under the page root', () => {
+    const next = applied(sampleDoc(), { op: 'insertNode', parent: 'n1', index: 0, node: chain(63, 'd') });
+    expect(nodeProblem(homeRoot(next))).toBeNull();
+  });
+
+  test('insertNode rejects a 64-level payload under the page root', () => {
+    expect(rejected(sampleDoc(), {
+      op: 'insertNode', parent: 'n1', index: 0, node: chain(64, 'd'),
+    })).toBe(TOO_DEEP);
+  });
+
+  // n2 holds the chain t1 to t40, so t_i is level i + 2 and t28 is level 30.
+  function docWithMovable(height: number): DesignDoc {
+    const withTargets = applied(sampleDoc(), {
+      op: 'insertNode', parent: 'n2', index: 1, node: chain(40, 't'),
+    });
+    return applied(withTargets, { op: 'insertNode', parent: 'n1', index: 2, node: chain(height, 'm') });
+  }
+
+  test('moveNode applies a subtree that ends at level 64 under a level-30 parent', () => {
+    const next = applied(docWithMovable(34), { op: 'moveNode', node: 'm1', parent: 't28', index: 0 });
+    expect(nodeProblem(homeRoot(next))).toBeNull();
+  });
+
+  test('moveNode rejects a subtree that would end at level 65 under a level-30 parent', () => {
+    expect(rejected(docWithMovable(35), {
+      op: 'moveNode', node: 'm1', parent: 't28', index: 0,
+    })).toBe(TOO_DEEP);
+  });
+
+  // n2 holds n3 and the chain d1 to d_height, so wrapping d1 puts it one level lower.
+  function docWithWrapTarget(height: number): DesignDoc {
+    return applied(sampleDoc(), { op: 'insertNode', parent: 'n2', index: 1, node: chain(height, 'd') });
+  }
+
+  test('wrapNodes applies a wrap that ends at level 64 under a level-2 parent', () => {
+    const next = applied(docWithWrapTarget(61), { op: 'wrapNodes', nodes: ['d1'], wrapper: element('w1') });
+    expect(nodeProblem(homeRoot(next))).toBeNull();
+  });
+
+  test('wrapNodes rejects a wrap that would end at level 65 under a level-2 parent', () => {
+    expect(rejected(docWithWrapTarget(62), {
+      op: 'wrapNodes', nodes: ['d1'], wrapper: element('w1'),
+    })).toBe(TOO_DEEP);
+  });
+
+  test('wrapNodes measures the tallest wrapped node, not the first', () => {
+    expect(rejected(docWithWrapTarget(62), {
+      op: 'wrapNodes', nodes: ['n3', 'd1'], wrapper: element('w1'),
+    })).toBe(TOO_DEEP);
+  });
+});
 
 describe('component cycles', () => {
   test('rejects an instance of Card inserted into Card', () => {

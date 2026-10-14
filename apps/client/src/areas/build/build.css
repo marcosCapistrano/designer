@@ -1,0 +1,288 @@
+/* Build area: task card, chat and composer. Plain CSS. Touch targets are at least 44px. */
+
+.build-area {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  min-width: 0;
+  box-sizing: border-box;
+  background: #f8f9fa;
+  color: #202124;
+  font-size: 16px;
+  line-height: 1.4;
+}
+
+/* Task card */
+
+.task-card {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  padding: 12px 16px;
+  background: #fff;
+  border-bottom: 1px solid #dadce0;
+  box-sizing: border-box;
+}
+
+.task-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  min-width: 0;
+}
+
+.task-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.task-status {
+  flex: 0 0 auto;
+  padding: 2px 10px;
+  border-radius: 999px;
+  background: #f1f3f4;
+  color: #5f6368;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.task-status.tone-busy {
+  background: #e8f0fe;
+  color: #1a73e8;
+}
+
+.task-status.tone-ok {
+  background: #e6f4ea;
+  color: #137333;
+}
+
+.task-status.tone-warn {
+  background: #fef7e0;
+  color: #b06000;
+}
+
+.task-status.tone-error {
+  background: #fce8e6;
+  color: #c5221f;
+}
+
+.task-status.tone-done {
+  background: #f1f3f4;
+  color: #5f6368;
+}
+
+.task-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 14px;
+  min-width: 0;
+  color: #5f6368;
+  font-size: 14px;
+}
+
+.task-branch {
+  min-width: 0;
+  color: #202124;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.task-pr {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  color: #1a73e8;
+  font-weight: 600;
+}
+
+.task-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.task-hint {
+  margin: 0;
+  color: #5f6368;
+  font-size: 14px;
+}
+
+.task-error {
+  margin: 0;
+  color: #c5221f;
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+
+/* Message list */
+
+.build-messages {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 0;
+  padding: 12px 16px;
+  box-sizing: border-box;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+}
+
+.build-msg {
+  box-sizing: border-box;
+  max-width: 85%;
+  padding: 10px 14px;
+  border-radius: 16px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.build-msg-user {
+  align-self: flex-end;
+  background: #d2e3fc;
+  border-bottom-right-radius: 4px;
+}
+
+.build-msg-assistant {
+  align-self: flex-start;
+  background: #fff;
+  border: 1px solid #dadce0;
+  border-bottom-left-radius: 4px;
+}
+
+.build-msg-tool {
+  align-self: stretch;
+  max-width: 100%;
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: #f1f3f4;
+  color: #5f6368;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+}
+
+.build-msg-status {
+  align-self: center;
+  max-width: 100%;
+  color: #5f6368;
+  font-size: 13px;
+  font-style: italic;
+  text-align: center;
+}
+
+.build-msg-error {
+  align-self: stretch;
+  max-width: 100%;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: #fce8e6;
+  color: #c5221f;
+  font-size: 14px;
+}
+
+/* Composer */
+
+.build-composer {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  padding: 12px 16px;
+  padding-bottom: max(12px, env(safe-area-inset-bottom));
+  background: #fff;
+  border-top: 1px solid #dadce0;
+  box-sizing: border-box;
+}
+
+.build-error {
+  margin: 0;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: #fce8e6;
+  color: #c5221f;
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+
+.build-input {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 44px;
+  max-height: 40vh;
+  padding: 10px 12px;
+  border: 1px solid #dadce0;
+  border-radius: 10px;
+  background: #fff;
+  color: #202124;
+  font: inherit;
+  font-size: 16px; /* 16px stops iOS zooming in on focus. */
+  resize: vertical;
+}
+
+.build-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+/* Buttons */
+
+.btn {
+  box-sizing: border-box;
+  min-width: 96px;
+  min-height: 44px;
+  padding: 0 18px;
+  border: 1px solid #dadce0;
+  border-radius: 10px;
+  background: #fff;
+  color: #202124;
+  font: inherit;
+  font-size: 16px;
+  font-weight: 600;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+.btn-primary {
+  background: #1a73e8;
+  border-color: #1a73e8;
+  color: #fff;
+}
+
+.btn-stop {
+  border-color: #c5221f;
+  color: #c5221f;
+}
+
+.btn:disabled {
+  background: #f1f3f4;
+  border-color: #e8eaed;
+  color: #9aa0a6;
+  cursor: default;
+}
+
+.btn-primary:disabled {
+  background: #dadce0;
+  border-color: #dadce0;
+  color: #5f6368;
+}
+
+.build-input:focus-visible,
+.btn:focus-visible,
+.task-pr:focus-visible {
+  outline: 3px solid #8ab4f8;
+  outline-offset: 2px;
+}
