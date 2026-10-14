@@ -1,6 +1,7 @@
-import { relative, sep } from 'node:path';
+import { realpath, stat } from 'node:fs/promises';
+import { isAbsolute, join, relative, sep } from 'node:path';
 import { serveStatic } from '@hono/node-server/serve-static';
-import { Hono } from 'hono';
+import { Hono, type MiddlewareHandler } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
 import { csrf } from 'hono/csrf';
 import { HTTPException } from 'hono/http-exception';
@@ -36,6 +37,57 @@ const IMMUTABLE = 'public, max-age=31536000, immutable';
  */
 function cacheControl(clientDir: string, path: string): string {
   return relative(clientDir, path).split(sep)[0] === 'assets' ? IMMUTABLE : 'no-cache';
+}
+
+/** Whether `path` is `root` or lies under it. Both must already be real paths. */
+function isInside(root: string, path: string): boolean {
+  const rel = relative(root, path);
+  return rel === '' || (rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
+}
+
+/**
+ * Whether the client folder may answer this request path. Anything with a segment that starts with a dot
+ * (.env, .git, a dot spelled %2e) is refused, and so is a file whose real path, after following symlinks,
+ * is outside the client folder. A path that does not exist passes: serveStatic answers 404 for it.
+ */
+async function mayServe(clientDir: string, requestPath: string): Promise<boolean> {
+  if (requestPath.split('/').some((segment) => segment.startsWith('.'))) return false;
+  try {
+    const root = await realpath(clientDir);
+    let real = await realpath(join(clientDir, requestPath));
+    if (!isInside(root, real)) return false;
+    // serveStatic answers a directory with its index.html, which may itself be a link.
+    if ((await stat(real)).isDirectory()) real = await realpath(join(real, 'index.html'));
+    return isInside(root, real);
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * The built client, served without login. serveStatic's own onFound only records which file it served: it
+ * builds its response before awaiting onFound, so with a native Response (what app.request() returns in tests)
+ * a header set there is lost, while under serve() the onFound form works. The wrapper sets Cache-Control on the
+ * response serveStatic returns, which is right under both, so it is kept.
+ */
+function clientFiles(clientDir: string): MiddlewareHandler {
+  const served = new WeakMap<object, string>();
+  const files = serveStatic({
+    root: clientDir,
+    onFound: (path, c) => {
+      served.set(c, path);
+    },
+  });
+  return async (c, next) => {
+    const read = c.req.method === 'GET' || c.req.method === 'HEAD';
+    if (read && !(await mayServe(clientDir, c.req.path))) return c.notFound();
+    const res = await files(c, next);
+    const path = served.get(c);
+    if (path !== undefined && res instanceof Response) {
+      res.headers.set('Cache-Control', cacheControl(clientDir, path));
+    }
+    return res;
+  };
 }
 
 /** Largest request body any /api route reads. Chat messages are capped far below this by the Build service. */
@@ -81,26 +133,7 @@ export function createApp(deps: AppDeps): Hono {
   app.route('/api/apps', renderRoutes({ dataDir, hasApp: async (a) => (await registry.get(a)) !== null }));
   app.all('/api/*', (c) => c.json({ error: 'Not found' }, 404));
 
-  if (clientDir) {
-    // serveStatic builds its response before it calls onFound, so a header set through c.header() there
-    // never reaches the client. onFound only records which file was served; the wrapper below sets
-    // Cache-Control on the response serveStatic returns.
-    const served = new WeakMap<object, string>();
-    const files = serveStatic({
-      root: clientDir,
-      onFound: (path, c) => {
-        served.set(c, path);
-      },
-    });
-    app.use('/*', async (c, next) => {
-      const res = await files(c, next);
-      const path = served.get(c);
-      if (path !== undefined && res instanceof Response) {
-        res.headers.set('Cache-Control', cacheControl(clientDir, path));
-      }
-      return res;
-    });
-  }
+  if (clientDir) app.use('/*', clientFiles(clientDir));
 
   app.onError((err, c) => {
     // csrf() and friends throw HTTPException with the response they want sent; do not turn it into a 500.

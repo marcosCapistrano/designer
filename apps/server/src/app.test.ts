@@ -451,6 +451,70 @@ describe('hub app', () => {
     );
   });
 
+  describe('static file safety', () => {
+    let outside: string;
+
+    beforeEach(() => {
+      outside = join(root, 'outside');
+      mkdirSync(outside, { recursive: true });
+      writeFileSync(join(outside, 'secret.txt'), 'top secret');
+      writeFileSync(join(clientDir, '.env'), 'TOKEN=1');
+      mkdirSync(join(clientDir, '.git'), { recursive: true });
+      writeFileSync(join(clientDir, '.git', 'config'), '[core]');
+      mkdirSync(join(clientDir, 'assets', '.hidden'), { recursive: true });
+      writeFileSync(join(clientDir, 'assets', '.hidden', 'x.js'), 'x');
+      symlinkSync(join(outside, 'secret.txt'), join(clientDir, 'link.txt'));
+      symlinkSync(outside, join(clientDir, 'linkdir'));
+      symlinkSync(join(clientDir, 'index.html'), join(clientDir, 'inside-link.html'));
+    });
+
+    it('404s dotfiles and dot directories, however the dot is spelled', async () => {
+      for (const path of ['/.env', '/%2eenv', '/.git/config', '/%2egit/config', '/assets/.hidden/x.js']) {
+        const res = await app.request(path);
+        expect(res.status, path).toBe(404);
+        expect(await res.text(), path).not.toContain('TOKEN');
+      }
+    });
+
+    it('404s a symlink that leaves clientDir, file or directory', async () => {
+      for (const path of ['/link.txt', '/linkdir/secret.txt', '/linkdir/']) {
+        const res = await app.request(path);
+        expect(res.status, path).toBe(404);
+        expect(await res.text(), path).not.toContain('top secret');
+      }
+    });
+
+    it('404s an index.html symlinked out of clientDir', async () => {
+      mkdirSync(join(clientDir, 'sub'));
+      writeFileSync(join(outside, 'index.html'), 'outside index');
+      symlinkSync(join(outside, 'index.html'), join(clientDir, 'sub', 'index.html'));
+      const res = await app.request('/sub/');
+      expect(res.status).toBe(404);
+    });
+
+    it('still serves a symlink that stays inside clientDir', async () => {
+      const res = await app.request('/inside-link.html');
+      expect(res.status).toBe(200);
+      expect(await res.text()).toContain('hub');
+    });
+
+    it('404s traversal spelled with encoded dots or slashes', async () => {
+      writeFileSync(join(root, 'x'), 'above clientDir');
+      for (const path of ['/%2e%2e/x', '/..%2fx', '/../x', '/%2e%2e%2fx', '/assets/..%2f..%2fx']) {
+        const res = await app.request(path);
+        expect(res.status, path).toBe(404);
+        expect(await res.text(), path).not.toContain('above clientDir');
+      }
+    });
+
+    it('keeps the immutable Cache-Control on HEAD', async () => {
+      const res = await app.request('/assets/app-1.js', { method: 'HEAD' });
+      expect(res.status).toBe(200);
+      expect(res.headers.get('cache-control')).toBe('public, max-age=31536000, immutable');
+      expect(await res.text()).toBe('');
+    });
+  });
+
   it('serves no client when clientDir is unset', async () => {
     const bare = createApp({
       sessions: new SessionStore(db),
