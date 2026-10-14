@@ -30,3 +30,11 @@ Tasks 1 and 2a are focused PRs, not a completed Design import flow. Continue on 
 - This API consumes trusted typed state. External JSON decoding and failure-safe atomic persistence remain the next focused task; shared component extraction and saved preview choices still follow. Preserve the user's existing uncommitted continuation-prompt edit.
 
 Validation: all 30 sync fixture tests pass (11 new incremental/replay cases); full workspace typecheck passes. A local full-suite run has 809 passing design-model tests and the same two unchanged performance failures (174/163 ms vs 150 ms), plus 19 passing protocol tests; recursive execution then stops. CI must confirm the complete suite on the follow-up commit. No thresholds were weakened.
+
+## Task 2b — validated atomic snapshots
+
+- User authorized automatic merging and continued implementation. Verified green heads and merged PRs #5 and #6 without deleting branches. Both complete CI runs on #6 passed, including the unchanged performance assertions.
+- Added canonical sync-state file encoding/decoding. External data must have valid routes, source paths, SHA-256 hashes, commits, model baselines and edit operations. The saved document must equal its baseline plus the entire pending log; malformed or mismatched snapshots are rejected.
+- Ruling: live snapshots belong in hub-owned storage outside the app checkout. One atomic file contains the canonical design files, baseline metadata and log together; import never dirties the source checkout. Conventional `design/` files will be materialized on the Build handoff branch for review. This avoids partial multi-file writes and preserves Build's clean-checkout protections.
+- `FsSyncStore` flushes a private temporary snapshot before atomically replacing the committed snapshot. Revision checks and a single-writer reservation prevent stale/concurrent writes in the single hub process. Corrupt existing state is reported, never overwritten or silently reset. Only private temporary files are cleaned up.
+- Validation: 42 sync tests pass, including external-data corruption, stale writes, concurrent writes, failed persistence and restart recovery; workspace typecheck passes.
