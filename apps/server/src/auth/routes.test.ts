@@ -27,12 +27,23 @@ afterEach(() => {
   db.close();
 });
 
-async function login(passphrase: string): Promise<Response> {
-  return app.request('/api/login', {
+/** A separate app with its own limiter and clock, for the lock tests. */
+function appWith(limiter: LoginLimiter, now?: () => number): Hono {
+  const other = new Hono();
+  other.route('/api', authRoutes({ sessions, limiter, passphraseHash: HASH, now }));
+  return other;
+}
+
+async function loginVia(target: Hono, passphrase: string): Promise<Response> {
+  return target.request('/api/login', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ passphrase }),
   });
+}
+
+function login(passphrase: string): Promise<Response> {
+  return loginVia(app, passphrase);
 }
 
 function tokenFrom(res: Response): string {
@@ -79,12 +90,51 @@ describe('auth routes', () => {
     expect(await res.json()).toEqual({ error: 'Too many attempts. Try again in 15 minutes.' });
   });
 
+  it('concurrent wrong logins cannot exceed the limit', async () => {
+    const local = appWith(new LoginLimiter(), () => 1_000);
+    const statuses = await Promise.all(
+      Array.from({ length: 8 }, () => loginVia(local, 'wrong').then((res) => res.status)),
+    );
+    expect(statuses.filter((s) => s === 401)).toHaveLength(5);
+    expect(statuses.filter((s) => s === 429)).toHaveLength(3);
+  });
+
+  it('locked attempts do not extend the lock', async () => {
+    let t = 0;
+    const local = appWith(new LoginLimiter(), () => t);
+    for (t = 0; t < 5; t += 1) {
+      expect((await loginVia(local, 'wrong')).status).toBe(401);
+    }
+    t = 600_000;
+    for (let i = 0; i < 6; i += 1) {
+      expect((await loginVia(local, i % 2 === 0 ? 'wrong' : PASS)).status).toBe(429);
+    }
+    t = 900_004;
+    expect((await loginVia(local, PASS)).status).toBe(204);
+  });
+
+  it('a body without a string passphrase is 400', async () => {
+    const notJson = await app.request('/api/login', { method: 'POST', body: 'not json' });
+    expect(notJson.status).toBe(400);
+    expect(await notJson.json()).toEqual({ error: 'passphrase is required' });
+    const notString = await app.request('/api/login', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ passphrase: 42 }),
+    });
+    expect(notString.status).toBe(400);
+    expect(await notString.json()).toEqual({ error: 'passphrase is required' });
+  });
+
   it('logout revokes the session', async () => {
     const token = tokenFrom(await login(PASS));
     const cookie = `hub_session=${token}`;
     expect((await app.request('/api/secret', { headers: { cookie } })).status).toBe(200);
     const out = await app.request('/api/logout', { method: 'POST', headers: { cookie } });
     expect(out.status).toBe(204);
+    const cleared = out.headers.get('set-cookie') ?? '';
+    expect(cleared).toContain('Max-Age=0');
+    expect(cleared).toContain('Path=/');
     expect((await app.request('/api/secret', { headers: { cookie } })).status).toBe(401);
   });
 
@@ -111,6 +161,23 @@ describe('auth routes', () => {
     expect(readCookie('a=1; hub_session=xyz; b=2', 'hub_session')).toBe('xyz');
     expect(readCookie('a=1; b=2', 'hub_session')).toBeUndefined();
     expect(readCookie(undefined, 'hub_session')).toBeUndefined();
+  });
+
+  it('readCookie accepts no space after the semicolon', () => {
+    expect(readCookie('a=1;hub_session=xyz', 'hub_session')).toBe('xyz');
+  });
+
+  it('readCookie accepts spaces around the equals sign', () => {
+    expect(readCookie('hub_session = xyz', 'hub_session')).toBe('xyz');
+  });
+
+  it('readCookie returns the first of duplicate cookies', () => {
+    expect(readCookie('hub_session=first; hub_session=second', 'hub_session')).toBe('first');
+  });
+
+  it('readCookie does not match a longer name', () => {
+    expect(readCookie('xhub_session=evil', 'hub_session')).toBeUndefined();
+    expect(readCookie('xhub_session=evil; hub_session=real', 'hub_session')).toBe('real');
   });
 
   it('session reports login state', async () => {

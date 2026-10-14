@@ -12,6 +12,7 @@ export interface AuthDeps {
 }
 
 const SESSION_MAX_AGE_S = 2_592_000;
+const LOCKED_ERROR = 'Too many attempts. Try again in 15 minutes.';
 
 /** Reads `passphrase` from a JSON body. Anything else, including a non-JSON body, yields undefined. */
 async function readPassphrase(c: Context): Promise<string | undefined> {
@@ -34,11 +35,16 @@ export function authRoutes(deps: AuthDeps): Hono {
   const app = new Hono();
 
   app.post('/login', async (c) => {
-    const at = now();
-    if (limiter.blocked(at)) {
-      return c.json({ error: 'Too many attempts. Try again in 15 minutes.' }, 429);
+    if (limiter.blocked(now())) {
+      return c.json({ error: LOCKED_ERROR }, 429);
     }
     const passphrase = await readPassphrase(c);
+    // Other requests may have reached the limit while this one read its body, so the lock is checked
+    // again here. From this check to fail() or reset() there is no await, so nothing interleaves.
+    const at = now();
+    if (limiter.blocked(at)) {
+      return c.json({ error: LOCKED_ERROR }, 429);
+    }
     if (passphrase === undefined) {
       return c.json({ error: 'passphrase is required' }, 400);
     }
