@@ -10,7 +10,8 @@
     "test": "vitest run",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.node.json",
     "size": "node scripts/check-size.mjs dist 150000",
-    "dev:renders": "tsx dev/render-fixtures.ts"
+    "dev:renders": "tsx dev/render-fixtures.ts",
+    "test:e2e": "tsx dev/render-fixtures.ts --pages 50 --seed 1 && playwright test"
   },
   "dependencies": {
     "@hub/protocol": "workspace:*",
@@ -20,6 +21,7 @@
   "devDependencies": {
     "@hub/design-model": "workspace:*",
     "@hub/renderer": "workspace:*",
+    "@playwright/test": "1.56.1",
     "@preact/preset-vite": "^2.10.6",
     "@types/node": "^22.20.5",
     "fake-indexeddb": "^6.2.5",
