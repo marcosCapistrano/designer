@@ -1,5 +1,6 @@
 import { ownValue } from './ops/util.js';
 import { resolveProps, substituteProps } from './props.js';
+import { VOID_TAGS } from './rules.js';
 import type {
   DesignDoc,
   DesignNode,
@@ -10,10 +11,6 @@ import type {
   Result,
   StyleMap,
 } from './types.js';
-
-const VOID_TAGS: ReadonlySet<string> = new Set([
-  'area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta', 'source', 'track', 'wbr',
-]);
 
 // Written in this order, so the tablet block comes before the mobile block.
 const BREAKPOINTS: readonly [Exclude<Device, 'base'>, string][] = [
@@ -75,10 +72,19 @@ function takeNode(scope: Scope): Result<null> {
   return { ok: true, value: null };
 }
 
+// Never throws (Ruling 39): a doc that bypasses validation is reported as a failed export.
 export function exportPage(
   doc: DesignDoc,
   pageId: string,
 ): Result<{ html: string; css: string }> {
+  try {
+    return buildPage(doc, pageId);
+  } catch (err) {
+    return { ok: false, error: `Export failed: ${messageOf(err)}` };
+  }
+}
+
+function buildPage(doc: DesignDoc, pageId: string): Result<{ html: string; css: string }> {
   const page = ownValue(doc.pages, pageId);
   if (page === undefined) return { ok: false, error: `Page ${pageId} not found` };
 
@@ -94,6 +100,11 @@ export function exportPage(
     ok: true,
     value: { html: renderHtml(root.value), css: renderCss(doc, root.value) },
   };
+}
+
+function messageOf(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  return typeof err === 'string' ? err : 'unknown error';
 }
 
 function expandNode(node: DesignNode, scope: Scope): Result<Out> {
@@ -265,8 +276,10 @@ const CSS_STRING_ESCAPES: Record<string, string> = {
   '<': '\\3C ',
   '>': '\\3E ',
   '\n': '\\A ',
+  '\r': '\\D ',
+  '\f': '\\C ',
 };
 
 function cssString(value: string): string {
-  return value.replace(/["\\<>\n]/g, (ch) => CSS_STRING_ESCAPES[ch] ?? ch);
+  return value.replace(/["\\<>\n\r\f]/g, (ch) => CSS_STRING_ESCAPES[ch] ?? ch);
 }
