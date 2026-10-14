@@ -5,30 +5,33 @@ import type { SocketHub } from './hub.js';
 
 export const WS_PATH = '/ws';
 export const HEARTBEAT_MS = 30_000;
+const MAX_PAYLOAD_BYTES = 64 * 1024;
 
 /**
  * Accepts WebSocket upgrades on WS_PATH only, and only when `isAuthed` accepts the request's cookie header.
- * Every other upgrade is refused before the socket is accepted. The returned close() stops the heartbeat,
- * terminates every client and detaches the upgrade listener.
+ * Every other upgrade is refused before the socket is accepted. A request target that does not parse, or a
+ * `isAuthed` that throws, is refused the same way instead of crashing the process. The returned close() stops
+ * the heartbeat, terminates every client and detaches the upgrade listener.
  */
 export function attachWebSocket(
   server: Server,
   hub: SocketHub,
   opts: { isAuthed: (cookieHeader: string | undefined) => boolean; heartbeatMs?: number },
 ): { wss: WebSocketServer; close(): void } {
-  const wss = new WebSocketServer({ noServer: true });
+  const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_PAYLOAD_BYTES });
 
   const onUpgrade = (req: IncomingMessage, socket: Duplex, head: Buffer): void => {
-    if (new URL(req.url ?? '/', 'http://hub').pathname !== WS_PATH) {
+    if (pathOf(req.url) !== WS_PATH) {
       refuse(socket, 'HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n');
       return;
     }
-    if (!opts.isAuthed(req.headers.cookie)) {
+    if (!allowed(opts.isAuthed, req.headers.cookie)) {
       refuse(socket, 'HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n');
       return;
     }
     wss.handleUpgrade(req, socket, head, (ws) => {
       hub.add(ws);
+      ws.on('error', () => ws.terminate());
       ws.on('pong', () => hub.markAlive(ws));
       ws.on('message', (d) => hub.handleMessage(ws, d.toString()));
       ws.on('close', () => hub.remove(ws));
@@ -48,6 +51,24 @@ export function attachWebSocket(
       wss.close();
     },
   };
+}
+
+/** The URL pathname, or null when the request target does not parse. */
+function pathOf(url: string | undefined): string | null {
+  try {
+    return new URL(url ?? '/', 'http://hub').pathname;
+  } catch {
+    return null;
+  }
+}
+
+/** A check that throws refuses the request. */
+function allowed(check: (cookieHeader: string | undefined) => boolean, cookie: string | undefined): boolean {
+  try {
+    return check(cookie);
+  } catch {
+    return false;
+  }
 }
 
 /** Writes the refusal and destroys the socket. The error listener stops a client reset from crashing the process, since http drops its own once the upgrade is emitted. */
