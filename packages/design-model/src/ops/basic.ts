@@ -8,6 +8,7 @@ import {
   type StyleMap,
   type TextNode,
 } from '../types.js';
+import { editedAttrsIssue, templatedAttr } from '../props.js';
 import { isPlainObject } from '../shape.js';
 import type { HandlerMap } from './handler.js';
 import { lookupNode, ownValue, requireElement, requireNode, validateAttrName } from './util.js';
@@ -101,7 +102,12 @@ export const basicHandlers: HandlerMap = {
       if (found.hit.node.kind !== 'element') return `Node ${op.node} is not an element`;
       const nameProblem = validateAttrName(op.name);
       if (nameProblem !== null) return nameProblem;
-      return op.value === null ? null : validateAttrValue(op.name, op.value);
+      if (op.value === null) return null;
+      // Inside a component, a placeholder in the value is filled in by every instance of it.
+      return (
+        validateAttrValue(op.name, op.value) ??
+        editedAttrsIssue(doc, found.hit.container, templatedAttr(op.node, op.name, op.value))
+      );
     },
     mutate(draft, op) {
       writeEntry(requireElement(draft, op.node).attrs, op.name, op.value);

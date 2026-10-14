@@ -4,18 +4,55 @@ import { applyOp } from './apply.js';
 import { exportPage } from './export.js';
 import { parseDoc, serializeDoc } from './files.js';
 import { sampleDoc } from './fixtures.js';
-import { allIds, allocIds } from './tree.js';
+import { allIds, allocIds, findNode, walkDoc } from './tree.js';
 import { DEVICES, type DesignDoc, type DesignNode, type ElementNode, type Op } from './types.js';
 import { validateDoc } from './validate.js';
 
 // Strings an attacker or a careless editor might send as a value or a name.
 const HOSTILE = ['"', '<', '!important', '(', 'javascript:x', '__proto__', 'url(', '}', 'var(--x)', 'constructor'];
-const text: fc.Arbitrary<string> = fc.oneof(fc.constantFrom(...HOSTILE), fc.string({ maxLength: 8 }));
+// Placeholders for the props of the Link component in templatedDoc, and values that read like a script URL.
+const TEMPLATED = ['{{label}}', '{{url}}', 'x{{label}}', '{{url}}{{label}}', '{{missing}}'];
+const SCRIPTY = ['JavaScript: The Good Parts', 'javascript:alert(1)', ' java\tscript:x', '/ok', 'Go'];
+const text: fc.Arbitrary<string> = fc.oneof(
+  { weight: 2, arbitrary: fc.constantFrom(...HOSTILE) },
+  { weight: 4, arbitrary: fc.constantFrom(...TEMPLATED) },
+  { weight: 3, arbitrary: fc.constantFrom(...SCRIPTY) },
+  { weight: 2, arbitrary: fc.string({ maxLength: 8 }) },
+);
+
+// The sample doc plus a Link component, <a href="{{url}}">{{label}}</a>, and an instance of it whose label
+// reads like a script URL. That is valid, because the label only feeds text, until an op lets it reach an attribute.
+function templatedDoc(): DesignDoc {
+  const doc = sampleDoc();
+  doc.components['Link'] = {
+    name: 'Link',
+    props: { url: { default: '/home' }, label: { default: 'Go' } },
+    root: {
+      id: 'n20',
+      kind: 'element',
+      tag: 'a',
+      attrs: { href: '{{url}}' },
+      style: { base: {} },
+      children: [{ id: 'n21', kind: 'text', text: '{{label}}' }],
+    },
+  };
+  doc.pages['home']?.root.children.push({
+    id: 'n22',
+    kind: 'instance',
+    component: 'Link',
+    props: { url: '/a', label: 'JavaScript: The Good Parts' },
+    style: { base: {} },
+  });
+  doc.meta.seq = 23;
+  return doc;
+}
 
 // One op, described by random numbers. buildOp turns it into a real op against the doc at that point,
 // so every id the op uses exists in that doc, is fresh, or is made up on purpose.
 interface Spec {
   kind: number;
+  // Three times in four, ops aim at the component side of the doc (its elements and the instances).
+  focus: number;
   a: number;
   b: number;
   c: number;
@@ -28,7 +65,8 @@ interface Spec {
 }
 
 const spec: fc.Arbitrary<Spec> = fc.record({
-  kind: fc.integer({ min: 0, max: 7 }),
+  kind: fc.integer({ min: 0, max: 10 }),
+  focus: fc.integer({ min: 0, max: 3 }),
   a: fc.nat(),
   b: fc.nat(),
   c: fc.nat(),
@@ -36,7 +74,7 @@ const spec: fc.Arbitrary<Spec> = fc.record({
   v: fc.option(text, { nil: null }),
   prop: fc.constantFrom('padding', 'color', '--x', 'Bad Prop', 'margin', 'not-a-prop'),
   tag: fc.constantFrom('div', 'span', 'img', 'script', 'Div', 'section', 'br'),
-  attr: fc.constantFrom('href', 'title', 'data-x', 'onclick', 'style', 'class', 'src', 'srcdoc', 'data-d-id'),
+  attr: fc.constantFrom('href', 'title', 'data-x', 'alt', 'onclick', 'style', 'class', 'src', 'srcdoc', 'data-d-id'),
   device: fc.constantFrom(...DEVICES),
 });
 
@@ -44,6 +82,17 @@ const spec: fc.Arbitrary<Spec> = fc.record({
 function pickId(doc: DesignDoc, index: number): string {
   const pool = [...allIds(doc), ...allocIds(doc, 2), 'missing', 'n0'];
   return pool[index % pool.length] ?? 'missing';
+}
+
+// An element inside a component, or an instance: what an edit on the component side aims at.
+function pickFocus(doc: DesignDoc, index: number): string {
+  const pool: string[] = [];
+  walkDoc(doc, (node, container) => {
+    if (node.kind === 'instance' || (node.kind === 'element' && container.kind === 'component')) {
+      pool.push(node.id);
+    }
+  });
+  return pool[index % Math.max(pool.length, 1)] ?? 'missing';
 }
 
 function freshId(doc: DesignDoc): string {
@@ -66,7 +115,7 @@ function newNode(doc: DesignDoc, s: Spec): DesignNode {
 }
 
 function buildOp(doc: DesignDoc, s: Spec): Op {
-  const node = pickId(doc, s.a);
+  const node = s.focus > 0 ? pickFocus(doc, s.a) : pickId(doc, s.a);
   switch (s.kind) {
     case 0:
       return { op: 'setStyle', node, device: s.device, prop: s.prop, value: s.v };
@@ -82,19 +131,43 @@ function buildOp(doc: DesignDoc, s: Spec): Op {
       return { op: 'removeNode', node };
     case 6:
       return { op: 'moveNode', node, parent: pickId(doc, s.b), index: s.c % 4 };
-    default: {
-      const wrapper: ElementNode = { id: freshId(doc), kind: 'element', tag: s.tag, attrs: {}, style: { base: {} }, children: [] };
+    case 7: {
+      const attrs = s.v === null ? {} : { [s.attr]: s.v };
+      const wrapper: ElementNode = { id: freshId(doc), kind: 'element', tag: s.tag, attrs, style: { base: {} }, children: [] };
       const nodes = s.c % 2 === 0 ? [node] : [node, pickId(doc, s.b)];
       return { op: 'wrapNodes', nodes, wrapper };
     }
+    case 8:
+      return { op: 'setInstanceProp', node: pickId(doc, s.a), prop: s.c % 3 === 0 ? 'url' : 'label', value: s.v };
+    case 9:
+      return { op: 'detachInstance', node, idMap: idMapFor(doc, node) };
+    default:
+      return { op: 'extractComponent', node, component: `Ex${s.c % 3}`, instanceId: freshId(doc) };
   }
+}
+
+// An id map for detaching `node`: every node of its component, each mapped to a fresh id. Empty when `node`
+// is not an instance, which makes the op fail, as it should.
+function idMapFor(doc: DesignDoc, node: string): Record<string, string> {
+  const hit = findNode(doc, node);
+  if (hit?.node.kind !== 'instance') return {};
+  const def = doc.components[hit.node.component];
+  if (!def) return {};
+  const ids: string[] = [];
+  const visit = (n: DesignNode): void => {
+    ids.push(n.id);
+    if (n.kind === 'element') n.children.forEach(visit);
+  };
+  visit(def.root);
+  const fresh = allocIds(doc, ids.length);
+  return Object.fromEntries(ids.map((id, i) => [id, fresh[i] ?? id]));
 }
 
 describe('op fuzz', () => {
   test('random op sequences keep the doc valid and reloadable', () => {
     fc.assert(
       fc.property(fc.array(spec, { minLength: 1, maxLength: 30 }), (specs) => {
-        let doc = sampleDoc();
+        let doc = templatedDoc();
         for (const s of specs) {
           const result = applyOp(doc, buildOp(doc, s));
           if (!result.ok) continue;
@@ -104,9 +177,9 @@ describe('op fuzz', () => {
         expect(validateDoc(doc)).toBeNull();
         expect(parseDoc(serializeDoc(doc))).toEqual({ ok: true, value: doc });
       }),
-      { numRuns: 200 },
+      { numRuns: 500, seed: 0xf6 },
     );
-  }, 20000);
+  }, 60000);
 });
 
 // Mutates a JSON value at a path chosen by `steps`: each step picks a child by index. Returns a new value.

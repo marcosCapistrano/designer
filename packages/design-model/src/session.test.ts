@@ -467,3 +467,30 @@ describe('DesignSession changes', () => {
     expect(new DesignSession(sampleDoc(), [[], []]).changelist()).toEqual([]);
   });
 });
+
+// F6: the doc is checked as well, so a session is never built on something that is not a doc.
+const BAD_PAD_OP = { op: 'explode' } as unknown as Op;
+
+describe('DesignSession doc', () => {
+  test.each<[string, unknown, string]>([
+    ['null', null, 'doc must be an object'],
+    ['undefined', undefined, 'doc must be an object'],
+    ['an empty object', {}, 'meta must be an object with version 1 and a non-negative integer seq'],
+    ['a string', 'doc', 'doc must be an object'],
+    ['pages that is null', { ...sampleDoc(), pages: null }, 'pages must be an object'],
+    ['a page without a root', { ...sampleDoc(), pages: { home: { id: 'home', name: 'Home', route: '/' } } }, 'page home: root must be an element node'],
+  ])('refuses %s', (_label, doc, reason) => {
+    expect(DesignSession.create(doc as DesignDoc)).toEqual({ ok: false, error: `DesignSession: ${reason}` });
+    expect(() => new DesignSession(doc as DesignDoc)).toThrow(new TypeError(`DesignSession: ${reason}`));
+  });
+
+  test('refuses a bad doc before it looks at the changes', () => {
+    const result = DesignSession.create(null as unknown as DesignDoc, [[BAD_PAD_OP]]);
+    expect(result).toEqual({ ok: false, error: 'DesignSession: doc must be an object' });
+  });
+
+  test('accepts the sample doc', () => {
+    const result = DesignSession.create(sampleDoc());
+    expect(result.ok).toBe(true);
+  });
+});

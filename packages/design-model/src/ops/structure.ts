@@ -1,5 +1,12 @@
 import { validateStyle } from '../css.js';
-import { propAttrIssue, resolveProps } from '../props.js';
+import {
+  editedAttrsIssue,
+  propAttrIssue,
+  resolveProps,
+  templatedAttrs,
+  templatedAttrsIn,
+  type TemplatedAttr,
+} from '../props.js';
 import {
   validateAttrValue,
   validateNodeId,
@@ -9,6 +16,7 @@ import {
 import { allIds, depthOf, heightOf, isDescendant, type Container, type Located } from '../tree.js';
 import {
   DEVICES,
+  type ComponentDef,
   type DesignDoc,
   type DesignNode,
   type ElementNode,
@@ -44,6 +52,7 @@ export function validateSubtree(
     taken: new Set(allIds(doc)),
     extra: ctx.extraIds ?? new Set<string>(),
     seen: new Set<string>(),
+    attrs: new Map<ComponentDef, TemplatedAttr[]>(),
   };
   return checkNode(doc, node, state);
 }
@@ -52,6 +61,17 @@ interface IdState {
   taken: ReadonlySet<string>;
   extra: ReadonlySet<string>;
   seen: Set<string>;
+  // The templated attributes of each component, found once for all the instances of it in the subtree.
+  attrs: Map<ComponentDef, TemplatedAttr[]>;
+}
+
+function attrsOf(state: IdState, def: ComponentDef): TemplatedAttr[] {
+  let attrs = state.attrs.get(def);
+  if (attrs === undefined) {
+    attrs = templatedAttrs(def);
+    state.attrs.set(def, attrs);
+  }
+  return attrs;
 }
 
 function checkNode(doc: DesignDoc, node: DesignNode, state: IdState): string | null {
@@ -70,7 +90,7 @@ function checkNode(doc: DesignDoc, node: DesignNode, state: IdState): string | n
     for (const prop of Object.keys(node.props)) {
       if (!Object.hasOwn(def.props, prop)) return `Component ${node.component} has no prop "${prop}"`;
     }
-    return propAttrIssue(def, resolveProps(def, node)) ?? checkStyle(node.style);
+    return propAttrIssue(def, resolveProps(def, node), attrsOf(state, def)) ?? checkStyle(node.style);
   }
 
   const tagProblem = validateTag(node.tag);
@@ -124,7 +144,8 @@ export const structureHandlers: HandlerMap = {
       return (
         validateSubtree(doc, op.node) ??
         cycleError(doc, found.hit.container, [op.node]) ??
-        depthError(depthOf(doc, op.parent) + 1, heightOf(op.node))
+        depthError(depthOf(doc, op.parent) + 1, heightOf(op.node)) ??
+        editedAttrsIssue(doc, found.hit.container, templatedAttrsIn(op.node))
       );
     },
     mutate(draft, op) {
@@ -206,7 +227,10 @@ export const structureHandlers: HandlerMap = {
       if (wrapperProblem !== null) return wrapperProblem;
       // The wrapper takes the first node's level, so the wrapped nodes each move down one level.
       const tallest = hits.reduce((height, hit) => Math.max(height, heightOf(hit.node)), 0);
-      return depthError(depthOf(doc, first.node.id) + 1, tallest);
+      return (
+        depthError(depthOf(doc, first.node.id) + 1, tallest) ??
+        editedAttrsIssue(doc, first.container, templatedAttrsIn(op.wrapper))
+      );
     },
     mutate(draft, op) {
       const [firstId] = op.nodes;
