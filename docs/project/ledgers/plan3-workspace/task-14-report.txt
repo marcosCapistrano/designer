@@ -1,0 +1,109 @@
+TASK 14 REPORT: Build naming and command runner
+Plan 3 (hub server), branch p3-14, worktree /home/claude/wt-p3-14
+
+STATUS: DONE_WITH_CONCERNS
+
+COMMIT
+  647c671 feat(server): build naming helpers and process-group command runner
+
+WHAT WAS IMPLEMENTED
+  apps/server/src/build/naming.ts
+    - branchSlug(prompt, id): first 6 words of the lowercased prompt (non-alphanumerics
+      become separators, empty words dropped), joined with '-', cut to 40 characters,
+      trailing '-' stripped; empty becomes 'task'; '-<id>' appended.
+    - prTitle(prompt): first line, whitespace collapsed and trimmed; over 72 characters
+      becomes the first 71 plus '…'; empty becomes 'Hub build task'.
+    - prBody(prompts): the exact body from the brief.
+    - summarizeTool(name, input, cwd): Bash ('$ ' + first line, cut to 160 + '…'),
+      Read/Edit/Write/NotebookEdit (path relative to cwd when inside it, else absolute),
+      Grep/Glob (pattern), anything else or non-object input -> name.
+    - buildSystemPrompt(branch): the exact text from the brief (no trailing newline).
+    - fixPrompt(c, r): the exact text from the brief.
+  apps/server/src/build/commands.ts
+    - Types BuildCommandName, BuildCommand, CommandResult, RunCommand; constants
+      OUTPUT_TAIL (4000), COMMAND_TIMEOUT_MS (900000).
+    - resolveBuildCommands(dir, manifest): a non-null manifest yields install,
+      typecheck, test from manifest.build. Otherwise package.json is read (missing or
+      unparsable -> []); package manager is pnpm (pnpm-lock.yaml), else yarn (yarn.lock),
+      else npm; install is 'pnpm|yarn install --frozen-lockfile', 'npm ci' with
+      package-lock.json, else 'npm install'; typecheck when scripts.typecheck is a
+      string; test when scripts.test is a string without 'no test specified'.
+    - runCommand: spawn('bash', ['-c', cmd]) with env { ...scrubEnv(process.env), CI: '1' },
+      detached, stdio ['ignore','pipe','pipe']. stdout and stderr are appended to one
+      string, trimmed to the last 4000 characters once it exceeds 8000. Timeout or abort
+      sends SIGTERM to the process group (process.kill(-pid)), then SIGKILL after 5 s.
+      ok = code === 0 && !timedOut && !aborted. Resolves once, on 'close' (or 'error').
+  apps/server/src/build/naming.test.ts: 15 tests (all brief cases).
+  apps/server/src/build/commands.test.ts: 12 tests (7 resolveBuildCommands, 5 runCommand;
+    all brief cases plus the no-lockfile npm install case and the unparsable package.json case).
+
+FILES CHANGED (all new, committed)
+  apps/server/src/build/naming.ts
+  apps/server/src/build/naming.test.ts
+  apps/server/src/build/commands.ts
+  apps/server/src/build/commands.test.ts
+  No package.json, pnpm-lock.yaml, docs/ or .superpowers/ changes (this report aside).
+
+TDD EVIDENCE
+  RED command: cd /home/claude/wt-p3-14 && pnpm -F @hub/server exec vitest run src/build/naming.test.ts src/build/commands.test.ts
+  RED output (excerpt, exit 1):
+    FAIL  src/build/commands.test.ts [ src/build/commands.test.ts ]
+    Error: Cannot find module './commands.js' imported from .../apps/server/src/build/commands.test.ts
+    FAIL  src/build/naming.test.ts [ src/build/naming.test.ts ]
+    Error: Cannot find module './naming.js' imported from .../apps/server/src/build/naming.test.ts
+    Test Files  2 failed (2)
+    Tests  no tests
+  Full output: /tmp/claude-0/-home-claude/d289a493-967d-56ba-9311-db4aba7933de/scratchpad/t14-red.txt
+
+  GREEN command: cd /home/claude/wt-p3-14 && pnpm -F @hub/server exec vitest run src/build/naming.test.ts src/build/commands.test.ts
+  GREEN output (excerpt, exit 0):
+    Test Files  2 passed (2)
+    Tests  27 passed (27)
+  Full output: /tmp/claude-0/-home-claude/d289a493-967d-56ba-9311-db4aba7933de/scratchpad/t14-green.txt
+
+  Flakiness check (timing-sensitive command tests, 3 runs): 12 passed each run.
+  Server typecheck: pnpm -F @hub/server typecheck -> exit 0 (tsc --noEmit).
+
+  Root checks (required before commit): pnpm test && pnpm typecheck (run from repo root)
+    pnpm test      -> exit 0
+      packages/protocol      Test Files 3 passed, Tests 15 passed
+      packages/design-model  Test Files 14 passed, Tests 359 passed
+      apps/server            Test Files 3 passed, Tests 36 passed (config 9 + build 27)
+      packages/renderer      Test Files 7 passed, Tests 52 passed
+      apps/client            Test Files 16 passed, Tests 122 passed
+    pnpm typecheck -> exit 0 across all workspace packages.
+  Test runs used TMPDIR set to the scratchpad directory, so the tests' temp project
+  directories (os.tmpdir) landed there and not in /tmp.
+
+SELF-REVIEW NOTES
+  - naming.ts imports only types from commands.ts (erased at runtime), so the naming
+    tests do not load config.ts or child_process.
+  - Only @hub/protocol/manifest is imported, as a type (AppManifest). zod is not loaded.
+  - scrubEnv is used exactly as exported by Task 3; config.ts was not modified.
+  - runCommand's group kill is guarded by try/catch (ESRCH after the group exits).
+  - The 'close' handler flushes the per-stream StringDecoders, so a multi-byte UTF-8
+    character split across chunks is not corrupted in the output tail.
+  - Grace timer and timeout timer are cleared on settle; the abort listener is removed.
+  - A signal that is already aborted when runCommand starts kills the group at once.
+  - Test counts: the brief says "16 pass", but its own enumerated cases total 25. The
+    suite has 27 (15 naming + 12 commands). Nothing was dropped to reach a count.
+
+CONCERNS (non-blocking, for the controller)
+  1. Brief count mismatch: "Expected: 16 pass" does not match its enumerated cases (25)
+     or the implemented suite (27). Every enumerated case is covered.
+  2. Choices the brief did not spell out:
+     - NotebookEdit reads input.notebook_path (falls back from file_path), its real field.
+     - An 'error' event from spawn resolves with code null and the message appended to
+       output, so a bad cwd does not crash the caller.
+     - A Bash summary without a string command, or a Read/Edit/Write/Grep/Glob call
+       without its string field, falls back to the tool name.
+     - resolveBuildCommands checks typecheck and test with typeof === 'string', so an
+       empty script string still counts as present.
+     - Output is trimmed once it exceeds 2 * OUTPUT_TAIL (strictly greater than 8000).
+  3. Module I/O: the convention "no I/O in src" cannot apply literally here. The brief
+     requires reading package.json and lockfile existence (resolveBuildCommands) and
+     spawning processes (runCommand). Both are I/O by design, so I kept them in this
+     module as specified. The pure helpers in naming.ts do no I/O.
+  4. The 'close' event resolves the command. A background grandchild that keeps stdout
+     open after the shell exits holds the result until the timeout kills the group.
+     This matches the brief's timeout behaviour.

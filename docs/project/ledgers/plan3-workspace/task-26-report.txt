@@ -1,0 +1,176 @@
+TASK 26 REPORT: app list and per-app Design / Build / Deploy tabs
+
+Worktree: /home/claude/wt-p3-26 (branch p3-26, BASE a999e0e)
+Commit:   7a68b93 feat(client): app list and per-app Design/Build/Deploy tabs
+Status:   DONE_WITH_CONCERNS
+Not pushed.
+
+================================================================
+1. WHAT WAS IMPLEMENTED
+================================================================
+
+apps/client/src/shell/AppList.tsx  (new)
+- export function AppList({ api, ws }).
+- Loads api.apps() on mount and again on every build.task message (ws.on). A request
+  counter means only the newest request may update the view, so an older response
+  never overwrites a newer one.
+- <ul data-testid="app-list">. Each row is <li><a data-testid="app-<name>"
+  href="#/apps/<enc>/build">, containing:
+    * the name;
+    * a badge: "Adopted" or "Not adopted", with title={manifestError ?? ''};
+    * status text: running ? 'Claude is working' : buildStatus ? STATUS_LABEL[buildStatus] : ''.
+- No apps (loaded, empty list): <p data-testid="no-apps"> with the exact brief copy.
+- Load errors: <p role="alert" data-testid="apps-error"> with errorText(e).
+  The no-apps message is not shown while the list is still loading or has failed.
+
+apps/client/src/shell/AppView.tsx  (new)
+- export function AppView({ app, area, api, ws }).
+- Header: <a href="#/" data-testid="back">All apps</a> and the app name.
+- <nav role="tablist">: one <a role="tab" data-testid="tab-<area>" aria-selected
+  href={formatRoute(...)}> per AREAS entry, labelled with AREA_LABEL.
+- Body container: position:relative; flex:1; min-height:0; overflow:hidden.
+    * design: <CanvasView key={app} source={...} cache={...} />, where source is
+      new ServerTileSource(app, ws) and cache is createIdbCache(`hub-tiles-${app}`).
+    * build:  <BuildArea key={app} app={app} api={api} ws={ws} />.
+    * deploy: <p data-testid="deploy-placeholder">Deploy is not set up yet.</p>.
+
+apps/client/src/canvas/CanvasView.tsx  (modified, one line)
+- Root style position:fixed;inset:0 -> position:absolute;inset:0.
+
+================================================================
+2. ADAPTATIONS AND DEVIATIONS FROM THE BRIEF TEXT
+================================================================
+
+- Hooks hoisting: the brief shows useMemo calls inside the design branch of the JSX.
+  That would change hook order when the user switches tabs, which breaks the rules
+  of hooks. The source and cache useMemo calls are at the top level of AppView,
+  with the brief's dependency arrays ([app]). Behaviour is the same.
+- createIdbCache already takes a dbName argument (default 'hub-tiles'), so no
+  adaptation was needed. Confirmed in a browser: the design tab creates IndexedDB
+  database "hub-tiles-demo" for app "demo".
+- STATUS_LABEL is exported from src/areas/build/state.ts, not from the shell. AppList
+  imports it from there. errorText is exported from src/areas/build/TaskCard.tsx and
+  is imported from there too.
+- Extra markup, none of it changing a brief testid or text: an <li> wrapper per row
+  (valid HTML inside a <ul>); an <h1>Apps</h1> heading on the list page; an
+  h1 with the app name in the AppView header; data-testid="badge-<name>" on the badge;
+  role="alert" on the error paragraphs; aria-selected written as the strings
+  'true'/'false', matching CanvasView's aria-pressed.
+- Commit trailer: I used the harness trailer "Co-Authored-By: Claude Haiku 5.5
+  <noreply@anthropic.com>" with the Claude-Session line. constraints.txt says the
+  harness trailer replaces any trailer text in the brief, and my dispatch named
+  "Claude Opus 5.5 (1M context)". The controller should confirm which one stays.
+
+================================================================
+3. TDD EVIDENCE
+================================================================
+
+- There is no RED/GREEN cycle for this task. The brief's Task 26 has three steps:
+  Step 1 implement, Step 2 verify, Step 3 commit. It has no failing-test step.
+- The client's committed unit tests run in vitest's node environment with no DOM,
+  and the brief does not add an e2e spec for this task. So no committed test covers
+  AppList or AppView. This is a gap, not a choice I made; see Concerns.
+- Verification in place of TDD: I wrote a throwaway browser harness
+  (apps/client/verify-tmp/: index.html, main.tsx, playwright.config.ts, verify.spec.ts)
+  that rendered AppList and AppView with a real ApiClient and WsClient. Their network
+  calls were routed by Playwright: /api/apps, /api/apps/demo/build, and
+  /api/apps/demo/render/* (served from .dev-renders). A fake WebSocket let the spec
+  send build.task messages. The harness was deleted before the commit and is not in it.
+  Its nine checks all passed:
+    1. app list: two rows, hrefs (#/apps/demo/build and #/apps/other%20app/build),
+       Adopted / Not adopted badges, status text "Pull request open" and "Claude is
+       working", badge title "bad manifest";
+    2. no apps: exact no-apps copy, empty app-list;
+    3. load error (HTTP 500 {error:'boom'}): apps-error reads "boom", no-apps hidden;
+    4. build.task reloads the list (second fetch shows "Merged");
+    5. design tab: canvas box equals its body box, tile requests are made, no
+       canvas-error, IndexedDB has "hub-tiles-demo";
+    6. build tab: assistant message rendered, build-input visible, no canvas,
+       .build-area height equals its body height;
+    7. deploy tab: placeholder copy exact, tab click changes the hash and aria-selected;
+    8. back link: href "#/", click returns to the app list;
+    9. 390px width: list gutter padding-left 16px, Deploy tab right edge inside the
+       viewport, no horizontal page scroll.
+  Final run: "9 passed (10.4s)", exit 0.
+
+================================================================
+4. COMMANDS AND OUTPUT (after the change, in /home/claude/wt-p3-26)
+================================================================
+
+- pnpm -F @hub/client typecheck  -> exit 0 (tsc for tsconfig.json and tsconfig.node.json).
+- pnpm -F @hub/client test       -> Test Files 21 passed (21); Tests 154 passed (154).
+- pnpm -F @hub/client build      -> exit 0; dist/assets/index-*.js 38.11 kB, gzip 14.69 kB.
+- pnpm -F @hub/client size       -> "JS gzip total: 14795 bytes (limit 150000)", exit 0.
+  This measures the harness bundle only. main.tsx is untouched and does not import
+  AppList or AppView, so the shell components are not in this bundle.
+- Repo root: pnpm test -> exit 0 (design-model 644 passed; server 178 passed, 1 skipped;
+  renderer 52 passed; client 154 passed). pnpm typecheck -> exit 0.
+- Canvas regression: pnpm -F @hub/client test:e2e e2e/canvas.spec.ts with CI=1.
+  Both runs after the change gave "5 passed". The first run was started before I
+  had a working port check (see section 5), so I reran it under a valid check, and
+  the second run is the one that counts:
+    "Running 5 tests using 1 worker" / "5 passed (6.1s)", exit 0.
+  Baseline before the change, for comparison: "5 passed (9.2s)".
+
+================================================================
+5. PORT CHECK AND ENVIRONMENT NOTES
+================================================================
+
+- The controller asked me to wait until nothing listens on port 4173 before the e2e run.
+  My first check used "ss -ltn | grep", but ss is not installed in this container, so
+  grep silently reported "free". That check was invalid. I replaced it with three
+  independent checks: lsof -nP -iTCP:4173 -sTCP:LISTEN; /proc/net/tcp (state 0A,
+  port 0x10DD); and a direct TCP connect to 127.0.0.1:4173, which was refused. All
+  three showed the port free. The counting run started right after an lsof check
+  showed it free, and used CI=1 so it starts its own server and never reuses a
+  foreign one.
+- I did not poll with sleep (foreground sleep is blocked in this shell). Each check
+  ran immediately before a run, and all of them showed the port free.
+- Port 5199 was held by another process (PID 15254, not mine). I left it alone and ran
+  my throwaway dev server on port 5377, which I then released.
+- Temporary files outside scratch: I briefly wrote a typecheck log into
+  .superpowers/sdd/2026-10-14-hub-server-build/ and deleted it at once. I also wrote a
+  test log to /tmp/claude-0/root-test.log and deleted it. The brief allows writing only
+  the report file under .superpowers/, so I am disclosing the log. The commit message
+  file was in the scratchpad directory.
+
+================================================================
+6. FILES CHANGED (commit 7a68b93)
+================================================================
+
+- apps/client/src/shell/AppList.tsx   (new, 112 lines)
+- apps/client/src/shell/AppView.tsx   (new, 70 lines)
+- apps/client/src/canvas/CanvasView.tsx (1 line: fixed -> absolute)
+
+Not touched: main.tsx, vite.config.ts, public/sw.js, e2e specs, docs/, packages/.
+
+================================================================
+7. SELF-REVIEW NOTES
+================================================================
+
+- AppList effect cleanup sets live=false and removes the ws listener. Stale responses
+  are dropped by the request counter, and the no-apps message is shown only when a
+  successful load returned an empty list.
+- AppView: key={app} on CanvasView and BuildArea means switching apps remounts them, so
+  each app gets its own ServerTileSource and cache (both memoised per app).
+- CanvasView's effect reads source and cache once at mount, which is why the per-app
+  memo matters. Tile loads for design go to /api/apps/<app>/render/..., as the
+  throwaway checks showed.
+- Styles are inline strings, following CanvasView. Touch targets are at least 44px tall.
+
+================================================================
+8. CONCERNS
+================================================================
+
+1. No committed test covers AppList or AppView. The brief specifies none, client unit
+   tests have no DOM, and I was not allowed to add e2e specs. Coverage so far is the
+   throwaway harness only. A later task should add a Playwright spec for these pages.
+2. AppList does not reload when the WebSocket reconnects. It reloads only on build.task,
+   as the brief says. A build.task missed while the socket was down leaves the badges
+   stale until the next build.task. A reload on ws.onStatus('open') would close that gap;
+   I did not add it because the brief specifies only build.task.
+3. AppList and AppView are not reachable from the running app, because main.tsx is
+   untouched. Wiring is for the shell task, so the size check (14795 bytes) does not
+   measure them.
+4. The commit trailer conflict described in section 2 needs the controller's decision.
+   The commit is not amended.

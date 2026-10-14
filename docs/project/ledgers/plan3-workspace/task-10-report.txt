@@ -1,0 +1,59 @@
+Task 10 report: Agent SDK runner
+Status: DONE
+Branch: p3-10 (worktree /home/claude/wt-p3-10)
+Commit: d2d04a7 feat(server): Agent SDK runner with bypass permissions and a deploy-guard hook
+Not pushed.
+
+IMPLEMENTED
+- apps/server/src/claude/sdk.ts (new)
+  - AUTH_FAILED_MESSAGE (verbatim from brief).
+  - RunnerContext { env, oauthToken }.
+  - guardHook(cwd): HookCallback. Non-PreToolUse input gives {}. checkToolUse reason gives hookSpecificOutput deny; no reason gives {}.
+  - buildQueryOptions(opts, ctx): Options. Keys exactly as brief: cwd, resume (only when truthy), permissionMode bypassPermissions, allowDangerouslySkipPermissions, disallowedTools = DEPLOY_DENY_RULES, hooks.PreToolUse (no matcher), canUseTool (always deny with the verbatim message), allowedTools, mcpServers, settingSources ['project'], systemPrompt preset claude_code with optional append, env = scrubEnv(ctx.env) plus CLAUDE_CODE_OAUTH_TOKEN from oauthToken only. No abortController.
+  - MapState / newMapState(), mapMessage(msg, state), finalEvent(state, { resume, aborted, thrown }) in the brief's rule order.
+  - SdkClaudeRunner: constructor({ oauthToken?, env?, queryFn? } = {}) with defaults process.env, null, and query. run(opts) creates an AbortController linked to opts.signal (already-aborted handled), iterates queryFn({ prompt, options: { ...buildQueryOptions, abortController } }) through mapMessage, catches throws, removes the listener in finally, and always yields exactly one finalEvent.
+- apps/server/src/claude/sdk.test.ts (new): 13 tests, plus 1 live test with test.skipIf(!process.env.HUB_LIVE_CLAUDE). Unit tests inject a fake queryFn only. The live test was not run and HUB_LIVE_CLAUDE is unset.
+
+TDD EVIDENCE
+RED: cd /home/claude/wt-p3-10 && pnpm -F @hub/server exec vitest run src/claude/sdk.test.ts
+  Output (relevant part):
+    FAIL  src/claude/sdk.test.ts [ src/claude/sdk.test.ts ]
+    Error: Cannot find module './sdk.js' imported from /home/claude/wt-p3-10/apps/server/src/claude/sdk.test.ts
+    Test Files  1 failed (1)
+    Tests  no tests
+
+GREEN: same command after writing sdk.ts
+  Output:
+    Test Files  1 passed (1)
+    Tests  13 passed | 1 skipped (14)
+  Verbose: all 13 unit tests pass; "live: answers with the subscription login" is skipped.
+
+Typecheck: pnpm -F @hub/server typecheck exit 0 (after one fix in the test: CanUseTool returns Promise<PermissionResult | null>, so the test reads result?.behavior).
+
+Root (once, before commit): pnpm test exit 0
+  apps/server: Test Files 16 passed (16); Tests 150 passed | 1 skipped (151)
+  packages/renderer: Tests 52 passed (52)
+  apps/client: Tests 154 passed (154)
+Root: pnpm typecheck exit 0.
+Log files: /tmp/claude-0/-home-claude/d289a493-967d-56ba-9311-db4aba7933de/scratchpad/root-test.log and root-typecheck.log
+
+FILES CHANGED
+- apps/server/src/claude/sdk.ts (added)
+- apps/server/src/claude/sdk.test.ts (added)
+No dependency, pnpm-lock.yaml, docs/ or .superpowers/ changes in the commit.
+
+SELF-REVIEW NOTES AND INTERPRETATIONS
+1. rate_limit_event: resetsAt is read only inside the status === 'rejected' branch. The brief's sentence could also be read as applying to every event. Implemented the nested reading.
+2. mapAssistant: the subagent check is literal (parent_tool_use_id !== null), so a message with the field absent is hidden. The SDK always sends the field (type string | null).
+3. guardHook passes (input.tool_input ?? {}) to checkToolUse instead of a bare cast, so a null tool_input cannot throw inside the guard.
+4. Non-success result without a subtype leaves resultError null, so finalEvent falls back to apiError or the thrown message. No new copy was invented.
+5. session_id from init and result is recorded only when it is a string.
+6. Live test: added the test import and a 120000 ms timeout (the brief gave none). It is skipped and was not run.
+7. Env: default env is process.env (live reference). oauthToken defaults to null and never falls back to process.env.CLAUDE_CODE_OAUTH_TOKEN.
+8. The test casts (as unknown as HookInput, as Parameters<CanUseTool>[2]) are for SDK union types only; no any.
+9. Installed SDK is 0.3.299 (package.json asks ^0.3.290). Option names and types were read from its sdk.d.ts. query() was never called for real.
+
+CONCERNS
+- None blocking.
+- Runtime behavior of the real SDK (abort propagation, error throw after an error result) is not covered by unit tests, by design. Only the live test covers it, and it was not run.
+- The root test run also creates git test repos under os.tmpdir() through the existing git test-repo helper. That is not from this task.

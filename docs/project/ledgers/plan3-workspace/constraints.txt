@@ -1,0 +1,21 @@
+## Global Constraints
+
+- Node 22, pnpm 10 workspace (`packages/*`, `apps/*`), TypeScript `strict`, ESM, `moduleResolution: "Bundler"`, `noUncheckedIndexedAccess`. Every `tsconfig.json` extends `../../tsconfig.base.json`. Tests are `*.test.ts` next to the code. From the repo root, run `pnpm -r typecheck` and `pnpm -r test`.
+- Workspace packages have no build step. The server runs its TypeScript source with `tsx`.
+- `vitest` and `typescript` use the same specifiers as `packages/design-model/package.json` (`^5.0.4` and `^7.0.2`).
+- `@hub/protocol` gains exactly one runtime dependency, `zod`, and only `src/manifest.ts` imports it. That file is exported as the subpath `@hub/protocol/manifest`, and `src/index.ts` never re-exports it, so the client bundle never contains zod.
+- Only Tasks 1 and 3 change `package.json` dependencies or `pnpm-lock.yaml`. Task 3 installs every server dependency up front, so parallel lanes never conflict on the lockfile.
+- `ANTHROPIC_API_KEY` is never set, written or passed on. Every child process (Claude, git, build commands) gets `scrubEnv(...)`, which removes `SECRET_ENV_KEYS`. Claude authenticates with the subscription: either `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`) or the `claude` login of the `hub` user.
+- The server binds `HUB_BIND`, and a wildcard address is a config error. In production `HUB_BIND=127.0.0.1`, behind `tailscale serve --https=443`, so the hub has no public port and Tailscale provides the HTTPS cert.
+- Secrets (`HUB_PASSPHRASE_HASH`, `GITHUB_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`) are systemd encrypted credentials in production. They never appear in an API response, a WebSocket message, a log line, a git config file or a process argument list.
+- All Claude use goes through `ClaudeRunner` (`apps/server/src/claude/runner.ts`). Tests use `FakeClaudeRunner`, GitHub goes through the `GitHub` interface (`FakeGitHub` in tests), and git tests use real `git` against local bare repos. No test touches the network.
+- Claude works only on `build/<slug>-<taskId>` branches. The hub never commits to or pushes the default branch. Merges are squash merges that pin the PR head SHA, and only when that head's CI state is `success`.
+- Times are epoch milliseconds (`number`). Task and message ids are SQLite integer row ids.
+- The client's runtime dependencies stay `preact`, `idb-keyval` and `@hub/protocol`, and gzipped JS stays under 150 000 bytes. Client unit tests run in vitest's `node` environment with fakes (no jsdom), and DOM behavior is covered by Playwright specs.
+- User-facing strings quoted in a task are exact copy.
+
+
+Controller rulings that bind every task:
+- Commit trailer: use the attribution trailer your harness gives you (it replaces any trailer text in the brief).
+- Reports are plain-text .txt files.
+- Run TypeScript with tsx where a runtime is needed; packages export raw .ts (no build step).

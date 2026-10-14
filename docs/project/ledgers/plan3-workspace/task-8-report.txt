@@ -1,0 +1,152 @@
+TASK 8 REPORT: WebSocket hub (plan 3)
+Status: DONE
+Branch: p3-8 (worktree /home/claude/wt-p3-8), not pushed
+Commit: 10e30c5 feat(server): WebSocket hub with cookie auth and heartbeat
+
+WHAT WAS IMPLEMENTED
+- apps/server/src/ws/hub.ts: SocketHub implements WsHub.
+  add (new sockets start alive), remove, size, broadcast (JSON.stringify once,
+  sends only to readyState 1, a throwing send is skipped), markAlive, sweep
+  (terminate+remove sockets not alive; ping the rest; mark all not alive),
+  handleMessage (parseClientMsg ping -> send {"type":"pong","t":t}; else ignored).
+  Exports WsHub and SocketLike.
+- apps/server/src/ws/attach.ts: WS_PATH = '/ws', HEARTBEAT_MS = 30_000,
+  attachWebSocket(server, hub, { isAuthed, heartbeatMs? }) -> { wss, close() }.
+  noServer WebSocketServer; upgrade handler refuses non-/ws paths with the
+  404 bytes and bad/missing session cookies with the 401 bytes (write, then
+  destroy) before any handshake; accepted sockets are added to the hub and
+  wired for pong (markAlive), message (handleMessage) and close (remove).
+  Heartbeat is setInterval(sweep, heartbeatMs).unref().
+- apps/server/src/ws/ws.test.ts: the 8 brief tests. Integration tests use real
+  ws clients against http.createServer on 127.0.0.1 port 0, with every server
+  and client closed in afterEach.
+
+TDD EVIDENCE
+RED: pnpm -F @hub/server exec vitest run src/ws
+  FAIL  src/ws/ws.test.ts [ src/ws/ws.test.ts ]
+  Error: Cannot find module './attach.js' imported from .../apps/server/src/ws/ws.test.ts
+  Test Files  1 failed (1)
+  Tests  no tests
+GREEN: pnpm -F @hub/server exec vitest run src/ws
+  Test Files  1 passed (1)
+  Tests  8 passed (8)
+  Verbose names: broadcast sends JSON to open sockets only; a throwing socket does
+  not stop the broadcast; sweep terminates silent sockets and pings the rest; ping
+  gets a pong; rejects connections without a session; authed client receives
+  broadcasts; other paths are refused; closed sockets leave the hub.
+  Flakiness check: 8 consecutive runs, 8/8 passed each time.
+Typecheck: first run failed with TS2305 (AddressInfo is exported from node:net,
+  not node:http) in ws.test.ts. Fixed the import. Then:
+  pnpm -F @hub/server typecheck -> exit 0.
+Repo gate (from root):
+  pnpm test -> exit 0. protocol 3 files/15 tests; design-model 14/359;
+  server 11/94; renderer 7/52; client 21/154.
+  pnpm typecheck -> exit 0 (renderer, server, client).
+
+FILES CHANGED (all new, committed)
+- apps/server/src/ws/hub.ts
+- apps/server/src/ws/attach.ts
+- apps/server/src/ws/ws.test.ts
+No dependency or pnpm-lock.yaml changes. No docs/ or .superpowers/ changes other
+than this report.
+
+SELF-REVIEW NOTES
+- Values and behavior follow the brief verbatim: WS_PATH, HEARTBEAT_MS, the 404 and
+  401 status lines and bodies, the broadcast/sweep/handleMessage semantics and the
+  exact pong JSON key order (type, t).
+- Compatibility with the client (apps/client/src/net/ws.ts): the client sends
+  {type:'ping',t} every 25s and treats a missing pong within 10s as a dropped
+  socket. The server answers with {"type":"pong","t":t}, which parseServerMsg accepts
+  ('pong' is in SERVER_MSG_TYPES). Protocol-level ws pings are answered by the browser
+  automatically and feed markAlive through the 'pong' event, so the 30s sweep does not
+  drop live browsers.
+
+ADDITIONS BEYOND THE BRIEF (small, deliberate)
+1. refuse() adds socket.on('error', destroy) before writing the refusal. Node's http
+   server removes its own socket error listener once an 'upgrade' is emitted, so a
+   client reset during a 401/404 would otherwise surface as an unhandled 'error' and
+   crash the process.
+2. close() also calls server.off('upgrade', onUpgrade), so a closed attachment stops
+   handling upgrades.
+3. close() copies wss.clients before terminating each client.
+4. The "closed sockets leave the hub" test first waits for hub.size() === 1, so the
+   final size-0 assertion cannot pass trivially.
+5. Rejected-connection tests also assert hub.size() === 0.
+
+CONCERNS
+- The hub's membership depends on the ws 'close' event. close() terminates clients,
+  and that event fires asynchronously, so hub.size() drops to 0 shortly after
+  close(), not synchronously. The brief does not ask close() to clear the hub. The
+  owner of the SocketHub should not assume it is empty right after close().
+- The brief's convention "no Date, Math.random or I/O in src" is met by hub.ts.
+  attach.ts does network I/O (WebSocketServer and a setInterval) because the task
+  requires it. This is expected for a server module.
+- sweep() calls ping() and terminate() without a try/catch. For ws sockets in the hub
+  (always OPEN when added) neither throws. A socket whose ping threw would abort the
+  rest of that sweep.
+
+FIX ROUND 1 (review: two Important crash paths)
+Commit: e131e12 fix(server): harden WebSocket hub against malformed input and throwing sockets
+(new commit on p3-8, not amended, not pushed)
+
+FIXES AND TESTS (each written RED first)
+1. attach.ts: request target that does not parse. new URL('//', 'http://hub') throws
+   ERR_INVALID_URL. pathOf() now returns null on failure and that is refused with the
+   existing 404 bytes. Test: raw net socket sends GET // HTTP/1.1 and must get exactly
+   'HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n'; a normal authed client connects
+   afterwards and hub.size() === 1.
+   isAuthed that throws: allowed() wraps the check and refuses with the existing 401
+   bytes. Test: startServer with a throwing isAuthed; expects status 401 and size 0.
+2. attach.ts: accepted sockets had no 'error' listener. Added
+   ws.on('error', () => ws.terminate()). Test: authed raw socket completes the upgrade,
+   then sends a masked text frame with payload ff fe. Expects hub.size() to drop back to 1
+   (the other client), and the other authed client still receives a broadcast.
+3. attach.ts: new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 }). Test: an
+   authed ws client sends exactly 64 KiB, which must be answered (app-level ping to pong
+   round trip), then 64 KiB + 1, which must close with code 1009 and drop the hub size to 0.
+4. hub.ts sweep(): each socket's ping/terminate is inside its own try/catch. A socket whose
+   ping threw is set not alive before pinging, so the next sweep terminates it unless it
+   pongs. Tests: ping throws (the sweep does not throw, the other socket is pinged); terminate
+   throws (the sweep does not throw, the survivor is pinged again, size() === 1).
+
+RED (pre-fix, pnpm -F @hub/server exec vitest run src/ws --reporter=verbose, exit 1)
+  x a socket whose ping throws does not stop the sweep: expected [Function] to not throw
+    an error but 'Error: boom' was thrown
+  x a socket whose terminate throws does not stop the sweep: same message
+  x refuses a request target that does not parse as a URL, then keeps accepting:
+    Test timed out in 30000ms
+  x refuses with 401 when the session check throws: Hook timed out / Test timed out
+  x closes a client that sends more than 64 KiB ...: expected undefined to be 1009
+  Unhandled Errors: TypeError: Invalid URL, code ERR_INVALID_URL, input '//', base 'http://hub';
+    Error: session store unavailable; Error: Invalid WebSocket frame: invalid UTF-8 sequence
+    (WS_ERR_INVALID_UTF8)
+  Tests 5 failed | 9 passed (14); Errors 3 errors
+  Note: the invalid-UTF-8 test's own assertions passed (ws closes the socket itself). Its RED
+  signal is the unhandled 'error' that fails the run through vitest's Unhandled Errors,
+  which is the same exception that killed the process in production.
+
+GREEN (post-fix)
+  pnpm -F @hub/server exec vitest run src/ws --reporter=verbose
+  all 14 pass (6 SocketHub, 8 attachWebSocket), exit 0, no Unhandled Errors.
+  Flakiness check: 5 consecutive runs, 14/14 each time.
+  pnpm -F @hub/server test -> Test Files 11 passed (11), Tests 100 passed (100), exit 0
+  (was 94 before this fix round; 6 new tests).
+  pnpm -F @hub/server typecheck -> exit 0
+  pnpm -r typecheck -> exit 0 (renderer, server, client)
+
+FILES CHANGED IN THIS ROUND
+- apps/server/src/ws/attach.ts (pathOf, allowed, refuse, error listener, maxPayload)
+- apps/server/src/ws/hub.ts (sweep try/catch)
+- apps/server/src/ws/ws.test.ts (6 new tests, helpers rawRequest, upgradeRequest,
+  maskedTextFrame, portOf, nextMessage; startServer takes an optional isAuthed)
+
+CONCERNS
+- The invalid-UTF-8 test cannot fail on its own assertions, because ws already closes that
+  socket. Its regression signal is vitest's Unhandled Errors, which fails the run. A
+  regression to a plain 'error' that is later handled would not show up there.
+- maskedTextFrame only builds payloads under 126 bytes. That is enough for the test, which
+  uses ff fe.
+- The 64 KiB boundary check sends a 64 KiB text message through the hub's message handler
+  (parseClientMsg rejects it, so it is ignored). That is fine but slightly slow (~50 ms).
+- The error listener is attached to accepted sockets. The "refuse" error listener from
+  round 0 is unchanged.

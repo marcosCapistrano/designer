@@ -1,0 +1,87 @@
+TASK 29 REPORT: hub server bootstrap (plan 3)
+Worktree: /home/claude/wt-p3-29 (branch p3-29, HEAD 3eb3ba3 "merge: lane p3-14", clean)
+Status: NEEDS_CONTEXT
+
+What was done
+- Read implementer-instructions.txt, task-29-brief.md, constraints.txt, progress.md (Task 11 NEEDS_CONTEXT and Ruling 5), task-11-report.txt, and the committed Task 3 (apps/server/src/config.ts) and Task 5 (apps/server/src/auth/passphrase.ts, auth/hash-cli.ts) sources.
+- Checked the brief's exact scripts against constraints.txt and against bash behavior. Found two problems that the brief's exact text does not resolve. Per the implementer rules (stop and report rather than guess), I stopped before Step 1.
+- No files were written in the worktree, no test was run, no commit was made. The worktree is unchanged.
+- Nothing was executed against a server. Not run: bootstrap.sh, set-secret.sh, systemctl, tailscale, curl installs. The only execution was a bash probe in the scratchpad (/tmp/claude-0/-home-claude/d289a493-967d-56ba-9311-db4aba7933de/scratchpad/read-probe.sh) that copies the stdin branch of set-secret.sh; the real script was not run.
+
+BLOCKER 1: GitHub token ends up in process argument lists (conflicts with constraints.txt)
+- constraints.txt line 10: secrets "never appear in an API response, a WebSocket message, a log line, a git config file or a process argument list."
+- Brief bootstrap.sh (exact) builds AUTH=(-c "http.https://github.com/.extraheader=AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 -w0)") and passes it to `sudo -u hub git "${AUTH[@]}" clone ...` and `... -C /opt/hub pull --ff-only`. The base64 of the token (decodable to the token) is in git's argv for the whole clone or pull. This is the same leak Task 11 reported for the server, which Ruling 5 fixed by moving the header to GIT_CONFIG_PARAMETERS in the environment.
+- Brief docs step 8 (exact): `sudo -u hub -H env T="$T" bash -c '... git -c http.https://github.com/.extraheader="AUTHORIZATION: basic $(printf ...)" clone ...'`. Here the raw token is on sudo's command line (T=<token>) for the whole run, and the base64 header is in git's argv.
+- Minor, same family: docs step 2 puts GITHUB_TOKEN and TS_AUTHKEY on the ssh command line (laptop argv and shell history), and bootstrap.sh runs `tailscale up --authkey=...` (TS_AUTHKEY in argv). TS_AUTHKEY is not in the constraint's named list, so this is noted, not counted as a blocker.
+- Options for the controller:
+  (a) Recommended, extending Ruling 5 to ops: the header goes through the environment, not -c. For example, bootstrap.sh exports GIT_CONFIG_PARAMETERS="'http.https://github.com/.extraheader=AUTHORIZATION: basic <b64>'" and calls sudo with --preserve-env=GIT_CONFIG_PARAMETERS, so git reads the header from its environment. Step 8 passes T through the environment (sudo --preserve-env=T, or export) instead of T=... on the command line. Caveat: the environment is readable by root and the hub uid only. These exact forms are not yet tested.
+  (b) Keep the brief verbatim and record an explicit ruling that argv exposure is accepted for ops. Not recommended: it contradicts constraints.txt and Ruling 5.
+
+BLOCKER 2: set-secret.sh stdin branch fails on input without a trailing newline (defect in the exact text)
+- Brief set-secret.sh (exact), under set -euo pipefail: `if [ -t 0 ]; then read -rs -p "$name: " value; echo; else IFS= read -r value; fi`. `read` returns 1 at end of input without a newline, so set -e exits the script before the "Empty value" check.
+- Brief bootstrap.sh line 132 (exact): `if [ -n "${GITHUB_TOKEN:-}" ]; then printf '%s' "$GITHUB_TOKEN" | /opt/hub/ops/hub/set-secret.sh GITHUB_TOKEN; fi`. printf '%s' has no trailing newline, so set-secret.sh exits 1 silently and stores nothing. bootstrap.sh (set -e) then aborts at line 132, after the clone, pnpm install and the Playwright install. Re-running does the same, so the "idempotent and safe to re-run" requirement fails whenever GITHUB_TOKEN is passed.
+- Evidence (bash probe mirroring the stdin branch, not the script):
+    printf '%s' 'ghp_example' | bash read-probe.sh GITHUB_TOKEN   -> no output, exit=1
+    printf '%s\n' 'scrypt:x' | bash read-probe.sh HUB_PASSPHRASE_HASH -> value=[scrypt:x], exit=0
+- Suggested fix: `IFS= read -r value || true`. The empty-value check then gives its message on empty input, and the brief's static tests are unaffected. An alternative is changing bootstrap.sh line 132 to printf '%s\n', but the set-secret.sh fix also covers any other no-newline pipe.
+
+Checked by inspection (not run)
+- Brief static test: the BOGUS path of set-secret.sh exits 1 before any side effect (the case check comes before the root check and every write), so `bash ops/hub/set-secret.sh BOGUS` is safe to run in Step 4.
+- ANTHROPIC_API_KEY regex /^\s*(export\s+)?ANTHROPIC_API_KEY=/m matches none of the six exact files: the UnsetEnvironment= line and the `unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN` line do not start with ANTHROPIC_API_KEY=, and the bootstrap check is an `if grep` line.
+- hub.env.example: /^([A-Z_]+)=/gm matches exactly HUB_BIND, HUB_PORT, HUB_DATA_DIR, HUB_APPS_DIR, GITHUB_OWNER (the comment lines start with #). The example plus a passphrase hash passes loadConfig with bind 127.0.0.1 and port 8787.
+- docs/hub-bootstrap.md must contain `tailscale serve --bg --https=443 http://127.0.0.1:8787`, which appears in the exact text only in bootstrap.sh. The docs prose has to repeat it (for example, in a note on what the bootstrap configured).
+- Build targets used by bootstrap.sh exist: apps/client has a `build` script (vite build), and packages/renderer depends on playwright 1.56.1.
+- shellcheck is not installed in this environment, so only `bash -n` is available for the scripts.
+
+Files changed: none. Commits: none.
+
+TDD evidence: none. Step 1 (failing test) was not started. No RED or GREEN run was made.
+
+Next step
+- On a controller ruling for Blocker 1 (option a or b) and Blocker 2 (the fix above or another), I will do Steps 1 to 5 in /home/claude/wt-p3-29, run `pnpm -F @hub/server exec vitest run src/ops.test.ts` for RED and GREEN, run `pnpm test && pnpm typecheck` from the repo root, and commit with the brief's subject and the harness attribution trailer. Nothing will be pushed.
+
+================================================================================
+FIX REPORT: controller rulings applied (resumed)
+Status: DONE_WITH_CONCERNS
+Commit: 5893da1 docs(ops): hub server bootstrap with Tailscale, subscription login, encrypted credentials, systemd
+Worktree: /home/claude/wt-p3-29 (branch p3-29), clean after commit. Not pushed.
+
+Rulings applied
+- Ruling 1 (no token in any argv): bootstrap.sh and docs step 8 no longer use `git -c`. The header is built as `AUTHORIZATION: basic <base64>` (base64 from piping the token through `printf | base64 -w0`, never as an argument) and piped into a hub-side `bash -c`, which exports GIT_CONFIG_COUNT=1, GIT_CONFIG_KEY_0=http.https://github.com/.extraheader and GIT_CONFIG_VALUE_0 and runs git. The bootstrap wraps this in a hub_git function. Docs step 8 uses the same pipe form.
+- Ruling 1 extension (judgment call): docs step 2 sent GITHUB_TOKEN on the ssh command line (argv on the laptop and in the remote sh -c). It now reads the token from a prompt and pipes it to ssh stdin, where the remote side reads it into GITHUB_TOKEN. TS_AUTHKEY stays on the command line per Ruling 3.
+- Mechanism choice (judgment call): the ruling's `sudo --preserve-env` form was not used. The sudoers policy for --preserve-env cannot be checked in this environment, and the pipe form has the same effect without depending on sudo policy. The env-var names and the header are as ruled.
+- Ruling 2: set-secret.sh stdin branch is now `IFS= read -r value || [ -n "$value" ]`. Exactly the ruled form.
+- Ruling 3: TS_AUTHKEY stays as briefed on `tailscale up --authkey`. docs step 2 says it is a one-off key, passed once, not stored, and to revoke it if still listed.
+- Everything else matches the brief's exact text. A diff against the brief's exact blocks shows changes only in bootstrap.sh's git-auth section and set-secret.sh's read line. hub.service, hub.env.example and check-claude.sh are byte-identical to the brief.
+
+Files committed (commit 5893da1, 7 files, +320 lines)
+- ops/hub/bootstrap.sh (mode 100755), ops/hub/set-secret.sh (100755), ops/hub/check-claude.sh (100755)
+- ops/hub/hub.service, ops/hub/hub.env.example
+- docs/hub-bootstrap.md (runbook, 12 steps plus known limits)
+- apps/server/src/ops.test.ts (9 tests)
+
+TDD evidence
+RED: `pnpm -F @hub/server exec vitest run src/ops.test.ts` (before the files existed)
+  Test Files  1 failed (1)
+  Tests       9 failed (9)
+  Each failure: Error: ENOENT: no such file or directory, open '/home/claude/wt-p3-29/ops/hub/...'
+GREEN: same command after the files were written
+  Test Files  1 passed (1)
+  Tests       9 passed (9)
+
+Tests (9, not the brief's 7): the brief's seven, plus two added:
+  - set-secret reads stdin without a trailing newline and still fails on empty input. It runs only the stdin read statement copied from set-secret.sh under set -euo pipefail, for input with no newline, with a newline, and empty.
+  - git gets the GitHub header from its environment, never from an argument. In bootstrap.sh and the docs, no line that contains `extraheader` contains ` -c `, and both contain GIT_CONFIG_KEY_0=http.https://github.com/.extraheader and GIT_CONFIG_VALUE_0=.
+
+Other checks run
+- `bash -n` on bootstrap.sh, set-secret.sh and check-claude.sh: all pass.
+- `pnpm -F @hub/server test`: 8 files, 66 tests, exit 0 (includes the 9 ops tests).
+- `pnpm -r typecheck`: exit 0 across 5 workspace projects.
+- Local probe, scratchpad only (no real sudo, no real server, no bootstrap.sh run): a stand-in sudo recorded its own argv and ran the hub_git function from bootstrap.sh with a fake token. With the token, `git config --get http.https://github.com/.extraheader` returned the header. The recorded argv of sudo contained neither the token nor its base64. Without a token, the key was unset (exit 1). .git/config had no header. The docs step 8 pipeline was run the same way and gave the same result.
+- Not run: the real sudo --preserve-env policy, shellcheck (not installed), and any real server.
+
+Concerns
+- set-secret.sh with the ruled `|| [ -n "$value" ]` form: empty stdin (EOF with nothing) exits 1 silently, because the later "Empty value" message is never reached. Nothing is stored, so this is safe. If the message matters, `|| { echo "Empty value" >&2; exit 1; }` after the read would print it. Not changed, to keep the ruled form.
+- The hub_git function in bootstrap.sh depends on sudo -u hub passing stdin through. This holds for root running sudo.
+- docs step 8 runs sudo as the operator, so sudo asks for the operator's password on the tty while the header is on the pipe. sudo reads its password from /dev/tty, so this should work, but it is not run here.
+- Minor, not changed: TS_AUTHKEY is on the tailscale up command line (ruled, Ruling 3).

@@ -1,0 +1,111 @@
+TASK 15 REPORT: Build dependencies and one Claude turn
+=======================================================
+
+Status: DONE
+Worktree: /home/claude/wt-p3-15 (branch p3-15)
+Commit: 3a53c2b feat(server): one Claude turn with streaming, resume fallback and usage-limit queueing
+Not pushed.
+
+IMPLEMENTED
+-----------
+apps/server/src/build/deps.ts (new)
+  - BuildDeps: store, runner, hub, registry (Pick<AppRegistry,'get'>), openRepo, github (GitHub | null),
+    runCommand (RunCommand), now, optional onMerged (plan 4 hook). Field names and types as in the brief.
+  - addBuildMessage(deps, app, taskId, kind, text): store.addMessage, then hub.broadcast build.message; returns the message.
+  - publishTask(deps, task, running): hub.broadcast build.task.
+  - repoRefFor(deps, dir): parseGitHubRemote((await deps.openRepo(dir).remoteUrl()) ?? '').
+
+apps/server/src/build/turn.ts (new)
+  - TurnInput, TurnResult, USAGE_RETRY_FALLBACK_MS = 900_000 (exact per brief).
+  - runTurn(deps, input):
+    * resume = store.chatSession(app) ?? undefined; runner.run({ cwd, prompt, resume, systemPrompt: buildSystemPrompt(branch), signal }).
+    * text events -> 'assistant' message; tool events -> 'tool' message via summarizeTool(name, input, cwd).
+      Only text and tool events are counted. The done event is kept. A missing done becomes
+      { sessionId: '', ok: false, error: 'Claude Code ended without a result' }.
+    * Retry once without resume only when: !ok, resume was set, 0 text/tool events,
+      parseUsageLimit(error) === null, error !== 'aborted'. Before the retry: setChatSession(app, null) and a
+      'status' message 'Could not resume the previous Claude session; starting a new one.'
+    * A non-empty done.sessionId is stored with setChatSession.
+    * Result: limit parsed -> { ok:false, error, limited:true, resetsAtMs }; ok -> { ok:true, error:null, limited:false, resetsAtMs:null };
+      otherwise { ok:false, error: error ?? 'Claude Code failed', limited:false, resetsAtMs:null }.
+  - queueAfterLimit(deps, task, prompt, result): retryAt = resetsAtMs ?? now() + USAGE_RETRY_FALLBACK_MS;
+    updateTask { status:'queued', retryAt, pendingPrompt: prompt, error: null }; 'status' message
+    "Claude usage limit reached. The Hub will retry at HH:MM UTC."; publishTask(..., false); returns the queued task.
+
+apps/server/src/build/turn.test.ts (new): the 6 tests named in the brief.
+  1. streams text and tools as messages
+  2. resumes the chat session
+  3. stale session falls back to a fresh one   (Plan Review Focus 4)
+  4. does not retry after real work
+  5. usage limit is reported, not retried
+  6. queueAfterLimit queues with the reset time (also asserts the build.task broadcast with running=false,
+     and the 901000 fallback when resetsAtMs is null)
+
+TDD EVIDENCE
+------------
+RED command:
+  pnpm -F @hub/server exec vitest run src/build/turn.test.ts
+RED output (excerpt):
+  FAIL  src/build/turn.test.ts [ src/build/turn.test.ts ]
+  Error: Cannot find module './turn.js' imported from /home/claude/wt-p3-15/apps/server/src/build/turn.test.ts
+  Test Files  1 failed (1)
+  Tests  no tests
+
+GREEN command (after implementing deps.ts and turn.ts):
+  pnpm -F @hub/server exec vitest run src/build/turn.test.ts --reporter=verbose
+GREEN output (excerpt):
+  ✓ src/build/turn.test.ts > runTurn > streams text and tools as messages
+  ✓ src/build/turn.test.ts > runTurn > resumes the chat session
+  ✓ src/build/turn.test.ts > runTurn > stale session falls back to a fresh one
+  ✓ src/build/turn.test.ts > runTurn > does not retry after real work
+  ✓ src/build/turn.test.ts > runTurn > usage limit is reported, not retried
+  ✓ src/build/turn.test.ts > runTurn > queueAfterLimit queues with the reset time
+  Test Files  1 passed (1)
+  Tests  6 passed (6)
+
+VERIFICATION (run from /home/claude/wt-p3-15)
+---------------------------------------------
+  pnpm -F @hub/server typecheck   -> exit 0
+  pnpm typecheck (root)           -> exit 0
+  pnpm test (root)                -> exit 0
+      packages/protocol      Test Files 3 passed (3)    Tests 15 passed (15)
+      packages/design-model  Test Files 14 passed (14)  Tests 359 passed (359)
+      apps/server            Test Files 17 passed (17)  Tests 151 passed (151)
+      packages/renderer      Test Files 7 passed (7)    Tests 52 passed (52)
+      apps/client            Test Files 21 passed (21)  Tests 154 passed (154)
+
+FILES CHANGED
+-------------
+  apps/server/src/build/deps.ts          (new, 44 lines)
+  apps/server/src/build/turn.ts          (new, 113 lines)
+  apps/server/src/build/turn.test.ts     (new, 166 lines)
+  /home/claude/wt-p3/.superpowers/sdd/2026-10-14-hub-server-build/task-15-report.txt (this file)
+No changes to package.json, pnpm-lock.yaml, docs/, or any other .superpowers/ file.
+No git stash used. No git operation touches the default branch.
+
+SELF-REVIEW NOTES
+-----------------
+  - Imports are type-only except parseGitHubRemote (deps.ts) and parseUsageLimit (turn.ts).
+  - No Date.now, Math.random or I/O added. queueAfterLimit calls new Date(retryAt).toISOString(), which only formats the
+    supplied value and reads no clock. It is the brief's text verbatim; flagged under concerns.
+  - Inputs are not mutated. NO_RESULT is a shared constant that is only read.
+  - If the fresh retry also fails with no session id, the chat session stays null, so the next turn starts fresh.
+  - The retry path relies on the runner yielding done 'aborted' when the signal aborts, as the brief specifies.
+    runTurn does not check input.signal.aborted itself.
+  - Tool and text events are added to the feed as they stream, not batched.
+  - No new dependencies.
+
+CONCERNS
+--------
+  1. Wrong-worktree root test run (resolved). My first root `pnpm test` in /home/claude/wt-p3-15 printed
+     paths under /home/claude/wt-p3-10 (another lane's worktree): every package's vitest RUN line and the
+     pnpm header pointed there, and its server suite showed 16 files, which is not this tree. I did not
+     change anything there and did not reproduce the cause. Vitest may have written cache files under
+     wt-p3-10/node_modules during that run. The numbers in VERIFICATION come from a rerun in this worktree,
+     where `pnpm -r exec pwd` lists only /home/claude/wt-p3-15 paths and the server suite is 17 files.
+     The controller may want to check wt-p3-10 for stray cache files.
+  2. Brief vs convention: the brief's queueAfterLimit formats the time with new Date(retryAt).toISOString(). The
+     constraints say "no Date", which I read as "no clock reads". The brief's text is used verbatim. Change it if
+     the constraint is meant strictly.
+  3. repoRefFor has no direct test, because the brief defines none for it. It is exercised only through the
+     plan's later tasks. addBuildMessage and publishTask are covered indirectly by the runTurn and queueAfterLimit tests.

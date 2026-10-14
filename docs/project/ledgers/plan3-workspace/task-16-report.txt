@@ -1,0 +1,106 @@
+TASK 16 REPORT: finish a build task (commit, verify and fix, push, PR)
+
+STATUS: DONE_WITH_CONCERNS
+  - Implementation, tests and commit are complete.
+  - Not done on purpose: git push and the pull request. The dispatch says "Do not push", and the brief's steps 6 and 7 (push, open PR) need a push. The controller must push b747323 and open the PR, or re-dispatch.
+
+COMMIT
+  b747323 feat(server): finish build tasks with verify/fix loop, push and PR
+  Worktree: /home/claude/wt-p3-16, branch p3-16, base 0336081.
+
+FILES CHANGED (2, both new)
+  apps/server/src/build/finish.ts       finishTask, MAX_FIX_ATTEMPTS, FinishInput
+  apps/server/src/build/finish.test.ts  13 tests
+  No other file touched. ci.ts (Task 17 lane) is not created or edited.
+
+WHAT WAS IMPLEMENTED
+  The brief's algorithm, steps 1 to 7, with the exact messages from the brief:
+  - Branch check, commit of leftovers, no_changes, "No new changes." short-circuit, verify loop with MAX_FIX_ATTEMPTS fix turns, push, GitHub PR create or update, queued-on-usage-limit via queueAfterLimit.
+  - Every status change: store.updateTask, then publishTask(task, true), as the brief says.
+  - Git auth stays in the existing wrapper (env-based). No token appears in argv.
+
+  Additions beyond the brief (each has a test):
+  1. Default-branch and empty-branch guard (controller ruling). It runs before every commit and before the push. A task whose branch is empty, or equal to repo.defaultBranch(), fails with:
+       "Refusing to commit or push <branch>: the hub never commits to or pushes the default branch."
+       "Refusing to commit or push: the task has no work branch."
+     The brief names no error class, so the refusal uses the brief's own error path: status failed with the message, via fail().
+  2. Branch re-check after a fix turn and before the push. If Claude switched branches during a fix, the task fails with the brief's "switched to branch" message instead of committing or pushing elsewhere.
+  3. Safety net. Any other throw (for example a failing pre-commit hook or a findOpenPr error) fails the task with "Could not finish the task: <msg>" instead of leaving it stuck in working or pushing.
+
+TDD EVIDENCE
+  RED: pnpm -F @hub/server exec vitest run src/build/finish.test.ts
+    FAIL src/build/finish.test.ts [ src/build/finish.test.ts ]
+    Error: Cannot find module './finish.js' imported from .../src/build/finish.test.ts
+    Test Files 1 failed (1), Tests no tests
+
+  GREEN: same command after writing finish.ts
+    Test Files 1 passed (1)
+    Tests 13 passed (13)
+    (9 brief tests plus 4 added: empty branch, default branch, fix turn switches branch, failing commit)
+
+  Mutation check: with the default-branch guard disabled (temporary sed, restored afterwards), the default-branch test fails:
+    AssertionError: expected 'review' to be 'failed'
+  So the test really depends on the guard. The guard is back in place (grep for the disabled form returns 0).
+
+FULL SUITE (after the final edits)
+  pnpm test       -> exit 0. protocol 15 passed; design-model 644 passed; server 197 passed, 1 skipped (198); renderer 52 passed; client 154 passed.
+  pnpm typecheck  -> exit 0.
+
+SELF-REVIEW NOTES
+  - Test fakes: a fake RunCommand keyed by command text, with per-call decisions. FakeClaudeRunner for Claude. FakeGitHub for GitHub. Real git against a local bare origin (makeTestRepo). No network.
+  - The "push negotiation failed" warnings in the test output come from makeTestRepo's seed push (Task 11 helper). git.test.ts prints them too. They are not from finish.
+  - Line lengths are within the existing style (I wrapped the two long lines).
+
+CONCERNS
+  1. Commit trailer. The dispatch asked for "Co-Authored-By: Claude Opus 5.5 (1M context)". The harness attribution reminder says Claude Haiku 5.5, and constraints.txt says to use the harness trailer. I used the harness trailer (Haiku 5.5) plus the Claude-Session line. The controller should confirm which one it wants; amending the trailer means a new commit or a rewrite, which I did not do.
+  2. running flag on terminal states. The brief says publishTask(task, true) for every status change, so failed, review and no_changes are published with running=true. Clients may show a spinner on a finished task. queueAfterLimit already publishes running=false. The brief's wording is followed. The controller may want false for terminal states.
+  3. Default-branch detection. Guard uses repo.defaultBranch(), which reads origin/HEAD and falls back to probing origin/main, then master. A checkout with no origin/HEAD whose default is named otherwise would not be recognized. The default of the test repo is main, so tests do not cover that case.
+  4. The guard protects the default branch only (per the ruling), not task.base when base differs from the default.
+  5. Not pushed: the controller needs to push p3-16 and open the PR (brief step 6 and 7 are not executed).
+
+FIX ROUND 1 (review: guard bypass and untested re-checks)
+  Commit: 43274c2 fix(server): allowlist the build branch and re-check before each git write
+  Files: apps/server/src/build/finish.ts, apps/server/src/build/finish.test.ts (no others)
+
+  CHANGES
+  - blockedReason is now an allowlist, checked on the current branch, in this order (each refusal uses the same fail() path):
+      task.branch empty -> "no work branch" (unchanged)
+      current empty or HEAD -> "the checkout is not on a named branch"
+      current != task.branch -> "Claude switched to branch <current>..." (unchanged)
+      current equals default branch -> "the hub never commits to or pushes the default branch" (unchanged wording)
+      current equals task.base -> "it is the pull request base branch"
+      current not starting with build/ -> "the hub only commits to build/ branches"
+    Names are compared case-insensitively after stripping a leading refs/heads/ or heads/. The build/ prefix check is case-sensitive.
+    blockedReason still runs at run start, after each fix turn, and before the push.
+  - Stop before the push: if signal.aborted after the last command, fail('Stopped by you.') with no push and no PR.
+  - publishTask runs with running = status is working, verifying or pushing (Minor 3).
+
+  RED (tests written first, run against the unchanged finish.ts)
+    pnpm -F @hub/server exec vitest run src/build/finish.test.ts
+    Tests 6 failed | 16 passed (22)
+    FAIL refuses to commit or push a default branch that origin/HEAD does not name   expected 'review' to be 'failed'   (bypass, Important 1)
+    FAIL refuses to commit or push a branch outside build/                          expected 'review' to be 'failed'   (allowlist, item 2)
+    FAIL refuses to commit or push a detached HEAD                                  expected 'Claude switched to branch HEAD; ...' to contain 'not on a named branch'
+    FAIL compares the base branch after stripping refs/heads/ and ignoring case     expected 'Could not finish the task: fatal: amb...' to contain 'base branch'
+    FAIL stops before the push when stopped after the last command                  expected {...} to match { status: 'failed', error: 'Stopped by you.' }   (Minor 4)
+    FAIL publishes running only while the task is being worked on                   expected [ { status: 'review', running: true } ] to deeply equal [ ... ]   (Minor 3)
+    Passed on arrival (the code already had these checks or the behavior): post-fix switch to main, post-fix switch to elsewhere,
+    pre-push switch, rejected push. Their RED is shown by the mutants below.
+
+  GREEN
+    pnpm -F @hub/server exec vitest run src/build/finish.test.ts   -> Test Files 1 passed (1); Tests 22 passed (22)
+    pnpm -F @hub/server test                                        -> Test Files 20 passed (20); Tests 206 passed | 1 skipped (207)
+    pnpm -r typecheck                                               -> exit 0
+
+  MUTANT EVIDENCE (each mutant deletes one piece of finish.ts, runs finish.test.ts, then restores from a backup, confirmed with cmp)
+    A. post-fix re-check deleted  -> FAIL "a fix turn that switches to the default branch ..."  expected [ 'Add notes' ] to deeply equal []
+       (the commit that would land on main is recorded; the test also asserts main is unchanged)
+    B. pre-push re-check deleted  -> FAIL "a build command that switches branches fails before the push"  expected 'review' to be 'failed'
+    C. stop-before-push deleted   -> FAIL "stops before the push when stopped after the last command"  expected {...} to match { status: 'failed', ... }
+    D. push failure swallowed     -> FAIL "a rejected push fails the task and opens no pull request"  expected {...} to match { status: 'failed', ... }
+
+  CONCERNS
+  1. Items 3, 4 and 6 (post-fix re-check, pre-push re-check, rejected push) were not RED on arrival; mutants A, B and D above are their evidence.
+  2. The build/ prefix is case-sensitive (so Build/x is refused) while the equality checks are case-insensitive. Intended: Claude's branches are lowercase build/<slug>-<id>.
+  3. The commit trailer is still the harness one (Claude Haiku 5.5), as in the original commit. Controller to confirm.
+  4. Not pushed; the PR is not open. Same as the original report.

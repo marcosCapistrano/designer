@@ -1,0 +1,82 @@
+TASK 22 REPORT: client network layer (API, WebSocket, server tile source)
+
+Status: DONE_WITH_CONCERNS
+Worktree: /home/claude/wt-p3c (branch p3c)
+Commit: 8c19b11 feat(client): typed API client, reconnecting WebSocket, server tile source
+Tests: client 19 net tests pass (brief specified 17; 2 extra added, see below). Root `pnpm test` and `pnpm typecheck` pass (client suite 141 tests).
+
+WHAT WAS IMPLEMENTED
+
+apps/client/src/net/api.ts
+- ApiError(status, message) and FetchFn type.
+- ApiClient with login, logout, session, apps, buildState(app, after?), sendBuild, stopBuild, merge, closeTask.
+- Same-origin /api paths, credentials 'same-origin', JSON bodies with content-type application/json, encodeURIComponent on app names.
+- Non-OK responses throw ApiError(status, body.error ?? `HTTP ${status}`) (falls back to HTTP status when the body is not JSON).
+- A 401 from every call except login and session calls onUnauthorized before throwing. session() returns false on 401 and throws ApiError for other non-OK statuses; network errors propagate.
+- Default fetch is wrapped in an arrow so the browser fetch is never called with the ApiClient as `this`.
+
+apps/client/src/net/ws.ts
+- wsUrl(loc): wss for https:, ws otherwise, path /ws.
+- WsClient with connect, close, kick, on, onStatus, status getter.
+- Open: status open, attempt reset to 0, ping interval started.
+- Ping every pingMs sends {type:'ping', t: now()} and arms a pong timer; if no pong arrives in pongTimeoutMs the socket is closed and treated as dropped.
+- Close (socket close event or pong timeout): timers cleared, status closed, reconnect after min(maxBackoffMs, 1000 * 2 ** attempt), attempt++. Handling is idempotent per socket, so a stale socket's late close event is ignored.
+- Messages go through parseServerMsg; non-string or unparseable data is dropped; pong is consumed and never forwarded.
+- Default makeSocket is new WebSocket(url); default now is Date.now (same pattern as canvas/loader.ts); timers are the global setTimeout/setInterval, resolved at call time so fake timers work.
+
+apps/client/src/net/tile-source.ts
+- renderBase(app) = /api/apps/${encodeURIComponent(app)}/render.
+- ServerTileSource implements TileSource: manifest, tile, hitMap delegate to StaticTileSource(renderBase(app), fetchFn); subscribe forwards render.ready messages for this app only and returns the ws unsubscribe.
+
+FILES CHANGED (all new, under apps/client/src/net/)
+- api.ts, api.test.ts
+- ws.ts, ws.test.ts
+- tile-source.ts, tile-source.test.ts
+No package.json or pnpm-lock.yaml changes. No changes outside apps/client/src/net. route.ts and areas/build/state.ts were not created.
+
+TDD EVIDENCE
+
+RED: `pnpm -F @hub/client exec vitest run src/net` (before the three source files existed)
+  Test Files 3 failed (3), Tests no tests
+  Errors: "Cannot find module './ws.js' imported from .../src/net/ws.test.ts"
+          (tile-source.test.ts also failed on the missing ./tile-source.js, api.test.ts on ./api.js)
+
+GREEN: `pnpm -F @hub/client exec vitest run src/net`
+  Test Files 3 passed (3)
+  Tests 18 passed (18)                    [before the reset fix below]
+
+Per-test (verbose): wsUrl; delivers parsed messages and drops garbage and pongs; reconnects with backoff; backoff resets after open; missing pong forces a reconnect; a pong keeps the connection; kick pings an open socket without reconnecting; kick reconnects immediately when closed; close stops reconnecting; status transitions; api: login posts the passphrase; wrong passphrase throws the server message; 401 elsewhere calls onUnauthorized; session is false on 401; buildState encodes the app and passes after; sendBuild returns the task; tile-source: fetches under the app's render path; subscribe gets render.ready for this app only.
+
+Follow-up (review-style fix made during self-review, see below): added test "connect after close starts the backoff fresh".
+  RED for it (with the attempt reset temporarily removed from connect()):
+    AssertionError: expected [ …(3) ] to have a length of 4 but got 3   (1 failed, 18 skipped)
+  GREEN after restoring the reset: Test Files 3 passed (3), Tests 19 passed (19)
+
+Repo-wide checks before commit:
+  `pnpm test` (root): exit 0. packages/protocol 15, design-model 359, renderer 52, apps/client 141 tests pass.
+  `pnpm typecheck` (root): exit 0. `pnpm -F @hub/client typecheck`: exit 0.
+
+SELF-REVIEW NOTES
+
+1. Two tests beyond the brief's list (19 total, brief said 17):
+   - "kick pings an open socket without reconnecting" (the brief specifies the open-branch behavior of kick but no test for it).
+   - "connect after close starts the backoff fresh" (connect() resets attempt, which the brief does not state; close() does not).
+2. Behavior choices not spelled out in the brief:
+   - kick() does nothing before connect() or after close(), so a visibility-change kick cannot revive a closed client.
+   - kick() while status is 'connecting' abandons the in-flight socket (close() on it, its late events ignored) and opens a new one, matching "otherwise reconnect now".
+   - connect() is a no-op while already running.
+   - onStatus does not emit the current status on subscribe; get status is the way to read it. Status events are deduplicated (same status twice is not re-emitted).
+   - On pong timeout the client calls socket.close() and immediately treats the socket as dropped, instead of waiting for the browser's close event (which can be slow on a dead TCP connection). With fake sockets both paths converge on the same state.
+3. Idempotent socket handling: abandon() and dropped() both ignore sockets that are no longer the current one, so a close event arriving after replacement or after a pong timeout does nothing.
+4. Clock: `now` defaults to Date.now, following apps/client/src/canvas/loader.ts. The "no Date in src" convention in the implementer instructions could not be applied literally here because the brief requires a now() option and the ping timestamp.
+5. Bundle: net/ is not imported by main.tsx yet. The only runtime import is parseServerMsg from the root '@hub/protocol' index, which does not pull in zod.
+
+CONCERNS
+
+A. parseServerMsg checks only the `type` tag (as noted in the dispatch). A message with a known type but a malformed payload is still forwarded. Example: render.ready without `manifest` reaches ServerTileSource and calls onManifest(undefined); build.task without `task` reaches listeners. The brief says "invalid ones are dropped", which this implementation only satisfies for unknown types and non-JSON. Payload validation would need either a change in packages/protocol (outside this task's files) or per-type checks in the client. I did not add either; the controller should decide.
+
+B. ApiClient.apps() assumes GET /api/apps returns AppSummary[] directly (the brief's signature). The plan does not pin the body shape for the apps list, unlike the build routes (buildState returns BuildState directly, sendBuild/merge/closeTask return {task}, stopBuild returns {stopped}). The server's apps route (Task 19 area, not present in this worktree) must return a bare array or this client must change.
+
+C. Route shapes assumed from the plan: POST /api/login (204), POST /api/logout (204), GET /api/session (200 or 401), GET /api/apps, GET /api/apps/:app/build?after=N, POST .../build/messages (202 {task}), POST .../build/stop ({stopped}), POST .../build/tasks/:id/merge and .../close ({task}). The server implementation was not available to check against.
+
+D. Not verified in a browser. Only vitest with fakes was run, as the brief requires. Real WebSocket close timing and fetch cookie behavior are covered only by the Playwright specs (later tasks).

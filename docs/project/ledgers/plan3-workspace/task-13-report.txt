@@ -1,0 +1,63 @@
+TASK 13 REPORT: Build store
+Status: DONE_WITH_CONCERNS
+Worktree: /home/claude/wt-p3-13 (branch p3-13)
+Commit: cfef564 feat(server): build store for tasks, chat session and messages
+
+IMPLEMENTED
+- apps/server/src/build/store.ts
+  - TaskPatch type (exported, exact shape from the brief).
+  - BuildStore class: constructor(db, now = Date.now); chatSession, setChatSession (upsert into build_chats),
+    createTask (status 'working', ci 'none', nulls elsewhere, createdAt = updatedAt = now()), task, updateTask,
+    openTask (newest task with status in OPEN_TASK_STATUSES), latestTask, tasksWithStatus (ascending id),
+    pendingPrompt, addMessage, messages (default newest 500, ascending), userPrompts (ascending).
+  - Snake_case rows are mapped to the camelCase DTOs; messages map created_at to `at`.
+- apps/server/src/build/store.test.ts
+  - Exactly the 9 cases listed in the brief, against openDb(':memory:') with a variable clock.
+- No migrations added; the existing build_chats, build_tasks and build_messages schema is used as-is.
+- No dependency or lockfile changes.
+
+TDD EVIDENCE
+RED: pnpm -F @hub/server exec vitest run src/build/store.test.ts
+  FAIL src/build/store.test.ts [ src/build/store.test.ts ]
+  Error: Cannot find module './store.js' imported from /home/claude/wt-p3-13/apps/server/src/build/store.test.ts
+  Test Files 1 failed (1); Tests no tests
+
+GREEN: pnpm -F @hub/server exec vitest run src/build/store.test.ts
+  Test Files  1 passed (1)
+  Tests  9 passed (9)
+
+Repo-wide checks (run from /home/claude/wt-p3-13):
+  pnpm test       exit 0
+    packages/protocol   3 files, 15 tests passed
+    packages/design-model 14 files, 359 tests passed
+    apps/server         8 files, 66 tests passed
+    packages/renderer   7 files, 52 tests passed
+    apps/client         21 files, 154 tests passed
+  pnpm typecheck  exit 0
+  After the final edit: store.test.ts 9/9 passed; pnpm -F @hub/server typecheck exit 0.
+
+FILES CHANGED
+- apps/server/src/build/store.ts (new)
+- apps/server/src/build/store.test.ts (new)
+- This report (outside the repo's commit).
+
+SELF-REVIEW NOTES
+- SQL and parameters: every value is bound. The one dynamic fragment is the column list in updateTask, which
+  comes from PATCH_COLUMNS, a Record<keyof TaskPatch, string>, so the compiler requires every patch key to map to a
+  column. Status lists are passed as one bound JSON parameter and read with json_each, so no SQL string is built
+  from values.
+- updateTask applies only keys whose value is not undefined; null is written, which clears the column. updatedAt is
+  always bumped.
+- pendingPrompt is not part of the BuildTask DTO. It is written through updateTask and read through pendingPrompt();
+  task() does not select it, and a test asserts that.
+- messages(): with afterId, the rows with id > afterId are returned ascending up to limit. Without it, the newest
+  limit rows are selected by a DESC subquery and returned ascending.
+- addMessage returns the object built from the insert result (no re-read); at = now().
+- A foreign-key violation (addMessage with an unknown taskId) propagates from SQLite as-is.
+
+CONCERNS
+1. The default clock is Date.now (the brief's signature is now?: () => number). This follows the existing pattern in
+   apps/client (`opts.now ?? Date.now`). It is the only Date reference in store.ts. It conflicts with the literal
+   "no Date in src" convention, so the controller may want a different default source.
+2. updateTask throws Error('build task <id> not found') when no row matches. The brief does not specify this case.
+   createTask and updateTask re-read the row through task().

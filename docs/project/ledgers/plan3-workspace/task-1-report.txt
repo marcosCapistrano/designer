@@ -1,0 +1,66 @@
+Task 1: app manifest schema (@hub/protocol/manifest)
+Status: DONE
+Commit: 7813556 feat(protocol): app manifest zod schema behind a subpath export
+Worktree: /home/claude/wt-p3 (branch feat/hub-server). Not pushed.
+
+IMPLEMENTED
+- packages/protocol/src/manifest.ts (new): APP_MANIFEST_FILE, APP_NAME_RE, AppManifestSchema (verbatim from brief), AppManifest and ManifestResult types, parseAppManifest(text).
+  - Invalid JSON returns { ok: false, error: '.hub/app.json is not valid JSON' }.
+  - Schema failure returns error = issues mapped to "<path or (root)>: <message>", joined with '; '.
+  - Unknown keys are stripped, not rejected.
+- packages/protocol/package.json: added dependency zod ^4.6.7 (resolved 4.6.7); added "sideEffects": false; exports now ".": "./src/index.ts" and "./manifest": "./src/manifest.ts".
+- packages/protocol/src/manifest.test.ts (new): the 8 tests from brief Step 1.
+- pnpm-lock.yaml: only the protocol importer entry and the zod@4.6.7 package entry were added.
+- src/index.ts, src/ws.ts, src/render.ts are unchanged. index.ts does not re-export the manifest module; the test "index does not export the schema" covers this.
+
+TDD EVIDENCE
+RED (run before pnpm add and before manifest.ts existed):
+  $ pnpm -F @hub/protocol exec vitest run src/manifest.test.ts
+  FAIL  src/manifest.test.ts [ src/manifest.test.ts ]
+  Error: Cannot find module './manifest.js' imported from .../packages/protocol/src/manifest.test.ts
+  Test Files 1 failed (1); Tests no tests; exit 1
+
+GREEN:
+  $ pnpm -F @hub/protocol exec vitest run src/manifest.test.ts
+  Test Files 1 passed (1); Tests 8 passed (8); exit 0
+
+PACKAGE CHECKS:
+  $ pnpm -F @hub/protocol test
+  Test Files 2 passed (2); Tests 10 passed (10); exit 0   (render.test.ts + manifest.test.ts)
+  $ pnpm -F @hub/protocol typecheck
+  tsc --noEmit; exit 0
+
+ROOT CHECK (pnpm test && pnpm typecheck from repo root, before commit): exit 0
+  @hub/protocol   tests 10/10
+  design-model    tests 359/359
+  renderer        tests 52/52
+  apps/client     tests 122/122
+  typecheck clean for all packages
+
+PARSER OUTPUT (checked with the repo's tsx against sample documents):
+  spec example          -> ok: true
+  name 'My App'         -> name: must be lowercase letters, digits and dashes
+  image ghcr.io/Marco/… -> deploy.image: must be ghcr.io/<owner>/<name> in lowercase
+  devices ['watch']     -> design.devices.0: Invalid option: expected one of "desktop"|"tablet"|"mobile"
+  no build section      -> build: Invalid input: expected object, received undefined
+  unknown top-level key -> ok: true, key stripped from manifest
+  '{'                   -> .hub/app.json is not valid JSON
+
+FILES CHANGED (commit 7813556)
+  packages/protocol/package.json
+  packages/protocol/src/manifest.ts          (new)
+  packages/protocol/src/manifest.test.ts     (new)
+  pnpm-lock.yaml
+
+SELF-REVIEW
+- Schema, error format and error copy match the brief verbatim. No deviations.
+- zod is imported only by src/manifest.ts. A grep of index.ts, ws.ts and render.ts finds no zod import; the only "manifest" matches there are the existing RenderManifest type.
+- The lockfile diff is limited to the protocol importer and the zod entry.
+- Only the four task files were staged. .superpowers/ is gitignored, so this report is not committed.
+- The test helper withPatch uses `any` for the patched document. It is test-only and typecheck passes.
+
+CONCERNS
+1. Device names differ between modules. The manifest schema uses 'desktop' | 'tablet' | 'mobile' (per brief and spec section 4). render.ts Device is 'base' | 'tablet' | 'mobile'. This task does not map between them. A later task that converts manifest devices to render devices needs to map 'desktop' to 'base'.
+2. pnpm add printed "Ignored build scripts: esbuild@0.28.2, sharp@0.34.5". This task changed no pnpm config. I did not check whether the warning predates this task.
+3. The session header named /home/claude/wt-p3b as the working directory, but the dispatch said /home/claude/wt-p3. I used only /home/claude/wt-p3, which was clean on feat/hub-server before I started.
+4. pnpm add succeeded on the first attempt; no retry was needed.

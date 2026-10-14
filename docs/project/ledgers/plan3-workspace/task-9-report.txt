@@ -1,0 +1,647 @@
+TASK 9 REPORT: ClaudeRunner contract, fake runner, deploy guard
+================================================================
+
+Status: DONE_WITH_CONCERNS
+Branch: p3-9 (worktree /home/claude/wt-p3-9), based on 41cc5ce (Task 3). Not pushed.
+Commit: 116efdc feat(server): ClaudeRunner contract, fake runner, deploy guard
+
+IMPLEMENTED
+-----------
+runner.ts   AgentEvent, RunOptions (with signal), ClaudeRunner, USAGE_LIMIT,
+            usageLimitError, parseUsageLimit. Types and two pure helpers only.
+            No Agent SDK import.
+fake.ts     FakeStep, FakeClaudeRunner. call i plays scripts[min(i, len-1)];
+            calls are recorded when run() is called. Abort is checked before each
+            step and before the implicit final done.
+guard.ts    DEPLOY_DENY_RULES (verbatim from the brief), deployDenyReason,
+            checkToolUse (Bash, Edit, Write, NotebookEdit; other tools return null).
+
+TDD EVIDENCE
+------------
+RED command:  pnpm -F @hub/server exec vitest run src/claude
+RED output (abridged):
+  FAIL  src/claude/fake.test.ts [ src/claude/fake.test.ts ]
+  Error: Cannot find module './fake.js' imported from .../src/claude/fake.test.ts
+  FAIL  src/claude/guard.test.ts [ src/claude/guard.test.ts ]
+  Error: Cannot find module './guard.js' imported from .../src/claude/guard.test.ts
+   Test Files  2 failed (2)
+        Tests  no tests
+
+GREEN command: pnpm -F @hub/server exec vitest run src/claude
+GREEN output:
+   Test Files  2 passed (2)
+        Tests  17 passed (17)
+  (fake.test.ts: 9 tests, guard.test.ts: 8 tests. The brief listed 9 cases; the extra
+   cases cover the abort, explicit-done and throw contract, and the bypass shapes below.)
+
+Repo checks (run before commit, and again after the final line-length edits):
+  pnpm test       exit 0  protocol 15, design-model 359, server 26, renderer 52, client 122
+  pnpm typecheck  exit 0  all 5 workspace packages
+  pnpm -F @hub/server typecheck  exit 0
+
+FILES CHANGED (commit 116efdc, 5 files, +467)
+---------------------------------------------
+  apps/server/src/claude/runner.ts
+  apps/server/src/claude/fake.ts
+  apps/server/src/claude/fake.test.ts
+  apps/server/src/claude/guard.ts
+  apps/server/src/claude/guard.test.ts
+No package.json, pnpm-lock.yaml or other file changed. No docs/ or .superpowers/ file
+was touched except this report.
+
+DEVIATIONS AND EXTENSIONS (beyond the literal algorithm; all conservative)
+-------------------------------------------------------------------------
+Each one is covered by a test in guard.test.ts ("denies bypass shapes beyond the
+listed examples", or the checkToolUse cases). The controller may want to prune any of them.
+
+ 1. Leading words starting with "-" are dropped with the wrapper list
+    (catches: env -i ssh host, sudo -E docker ps).
+ 2. Shell keywords if then else elif while until do ! { are dropped as leading words
+    (catches: if true; then git push; fi).
+ 3. "(" and ")" split segments like ";" (spec: space), so process substitution is
+    caught (cat <(ssh host)). "<" and ">" become spaces, so git push>log is caught.
+ 4. Option values are skipped before the subcommand is read:
+    git: -C -c --git-dir --work-tree --namespace
+    gh:  -R --repo
+    npm family: -C --cwd --dir --prefix -F --filter -w --workspace
+    (catches: git --git-dir .git push, gh -R owner/repo pr merge 1,
+     pnpm -F web run deploy).
+ 5. A leading backslash is stripped from the program name (\git push).
+ 6. The edit check tests for ".." followed by the path separator, not a bare ".." prefix,
+    so a file named ..notes.md inside the checkout is allowed.
+ 7. Fake runner: an abort during the last step ends with done { ok: false, error:
+    'aborted' }, matching the RunOptions.signal contract (the brief's wording would have
+    yielded ok: true). An explicit done event ends the script. A throwing function step
+    ends with done { ok: false, error: message }, so run() never throws.
+
+KNOWN GAPS (probed against the built module; the guard returns null for each)
+-----------------------------------------------------------------------------
+ - sudo -u root docker ps          wrappers whose options take a separate value are not
+                                   unwrapped (sudo -u, env -u, nice -n).
+ - timeout 60 git push             timeout is not a wrapper, and the numeric argument is
+                                   read as the program.
+ - g"it" push                      quotes become spaces (per the spec), so a split command
+                                   name is not rejoined the way bash joins it.
+ - curl "$URL" where $URL is the Hetzner API, eval, $'...' quoting, and symlinks (the
+                                   edit check uses lexical resolve()).
+ - MultiEdit                       not in the spec's edit-tool list, so checkToolUse
+                                   returns null. If the Build agent is given MultiEdit,
+                                   add it to the list.
+ - DEPLOY_DENY_RULES               only exported here; nothing consumes it in this task.
+Closing these fully needs a real shell tokenizer. None was added, since no dependency
+change was requested. Adding timeout plus a numeric-leading-word drop would close the
+timeout case cheaply if the controller wants it.
+
+SELF-REVIEW NOTES
+-----------------
+ - No Date, Math.random or I/O in src (node:path only). Explicit class fields, not
+   parameter properties. Lines kept to 110 columns or fewer.
+ - Reason strings are exact: the push reason matches the brief character for character,
+   and the template-literal reasons carry no backticks.
+ - Denial checks are ordered as in the brief, and the first reason found is returned.
+ - Every denial case the brief lists has a test, including the four Review Focus shapes:
+   cd web && git push, /usr/bin/docker, bash -c "ssh ...", FOO=1 git push.
+
+CONCERNS
+--------
+ 1. The guard is best-effort. It catches every listed case but not the known gaps above.
+    The controller should decide whether that is acceptable for Build, or whether a
+    shell tokenizer is needed.
+ 2. Extensions 1 to 7 go beyond the literal algorithm. They are listed so the reviewer
+    can accept or prune them.
+ 3. The abort-on-last-step behavior (extension 7) is a judgment call.
+
+FIX ROUND 1 (controller ruling 6)
+=================================
+
+Commit: 87a9955 fix(server): guard sees through wrappers and quoting (on top of 116efdc)
+Files: apps/server/src/claude/guard.ts, apps/server/src/claude/guard.test.ts. No dependency change.
+
+WHAT CHANGED
+------------
+1. Wrappers are transparent. sudo doas env timeout nice ionice nohup stdbuf time command exec
+   builtin xargs setsid chronic unbuffer, and bash/sh/zsh, are skipped together with their
+   options and option values (sudo -u root, timeout 60, timeout -s KILL 60, nice -n 5,
+   env -i FOO=1, stdbuf -oL). The next word is then the program, repeatedly. Each wrapper has
+   a hand-written option table. An option not in the table makes the command fail closed with
+   "Build cannot tell which program this runs; name the program directly."
+2. Dequoting. A quote-aware tokenizer replaces the spec's quotes-to-spaces step. Unquoted
+   whitespace separates words, quote characters are removed, and a backslash escapes the next
+   character. So g"it" push, 'git' push, gi\t push and "/usr/bin/docker" ps all match.
+   A program word that still contains whitespace (bash -c "ssh host", eval "git push") is
+   checked as a command line.
+3. MultiEdit is checked the same way as Edit (also Write and NotebookEdit).
+
+Also changed, and not in the ruling (flagged for the reviewer):
+ - A backtick is a command separator now. Before, it became a space, so echo `ssh host` was
+   missed. This is a deviation from the brief's literal quotes-to-spaces step.
+ - A backslash-newline is removed before splitting, as bash does.
+ - A quoted assignment value with spaces stays one word, so FOO="x y" git push is seen.
+ - A program name built at run time fails closed with the UNCLEAR reason: it contains $, *, ?,
+   a [...] class, or braces ({a,b}). This covers $GIT push, g?t push and $'git' push.
+ - eval's arguments are checked as a command line.
+
+TDD EVIDENCE
+------------
+RED command: pnpm -F @hub/server exec vitest run src/claude/guard.test.ts
+RED output (tests added first, before guard.ts changed; abridged):
+   × denies bypass shapes beyond the listed examples  (echo `ssh host`: expected null not to be null)
+   × sees through wrapper commands and their options  (sudo -u root docker ps: expected null not to be null)
+   × sees through quoting and backslash escapes in program names  (expected null to be 'git push is done...')
+   × reads quoted assignment values and quoted command strings whole  (expected null to be 'git push is done...')
+   × fails closed when the program cannot be named  (expected 'Deploying is a Hub action; docker is...' to be 'Build cannot tell...')
+   × MultiEdit is checked the same way as Edit
+   Tests  6 failed | 7 passed (13)
+
+GREEN command: pnpm -F @hub/server exec vitest run src/claude
+GREEN output:
+   Test Files  2 passed (2)
+        Tests  22 passed (22)
+
+Required checks (exit codes captured):
+   pnpm -F @hub/server test   exit 0  Test Files 3 passed (3), Tests 31 passed (31)
+   pnpm -r typecheck          exit 0  all 5 workspace packages
+Common-command probe (no false positives): pnpm -F @hub/server exec vitest run src/claude, git log,
+   ls -la | grep ssh, [[ -f x ]] && echo ok, if [ -f x ]; then pnpm test; fi, cd web && pnpm build,
+   echo "done" > out.txt, cat <<EOF heredoc, sed -n '1,5p', timeout 120 pnpm test, env NODE_ENV=test
+   pnpm test, gh pr view, gh pr create, echo "git push", bash -c "echo hi", bash scripts/x.sh,
+   sudo apt-get install -y jq (sudo stops at apt-get, so -y belongs to apt-get), ssh-keygen -t ed25519
+   all return null.
+
+GAPS CLOSED BY THIS ROUND
+-------------------------
+ - sudo -u root docker ps, timeout 60 git push, env -i FOO=1 git push, nice -n 5 nohup ssh host,
+   xargs git push < x: all denied.
+ - g"it" push: denied (quotes are removed, not turned into spaces).
+ - MultiEdit: checked like Edit.
+
+GAPS THAT REMAIN (for the controller)
+-------------------------------------
+ 1. The guard reads command text only. It cannot see inside scripts or interpreters:
+    bash deploy.sh, ./deploy.sh, node x.js, python -c, make, or a package.json script that pushes.
+    A Build agent can write such a file inside the checkout and run it. The real protection
+    must come from the environment: Build child processes get scrubEnv(...), with no push
+    credentials, and only the Hub pushes. The guard is a filter, not a sandbox.
+ 2. Shell function definitions (function NAME { git push; }) are not unwrapped.
+ 3. The wrapper option tables were written from each tool's man page. They are not checked
+    against every tool version. An unknown option fails closed, so the risk is a false deny,
+    not a miss.
+ 4. Symlinks: the edit check is lexical (resolve), so a symlink inside the checkout that points
+    outside it is not caught.
+ 5. $'...' ANSI-C words fail closed through the $ check. Their escape sequences are not decoded.
+
+STATUS: DONE_WITH_CONCERNS (unchanged). The ruling's three items are done and tested.
+
+FIX ROUND 2 (controller ruling 10, task review of the deploy guard)
+===================================================================
+
+Commit: 1a83401 fix(server): guard fails closed on redirections, dynamic words, runners and aliases
+(on top of 87a9955). Files: apps/server/src/claude/guard.ts, apps/server/src/claude/guard.test.ts.
+No dependency change. Policy per ruling 10: fail closed with UNCLEAR_REASON rather than parse precisely.
+
+WHAT CHANGED
+------------
+1. Redirections. The tokenizer drops each redirection with its target (>x, > x, 2>&1, <x, >>x,
+   &>x, N>x). A bare fd number before an operator is dropped too. The "&" and "|" of &>, >& and >|
+   no longer split segments. The old blanking of <> is gone.
+2. Dynamic words. A word is dynamic when its raw text has $, *, ?, [, {, or a substitution.
+   - Substitutions ($(...), <(...), >(...), `...`) are checked on their own text. A reason found
+     inside one is returned as is. Otherwise the substitution is replaced by a marker character,
+     so the outer word is dynamic. A program that is dynamic fails closed.
+   - A git subcommand (and any checkout/switch target), a gh action word, an npm script word,
+     and any curl/wget/http argument with $ or a marker, fail closed when dynamic.
+   - git, gh and the npm family with no resolvable subcommand fail closed.
+   - An unpaired ` or $( fails closed. "f() {" and "a=()" fail closed.
+3. Option placement. git: --config-env and --attr-source take a value. gh: -R/--repo (and the
+   attached forms) are skipped between subcommand words, and an unknown option before the second
+   word fails closed. npm/pnpm/yarn/bun: options after run are skipped (-s, --silent,
+   --if-present, -w x, -r, --). run, run-script, rum and urn are accepted. A bare deploy* first
+   word denies for all four managers. The brief asked for pnpm and yarn; npm and bun are a superset.
+4. Runners. exec, dlx and x after the npm family are checked as the command that follows (the
+   words after -- are the command). npx, pnpx and bunx are wrappers; their -c option fails closed.
+5. Minors:
+   - alias: an "alias." in a git argument, a whole-command GIT_CONFIG plus alias. (env prefixes),
+     and gh alias all deny.
+   - Shells: dash ksh fish ash csh tcsh zsh bash sh, and busybox <program>, are handled like bash
+     for -c. A shell with no -c and no operand, or with -s, fails closed.
+   - Wrappers: taskset (positional mask) and busybox are added. su runuser flock watch script strace
+     chroot unshare nsenter parallel coproc and function fail closed. find -exec, -execdir, -ok and
+     -okdir fail closed.
+   - Backslash-newline is removed only when the backslash is not escaped (an even run is kept).
+   - Hetzner matching ignores case. curl/wget/http/https with a $ or marker in any argument fail
+     closed, and so do URL arguments with [ or { in them.
+   - command -v and command -V are inert (they do not run the program).
+   - git send-pack and git http-push deny as push.
+
+TDD EVIDENCE
+------------
+RED: tests were rewritten as tables (exact reason per row) before guard.ts changed.
+Command: pnpm -F @hub/server exec vitest run src/claude/guard.test.ts
+Output (summary):
+   Test Files  1 failed (1)
+        Tests  84 failed | 97 passed (181)
+
+GREEN: pnpm -F @hub/server exec vitest run src/claude
+   Test Files  2 passed (2)
+        Tests  190 passed (190)
+
+Required checks, run after the final edit (line wrapping):
+   pnpm -F @hub/server test   exit 0   Test Files 3 passed (3), Tests 199 passed (199)
+   pnpm -r typecheck          exit 0   all 5 workspace packages
+
+Allowed regressions (in the table): pnpm test, pnpm -F x build, git status, git commit -m "x",
+git log --oneline, npm run build, ls >out, echo $HOME, cat a | grep b, node -e "1", plus the brief's
+allowed examples, pnpm -F @hub/server exec vitest run, command -v git, git commit -m "$(cat msg)",
+echo `date`, and ssh-keygen. Extra probes also returned null for: 2>&1 | tail, cat <<'EOF' > x.md,
+git diff -- 'src/[a].ts' (args are not checked), curl -s http://localhost:8787/health,
+FOO=$(echo git) push (push is not a command here), cd x && git status, sed -i, python3 -c.
+
+EXTRA BYPASSES CHECKED (probe, all deny)
+----------------------------------------
+X=1 $(echo git) push; env $(echo git) push; xargs -I {} git push {}; exec 3>&1 git push;
+bash -lc 'git push'; sh -c 'echo ok' && git push; echo hi &>/dev/null && ssh host;
+echo x |& ssh host; git -c core.pager=cat push; nohup -- git push; time -- ssh host;
+FOO=1<newline>git push. Backslash-newline after "echo a" correctly leaves git push as an echo argument.
+
+CONCERNS (for the reviewer)
+---------------------------
+1. Scripts and interpreters are still not inspected: bash deploy.sh (script operand, checked as a
+   name only), source, ., node x.js, make, and package.json scripts that push. The real control is
+   that Claude never reaches deploy credentials. The guard is defense in depth.
+2. Known false denies, accepted under ruling 10: an empty pair of parentheses anywhere in the
+   command, including inside quotes (node -e "console.log()", a commit message "feat: x ()");
+   curl/wget/http arguments with { or [ next to a dot (curl -d '{"a":1.5}' URL); a gh command with
+   an unknown option before the second word.
+3. Wrapper option tables were written by hand from each tool's man page. An option not in the table
+   fails closed, so a wrong table gives a false deny, not a miss.
+4. The commit trailer. The round 2 instruction asked for "Co-Authored-By: Claude Opus 5.5 (1M
+   context)". This commit carries the harness trailer, "Claude Haiku 5.5", because that is the model
+   that wrote the change. Earlier rounds used the same harness trailer. If the controller wants the
+   Opus line, amend it there.
+5. The guard does not model shell aliases, PATH tricks beyond the program name, or exported
+   functions. These are not in the ruling list.
+
+STATUS: DONE_WITH_CONCERNS (round 2). All four important classes and the listed minors are fixed,
+and every listed repro has an exact-reason test.
+
+FIX ROUND 3 (controller ruling 13, one quote-aware lexer for the deploy guard)
+==============================================================================
+
+Commit: f12f007 fix(server): guard reads commands with one quote-aware lexer (on top of 1a83401).
+Worktree /home/claude/wt-p3-9, branch p3-9. Not pushed. No dependency change.
+Files: apps/server/src/claude/shell-lexer.ts (new, 722 lines), shell-lexer.test.ts (new),
+guard.ts (parsing core rewritten, 895 lines), guard.test.ts (extended). Every exported name,
+signature and reason string of guard.ts is unchanged. All 190 earlier tests pass unflipped.
+
+WHAT CHANGED
+------------
+1. shell-lexer.ts is one left-to-right pass that returns a flat list of simple commands. Each word
+   is {text, dynamic, expanded, bracketed}; each command has a heredoc flag. It reads:
+   - single and double quotes, $'..' and $"..", backslash escapes, backslash-newline, # comments;
+   - $(...), <(...), >(...), backticks (body un-escaped, then lexed on its own), ${...}
+     (quote-aware), $((...)), $[...] and ((...)) (where << is a shift);
+   - redirections (<, >, >>, >|, &>, N>, N>&M, <<<, <<), dropped with their targets;
+   - heredocs (<<, <<-, quoted or unquoted delimiter, several on one line). Quoted bodies are
+     skipped. Unquoted bodies still run $(...) and backticks, so those commands are listed;
+   - case statements (pattern lists such as "*)" are not commands, ")" does not close a
+     substitution).
+   Commands inside a substitution are listed before the command that holds them.
+   dynamic = an unquoted or double-quoted $, backtick or substitution, an unquoted glob (* ? [..])
+   or an unquoted brace expansion (needs a comma or ".." inside). stash@{0} and {} are not dynamic.
+2. It fails closed (throws LexUnclear, mapped to UNCLEAR_REASON) on: nesting over 32; an unterminated
+   quote, substitution, ${ or backtick; "((" or "$((" that does not close as "))"; a "'" inside a
+   double-quoted ${...} (bash versions disagree); unquoted empty parens (f(), a=()); a step budget
+   (20000 + 50 per input character). deployDenyReason and checkToolUse also have a try/catch, so a
+   RangeError from a 2,500-deep "$(" is UNCLEAR_REASON.
+3. guard.ts runs its rules on the lexer output only. The old tokenizer, the substitution blanking,
+   the separator scan, the matching-paren scan and the private-use marker are all gone. The marker
+   is replaced by the per-word dynamic flag, so no invisible literal is left in any file (the source
+   files are pure ASCII).
+4. Bypasses from the brief, each with a failing test first and an exact-reason assert:
+   B1 append assignments (ASSIGNMENT regex allows +=). B2 separators in quotes and escapes, before
+   git push, ssh h, docker ps, pnpm exec git push, npm run deploy, gh pr merge 3 (9 prefixes x 6
+   targets). B3 pnpm -w read both ways (value flag for npm, boolean for pnpm), deny if either denies.
+   B4 unknown --opt after run fails closed. B5 corepack is a wrapper and @version is stripped from
+   the program word. B6 xargs -I/-i/--replace marks words equal to the replace string as dynamic;
+   under xargs an incomplete git/gh/npm command fails closed. B7 script selectors starting with "/"
+   or holding * ? [ fail closed. B8 recursive, multi, m, workspace, workspaces [foreach], explore
+   pass through to the nested command. B9 npx/pnpm dlx vercel@latest and similar.
+5. Cheap extras: alias check is case-insensitive; GIT_CONFIG_GLOBAL= and GIT_CONFIG_SYSTEM= anywhere
+   give UNCLEAR_REASON; added wrappers sudo/doas/pkexec/run0/systemd-run/ssh-agent/sshpass/fakeroot/
+   numactl/setsid/chronic/unbuffer; shells rbash and mksh; at, tmux, screen, dtach, crontab,
+   setpriv, bwrap, firejail, expect, newgrp, sg, trap and alias fail closed; source/. with a dynamic
+   operand, a heredoc, or /dev/stdin, /dev/fd, /proc/self/fd fail closed; shopt with expand_aliases
+   fails closed; a heredoc feeding a shell or xargs fails closed; git submodule foreach, rebase
+   -x/--exec, subtree/lfs/for-each-repo push give the push reason; git bisect run checks its command.
+   A shell -c operand is lexed and checked again, so bash -c "s\sh" is seen as sh.
+6. False denies removed (each is now an allowed-regression test): "()" inside quotes or heredoc
+   bodies (commit messages, grep, sed, node -e, git grep, pnpm test -t, psql -c), npm/pnpm/yarn/bun
+   -v, --version, --help, -h and the bare command, heredoc and quoted lines starting "* bullet",
+   "**Note:**", "- [x] done", "[WIP] x", "$ cmd", {"a":1}, quoted separators before program words
+   ("fix: docker & ssh docs", "feat(docker): x"), sqlite3 db "select count(*) from t", and the
+   brief's list of ordinary commands.
+
+DECISIONS
+---------
+- git checkout -b feat/x-{a,b} stays denied (UNCLEAR: brace expansion in a git word).
+- GIT_CONFIG_GLOBAL/SYSTEM give UNCLEAR_REASON, as the brief says "fail closed".
+- trap and alias always fail closed. source <plain file> is allowed.
+- The alias check is still broad: a word that contains "alias." plus git config denies, and so does
+  git commit -m "...alias.x..." (existing behaviour).
+- ((cmd) && (cmd)) and $((cmd) ) fail closed instead of being guessed.
+
+TDD EVIDENCE
+------------
+RED: the new tests were written against the round-2 guard.ts before any rewrite.
+Command: pnpm -F @hub/server exec vitest run src/claude/guard.test.ts
+Output (first RED run): Test Files 1 failed (1), Tests 181 failed | 256 passed (437).
+   That is 256 new guard tests (437 less the 181 earlier guard tests); 181 of the new ones failed
+   and every earlier test passed. The other 75 new rows are allowed regressions and denies the old
+   guard already got right.
+Re-measured on the final test file against 1a83401's guard.ts (restored afterwards, tree clean):
+   Tests 193 failed | 267 passed (460). The extra 12 failures are tests added from review and fuzz
+   findings (case statements, non-arithmetic "((", xargs wrapper without a program, bash -c
+   "s\sh", for ((..)) do ...).
+GREEN: pnpm -F @hub/server test   exit 0   Test Files 4 passed (4), Tests 506 passed (506)
+       (src/claude: guard.test.ts, shell-lexer.test.ts with 28+ direct lexer tests, fake.test.ts:
+       497 tests)
+       pnpm -r typecheck          exit 0   all 5 workspace packages
+
+DIFFERENTIAL FUZZING (scratch scripts, not committed)
+-----------------------------------------------------
+Random commands from a grammar (quotes, escapes, assignments, substitutions, heredocs, redirections,
+wrappers, background jobs, mutated inputs) were filtered with bash -n, then run under bash 5.2 with
+stub programs (ssh, git and others only record that they ran) inside unshare -p with a 2 second kill
+timeout. Each command where a stub ran must be denied by deployDenyReason.
+- 4 runs of 15000 candidates each (2 seeds of a restricted grammar, 2 of a broader grammar):
+  11235 + 11220 + 5684 + 5691 valid scripts, 6608 + 6610 + 3350 + 3385 with a stub run:
+  0 missed denies.
+- The guard also denied commands where bash did not run the stub (about 2.5 percent of the valid
+  scripts): a stub in a background job that had not started before the check, a redirection to a
+  missing directory, and lexer fail-closed cases. These are accepted false denies (fail closed).
+- Real misses found by earlier fuzz runs and fixed with a test each: a statement-level "((" that is
+  not arithmetic, a heredoc quirk, bash -c "s\sh", for ((;;)) do cmd, esac) inside $(case ..),
+  case patterns read as commands.
+- Performance found and fixed: xargs -I{} repeated 10000 times (6.6 s) and eval eval ... 100000
+  times (3.6 s) are now capped by the wrapper and eval chain limits. A linear-time test covers this.
+
+CONCERNS (for the reviewer)
+---------------------------
+1. Scripts and interpreters are still not inspected: ./deploy.sh, bash script.sh, node x.js, make,
+   just, package.json scripts that push, and a heredoc fed to python or node. source <plain file> is
+   allowed. The real control is that Claude never holds deploy credentials. The guard is defense in
+   depth.
+2. Not modelled: git -c core.fsmonitor / core.sshCommand tricks, difftool, filter-branch, and config
+   redirection with HOME= or XDG_CONFIG_HOME=. [[ ... ]] internals are lexed as ordinary words.
+3. The lexer implements the bash grammar by hand. It is conservative on constructs it cannot place
+   (it throws), so the risk is a false deny, not a miss. Fuzzing found no miss in 33000 valid
+   scripts, but it covers the grammar's generator, not all of bash.
+4. Known remaining false denies: git checkout -b feat/x-{a,b}; any command with unquoted empty
+   parens; "alias." anywhere beside git config; unknown wrapper options.
+5. The commit trailer is the harness one, "Claude Sonnet 5.5", with the Claude-Session line.
+
+STATUS: DONE_WITH_CONCERNS (round 3). Every listed bypass and false deny has a test with exact
+reason strings, and the 190 earlier tests pass unchanged.
+
+FIX ROUND 4 (re-review a8f1467cfa2b0fba0, Ruling 14: one-line fail-closed over deep bash modelling)
+====================================================================================================
+
+Fresh Opus implementer. First `git merge --no-ff feat/hub-server` into p3-9 (integration branch had
+moved; guard.ts/shell-lexer.ts were unchanged upstream, so the merge brought only unrelated files).
+Then N1-N13 + the version/help minor, test-first per item. Files touched:
+  apps/server/src/claude/shell-lexer.ts  (+~140 lines)
+  apps/server/src/claude/guard.ts        (+~175 lines)
+  apps/server/src/claude/guard.test.ts   (+121 lines: DENIED_4 66 rows, ALLOWED_4 11 rows)
+No dependency, docs/ or .superpowers/ change except this report.
+
+WHAT CHANGED (by re-review item)
+--------------------------------
+N1  shell-lexer: each $(...)/<(...)/>(...) substitution gets its own empty pending-heredoc list
+    (save/restore of Lexer.pending), so an outer heredoc body only starts after the OUTER newline and
+    the commands inside the substitution (ssh h) are still lexed.
+N2  shell-lexer case/for state machine: a redirection clears prefixOnly (markNotPrefix); `for`/`select`
+    removed from COMMAND_PREFIX (their loop var is not a keyword), with `for ((` recognised via the
+    preceding `for` word (canStartArith); the separator branches end the pending word first (so a
+    trailing `esac` closes the case before the separator is judged); a lone `;`/`&&`/`||`/`&` or a
+    second bare pattern word while reading case patterns throws LexUnclear.
+N3  shell-lexer: `{name}>` / `{name}<` is a variable-fd redirection (WordBuilder.isVarFd +
+    takeVarFd), dropped like a bare fd number, not read as the program word.
+N4  guard.findProgram: a command-position word matching NAME[ (array-element assignment, whose index
+    bash evaluates) fails closed (UNCLEAR).
+N5  guard.findProgram: after `env`, every leading word containing `=` is skipped as an assignment
+    (valid NAME or not: a-b=1, 'a b=1', =x, X}=1); `-S`/`--split-string` already fail closed.
+N6  shell-lexer: `[[`/`]]` tracked as a conditional depth; an unquoted `#` inside `[[ ]]` throws
+    (it is not a comment there).
+N7  extglob: shell-lexer throws on a glued `?(`,`*(`,`+(`,`@(`,`!(`; guard.shopt fails closed on
+    `extglob` (and a shell's `-O extglob` reaches its `-c` script, which re-lexes and throws).
+N8  guard.gitReason: a dynamic `-c`/`--config-env` value, or a dynamic `git config` key, fails closed;
+    guard.check: a dynamic GIT_CONFIG_KEY_n / GIT_CONFIG_PARAMETERS / GIT_CONFIG_COUNT assignment fails closed.
+N9  guard: DATA_CODE_BUILTINS (declare typeset local export readonly unset read printf mapfile
+    readarray compgen complete test [ [[ let) fail closed on a literal `$(`/backtick in any word
+    (quoted or not); compgen/complete/mapfile/readarray `-C`/`-F` fail closed; `let` on a bare-name /
+    subscript operand fails closed; an assignment value that hides a single-quoted `$(`/backtick fails
+    closed; check() fails closed on `${x@P}`, on any `PS4=`/`BASH_ENV=`/`ENV=` assignment, and on
+    `${!name}`; shell-lexer throws when a `$((...))`/`((...))`/`$[...]` operand is a bare name or a `[`
+    subscript (literal/numeric expressions like `1+2`, `i+1`, `1<<2` stay allowed).
+N10 stdin scripts: normalizeUnixPath collapses //, /./, /../; isStdinPath matches /dev/stdin,
+    /dev/fd/*, /proc/self/fd/*; source/. and a shell's non-`-c` script operand fail closed on them;
+    `<<<` now sets the command's heredoc flag (so `bash /dev/stdin <<< x` fails closed).
+N11 guard: under xargs (open) curl-family and find fail closed (args come from stdin); the
+    `name !== 'xargs'` exclusion dropped so `xargs xargs` fails closed.
+N12 guard.commandReason: a program basename `git-<sub>` is read as `git <sub>` (gitReason); a
+    non-deploy git-* dashed form fails closed.
+N13 guard.FAIL_CLOSED_PROGRAMS gains prlimit setarch linux32 linux64 i386 x86_64 chrt dbus-run-session
+    systemd-inhibit capsh gdb ltrace valgrind faketime eatmydata proxychains proxychains4 torify
+    torsocks xvfb-run start-stop-daemon (Ruling 14: rare in build work, fail closed over modelling).
+Minor: bare `git`/`gh`, `git --version`/`--help`, `gh --version`/`--help` now return null (bare-git /
+    no-subcommand still fails closed under xargs and inside a -c/eval operand, keeping `bash -c "git"`
+    → UNCLEAR unflipped).
+
+TDD EVIDENCE
+------------
+RED  (new DENIED_4/ALLOWED_4 against the merge base, guard/lexer == f12f007):
+     pnpm -F @hub/server exec vitest run src/claude/guard.test.ts
+     -> Test Files 1 failed (1), Tests 62 failed | 469 passed (531)
+GREEN:
+     vitest run src/claude/guard.test.ts src/claude/shell-lexer.test.ts -> 559 passed (2 files)
+     vitest run src/claude                                               -> 581 passed | 1 skipped (4 files)
+     pnpm -F @hub/server test                                            -> 919 passed | 1 skipped (27 files)
+     pnpm -F @hub/server typecheck                                       -> exit 0
+     pnpm -F {protocol,design-model,renderer,server} typecheck           -> all OK
+Every pre-existing test still passes unflipped.
+
+REVIEWER REPRO FILES (/tmp/.../p9rr via their confirm.ts / diff.ts, bash 5.2 + stub ssh/git/...)
+------------------------------------------------------------------------------------------------
+c1-c5 (the headline N1-N13 repros): every row that bash runs a stub for is now denied; the 3 rows
+  still ALLOWED run no stub (x=1 sesach h / a mangled heredoc-case / a malformed token line) -> not misses.
+d1-d12 (differential diff.ts): miss=0 for d1-d9, d11, d12. d10 has 3 remaining misses, all the
+  arbitrary-script-FILE class (`echo 'ssh h' > x.sh; bash x.sh` / `. ./x.sh` / `source x.sh`): the
+  guard cannot read a file on disk, and `source <plain file>` is allowed by design. Parked to plan 4
+  (credential isolation), as Ruling 14 directs; N10 covered only the stdin-path forms, which are denied.
+
+DIFFERENTIAL FUZZING (bash 5.2, stub programs)
+----------------------------------------------
+The reviewer's fuzzers (fuzz.ts..fuzz4.ts) share one RANLOG, so a backgrounded stub (`ssh h &`) from
+one iteration can write to it during the next -> false "ran" -> false "miss". Reran with each command
+in its own temp dir + RANLOG and a settle for background jobs, counting a miss only when a genuine
+deploy stub (ssh/scp/rsync/kubectl/docker, or `git ... push`) actually ran:
+  fuzz2 (original, N1-N13 grammar), seed 71 mut 2500 / seed 72 soup 2500 -> miss=0, miss=0.
+  fuzz2b (hardened), seed 71 mut 1493 -> ran=313 miss=0; seed 72 soup 1200 -> ran=7 miss=0.
+  fuzzb  (hardened, broad grammar), seed 11 mut 1496 -> ran=284 miss=0.
+  fuzz4 (case/for/select heavy) seed 61 mut 2454 reported 616 candidate misses; isolated
+    re-verification (verify4b.ts, fresh RANLOG per command + 0.3s settle) -> candidates=616 realMiss=0.
+    Every one was shared-RANLOG background bleed or mangled text invoking no stub.
+Net: 0 real misses for the N1-N13 classes. The raw fuzzer false-deny rate is high (mut ~51%, soup
+~91%) because the fuzzers emit mostly malformed shell, which fails closed by design (Ruling 14); it is
+not a real-command rate. On the ordinary-command corpus (the 100+ ALLOWED/ALLOWED_3/ALLOWED_4 rows:
+pnpm/npm/git/node/curl-localhost/heredoc-commit-bodies/etc.) there are zero false denies.
+
+DELIBERATELY FAILED CLOSED INSTEAD OF MODELLED (Ruling 14)
+---------------------------------------------------------
+ - N13 attribute/sandbox/debugger wrappers (prlimit, setarch, chrt, gdb, valgrind, ...) -> UNCLEAR
+   rather than unwrapping their option grammars.
+ - `shopt -s extglob` on its own -> UNCLEAR (enables, runs nothing, but denied per the brief).
+ - `$((x))` / `(( x ))` / `let x` with a lone bare-name operand -> UNCLEAR (bash re-evaluates the
+   variable's string; a literal/`$i` expression stays allowed).
+ - Any `ENV=`/`BASH_ENV=`/`PS4=` prefix -> UNCLEAR. `ENV=foo cmd` is a rare false deny (NODE_ENV=,
+   APP_ENV= etc. do NOT match, only a word literally starting `ENV=`); accepted per the brief.
+ - Single-quoted `$(`/backtick in an assignment value or a data-builtin arg -> UNCLEAR (a commit-ish
+   value with a literal `$(` or backtick is a rare false deny).
+ - A `git-<sub>` dashed program that is not a deploy subcommand -> UNCLEAR (the dashed form is itself
+   unusual in ordinary work).
+
+PARKED TO PLAN 4 (text guard cannot see; the real control is the credential-less hub-agent uid)
+-----------------------------------------------------------------------------------------------
+ - Arbitrary script FILES run by an interpreter: `bash x.sh`, `./deploy.sh`, `node x.js`, `make`,
+   package.json scripts, `source <plain file>`. The guard reads the command line, not files on disk.
+ - `echo $(( 'a[$(ssh h)]' ))` (a bash syntax error in practice): the command sub sits inside a
+   single-quoted arithmetic operand the lexer skips; not in the brief's required repro set.
+
+CLEANUP: no fuzz/stub processes left running; scratch fz_/vz_ temp dirs removed.
+
+STATUS: DONE_WITH_CONCERNS (round 4). Every listed N1-N13 repro has a test with its exact reason; the
+only remaining re-review repros are the arbitrary-script-file class, parked to plan 4 by Ruling 14.
+
+================================================================================
+Fix round 5 (round-4 re-review a30ed37c79304456c; final round, Ruling 14/15)
+================================================================================
+
+Scope: narrow the one over-broad data-builtin rule (I1/Ruling 15), close the N6/
+N8/N9 siblings the re-review listed (C1-C5), and lift its minor false denies
+(M1-M5). Test-first; exported names and reason strings unchanged; every prior
+test passes unflipped. After this round the breaker trips: residual findings are
+adjudicated/parked to plan 4 (the credential-less OS user), not re-fixed.
+
+Changes
+-------
+guard.ts
+  I1  Data-builtin $(/backtick rule now fires on hidesCommandSubstitution(w)
+      (a quoted/escaped substitution the lexer never scanned) instead of
+      hasCommandSubstitutionText(w.text). A real substitution is already lexed
+      and checked as its own command, so [ -z "$(git status --porcelain)" ],
+      export SHA=$(git rev-parse HEAD), local x=$(pwd), [[ $(uname) == Linux ]]
+      and kin are allowed. Every N9 single-quoted repro stays denied.
+  C2  git config skips a literal set/get/unset/list/get-regexp/rename-section/
+      remove-section subcommand before reading the key, so a dynamic key after
+      the subcommand (git config set "$K" push) still fails closed.
+  C3  Callback builtins: the C/F callback letter is detected anywhere in a
+      short-flag cluster (mapfile/readarray -tC, compgen/complete -fC), not only
+      as the first letter.
+  C5  isStdinPath also recognises /proc/thread-self/fd/<n> and /proc/<pid>/fd/<n>.
+  M1  PS4=/BASH_ENV=/ENV= fail closed only as real assignments (prefix
+      assignments, env operands, export/declare/local/readonly/typeset operands),
+      not as any word; echo "ENV=prod", grep ENV= .env etc. are allowed.
+  M3  git -c: only a dynamic KEY fails closed (git -c "$K=push"); a dynamic value
+      after a literal key (git -c user.name="$NAME") and a -c that is the
+      subcommand's own option (git commit -c "$SHA", git show -c "$SHA") are
+      allowed. The -c/--config-env scan stops at the subcommand.
+  M4  git-<x> basenames (git-lfs, git-crypt, any git-<x>) map to git <x> and run
+      the normal git rules; the unconditional UNCLEAR fallback is gone, so
+      git-lfs push keeps GIT_PUSH while git-lfs status / git-crypt status pass.
+
+shell-lexer.ts
+  C1  LexUnclear on a `<` operator (`<`, `<<`, `<<-`) while inside [[ ]] (N6
+      sibling; a `<` there is a comparison, and `(a <<E )` would read a phantom
+      heredoc).
+  C4  LexUnclear on a single-quoted $( or backtick inside ${...} (a subscript or
+      offset is evaluated as arithmetic, which strips the quotes and runs it).
+  M2  checkArithOperand allows ${...} expansions and subscripts indexed by
+      digits / $name / @ / * (arr[0], arr[$i], ${#a[@]}); a bare-name operand and
+      any other subscript still fail closed.
+  M5  `<<<` sets a new, separate `herestring` flag instead of `heredoc`, so a
+      here-string no longer trips the heredoc denials for xargs / a shell / source
+      (xargs -n1 echo <<< "a b", bash -c 'pnpm test' <<< x, source .env <<< x,
+      bash script.sh <<< x are allowed); a real << heredoc into a shell/xargs and
+      a stdin-path operand still fail closed via the unchanged operand checks.
+
+Tests: guard.test.ts +12 I1-allowed rows, +21 allowed rows, +25 denied rows
+(DENIED_5/ALLOWED_5/ALLOWED_5_I1); shell-lexer.test.ts +4 cases (herestring vs
+heredoc, `<` in [[ ]], quoted sub in ${...}, arithmetic subscripts). RED before,
+GREEN after.
+
+Results
+-------
+Server suite: 981 passed + 1 skipped (round 4: 919 + 1); server typecheck (tsc --noEmit) clean.
+No linter is configured in the repo.
+
+False-deny corpora (reviewer's p9r4 sets), allowed/denied, round 4 -> round 5:
+  Set A corpus.txt  (289): 276/13 -> 285/4
+  Set B corpus3.txt  (85):  74/11 ->  78/7
+  Set C corpus4.txt  (44):  35/9  ->  41/3
+Differential vs the round-4 guard (git HEAD) on all three sets: 0 regressions
+(allowed -> denied), 19 fixes (denied -> allowed: 9 + 4 + 6).
+
+Remaining denials, each with its reason (all were denied in round 4 too):
+  Set A
+   - git checkout -b "build/$(date +%s)"   UNCLEAR  checkout/switch with a dynamic
+     operand fails closed (the branch could be main).
+   - find . -name '*.ts' -exec wc -l {} +  UNCLEAR  find -exec (runs an unchecked command).
+   - alias ll='ls -la'                     UNCLEAR  alias definitions fail closed.
+   - trap 'echo bye' EXIT                  UNCLEAR  trap runs a stored command string.
+  Set B
+   - three [[ $v =~ regex ]] whose regex has ( ) groups   UNCLEAR  the lexer reads the
+     ( as a subshell inside [[ ]]; [[ ]] internals are not modelled.
+   - [[ -n "$x" && -n "$y" ]], [[ $a == b || $c == d ]]  UNCLEAR  && / || inside [[ ]]
+     split the conditional; same [[ ]] modelling gap.
+   - files=($(git ls-files '*.ts')); echo ${#files[@]} and
+     declare -a files=($(git ls-files '*.ts'))            UNCLEAR  array literals
+     NAME=( ... ) are not modelled.
+  Set C
+   - git config "$KEY", git config --get "$KEY"  UNCLEAR  a dynamic config key fails
+     closed; the rule does not tell a read from a write.
+   - git submodule foreach 'echo $name'          GIT_PUSH  foreach runs an arbitrary
+     command per submodule (round-2 rule).
+
+Fuzzing (reviewer's fuzzers, per-command RANLOG, ~48 s per config, 6 configs, ~5 min total):
+  fuzzr  mut  tried 4641 denied 3196 ran 741 miss 1
+  fuzzr  soup tried 2713 denied 2400 ran  83 miss 0
+  fuzzr1 mut  tried 2594 denied 1740 ran 484 miss 0
+  fuzzr1 soup tried 1734 denied 1560 ran  21 miss 0
+  fuzzr4 mut  tried 1974 denied 1466 ran 251 miss 0
+  fuzzr4 soup tried 1372 denied  949 ran  19 miss 0
+  The one miss is `. <name> origin HEAD` where <name> is the fuzzer's push-simulating
+  stub on PATH: `source`/`.` of a named file, the parked script-file class. The round-4
+  guard gives the same verdict (null); `. /dev/stdin` and the other stdin paths stay
+  denied. No real misses. No SLOW (>200 ms) inputs.
+
+Accepted false denies added this round (Ruling 14, named by the brief)
+  - `[[ a < b ]]` string comparison -> UNCLEAR (C1 throws on any `<` inside [[ ]]).
+  - A single-quoted `$(`/backtick inside ${...}, e.g. a ${x:-'...$(...)...'} default
+    (C4).
+  - mapfile/readarray with C, or compgen/complete with C or F, anywhere in a short-flag
+    cluster (C3).
+
+Parked to plan 4 (needs deeper bash modelling; real control = hub-agent uid)
+  - [[ ]] internals (=~ regex groups, && / ||) and NAME=( ... ) array literals: the
+    false denies listed above.
+  - Dataflow: payloads put together from variable pieces, and arr[$i] where $i holds a
+    subscript (M2 allows $name indices as the brief directs).
+  - git config-driven exec (core.editor, core.sshCommand, include.path, renaming a
+    section to [alias]).
+  - Script files, including `source <file>` / `. <file>` (the fuzzer's one miss).
+
+CLEANUP: no fuzz or stub processes left running; fz_ temp dirs removed.
+
+STATUS: DONE_WITH_CONCERNS (round 5, final). Every brief item (I1, C1-C5, M1-M5) has
+tests and passes. The 12 I1 commands are allowed; every N9 repro stays denied.
+Residuals are the parked classes above.
