@@ -86,19 +86,49 @@ describe('AppRegistry', () => {
 
     expect(entry?.manifestError).toContain('does not match the folder name "alpha"');
     expect(entry?.adopted).toBe(false);
+    expect(entry?.manifest).toBeNull();
+  });
+
+  it('app without a manifest is not adopted', async () => {
+    makeCheckout('alpha');
+
+    const entry = await new AppRegistry(root).get('alpha');
+
+    expect(entry).toMatchObject({ adopted: false, manifest: null, manifestError: null });
+  });
+
+  it('a .hub that is a plain file reports the read error', async () => {
+    makeCheckout('alpha');
+    writeFileSync(join(root, 'alpha', '.hub'), 'not a directory');
+
+    const entry = await new AppRegistry(root).get('alpha');
+
+    expect(entry).toMatchObject({
+      adopted: false,
+      manifest: null,
+      manifestError: '.hub/app.json could not be read (ENOTDIR)',
+    });
   });
 
   it('get returns null for unknown or unsafe names', async () => {
-    makeCheckout('alpha');
-    const registry = new AppRegistry(root);
+    // Each unsafe name below would resolve to a real git checkout if the name
+    // guard were missing, so a null result can only come from the guard.
+    const apps = join(root, 'apps');
+    mkdirSync(join(root, '.git'), { recursive: true }); // reached by '..'
+    mkdirSync(join(apps, '.git'), { recursive: true }); // reached by '.' and ''
+    mkdirSync(join(apps, 'alpha', '.git'), { recursive: true });
+    mkdirSync(join(apps, 'alpha', 'sub', '.git'), { recursive: true }); // reached by 'alpha/sub'
+    mkdirSync(join(apps, 'alpha\\sub', '.git'), { recursive: true }); // literal backslash name on Linux
+    mkdirSync(join(apps, '.hidden', '.git'), { recursive: true });
+    const registry = new AppRegistry(apps);
 
     expect(await registry.get('nope')).toBeNull();
     expect(await registry.get('..')).toBeNull();
     expect(await registry.get('.')).toBeNull();
-    expect(await registry.get('a/b')).toBeNull();
-    expect(await registry.get('a\\b')).toBeNull();
-    expect(await registry.get('.hidden')).toBeNull();
     expect(await registry.get('')).toBeNull();
+    expect(await registry.get('alpha/sub')).toBeNull();
+    expect(await registry.get('alpha\\sub')).toBeNull();
+    expect(await registry.get('.hidden')).toBeNull();
     expect((await registry.get('alpha'))?.name).toBe('alpha');
   });
 
