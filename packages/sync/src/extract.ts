@@ -255,8 +255,11 @@ export function extractPages(project: SourceProject, entries: RouteEntry[]): Ext
         nodes = renderComponent(layout, 'default', { children: nodes }, `layout/${index}`);
       }
       const id = `page-${namespace}`;
-      const root: ElementNode = { id: `s${namespace}`, kind: 'element', tag: 'div', attrs: {}, style: { base: {} }, children: nodes };
-      applyStyles(root, rules, inline);
+      const first = nodes[0];
+      const root: ElementNode = nodes.length === 1 && first?.kind === 'element' ? first
+        : { id: `s${namespace}`, kind: 'element', tag: 'div', attrs: {}, style: { base: {} }, children: nodes };
+      if (root === first) applyStyles(root, rules, inline);
+      else for (const node of nodes) if (node.kind === 'element') applyStyles(node, rules, inline);
       doc.pages[id] = { id, name: entry.route, route: entry.route, root };
       dependencies[id] = [...files].sort();
     } catch (error) { diagnostics.push({ file: currentFile, message: error instanceof Error ? error.message : 'Extraction failed' }); }

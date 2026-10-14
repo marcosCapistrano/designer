@@ -51,7 +51,7 @@ describe('static import', () => {
     } }, [{ route: '/', file: 'page.tsx' }]);
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    const node = Object.values(result.doc.pages)[0]!.root.children[0]!;
+    const node = Object.values(result.doc.pages)[0]!.root;
     expect(node.kind).toBe('element');
     if (node.kind === 'element') {
       expect(node.style.tablet?.['color']).toBe('red');
@@ -87,7 +87,7 @@ describe('static import', () => {
     const result = extractPages({ files: { 'page.tsx': `export default () => <p title="A &amp; B">A &amp; B &#x1F600;</p>` } }, [{ route: '/', file: 'page.tsx' }]);
     expect(result.ok, JSON.stringify(result)).toBe(true);
     if (result.ok) {
-      const node = Object.values(result.doc.pages)[0]!.root.children[0]!;
+      const node = Object.values(result.doc.pages)[0]!.root;
       if (node.kind === 'element') {
         expect(node.attrs['title']).toBe('A & B');
         expect(node.children[0]).toMatchObject({ text: 'A & B 😀' });
@@ -99,6 +99,20 @@ describe('static import', () => {
     const result = extractPages({ files: { 'page.tsx': `import './style.css'; export default () => <p>Hi</p>`, 'style.css': 'p { margin-left: 2px; margin: 4px; }' } }, [{ route: '/', file: 'page.tsx' }]);
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.diagnostics[0]!.message).toContain('mixed shorthand');
+  });
+
+  it('keeps the source root and does not apply CSS to a synthetic fragment wrapper', () => {
+    const files = { 'page.tsx': `import './style.css'; export default () => <><div>One</div><div>Two</div></>`, 'style.css': 'div { padding: 8px; }' };
+    const result = extractPages({ files }, [{ route: '/', file: 'page.tsx' }]);
+    expect(result.ok, JSON.stringify(result)).toBe(true);
+    if (result.ok) {
+      const root = Object.values(result.doc.pages)[0]!.root;
+      expect(root.style.base).toEqual({});
+      expect(root.children[0]).toMatchObject({ style: { base: { padding: '8px' } } });
+    }
+    const single = extractPages({ files: { ...files, 'page.tsx': `import './style.css'; export default () => <div>One</div>` } }, [{ route: '/', file: 'page.tsx' }]);
+    expect(single.ok).toBe(true);
+    if (single.ok) expect(Object.values(single.doc.pages)[0]!.root.children[0]).toMatchObject({ kind: 'text', text: 'One' });
   });
 });
 
