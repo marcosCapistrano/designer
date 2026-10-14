@@ -83,6 +83,41 @@ const FIELD_RULES: FieldRules = {
 
 const RESTORE_INTERNAL = 'restore ops are internal';
 
+// Names echoed into a message are cut short, so an overlong key cannot flood it.
+const clip = (name: string): string => name.slice(0, 64);
+
+// Why a page's own fields (not its root) are malformed, or null. The id is checked against its key elsewhere.
+export function pageFieldsProblem(page: unknown): string | null {
+  if (!isPlainObject(page)) return 'page must be an object';
+  for (const field of ['name', 'route'] as const) {
+    if (!isString(page[field])) return `${field} must be a string`;
+  }
+  return null;
+}
+
+// Why a component's own fields (not its root) are malformed, or null. Every declared prop is an
+// object with a string default.
+export function componentFieldsProblem(def: unknown): string | null {
+  if (!isPlainObject(def)) return 'component must be an object';
+  const props = def['props'];
+  if (!isPlainObject(props)) return 'props must be an object';
+  for (const [name, decl] of Object.entries(props)) {
+    if (!isPlainObject(decl) || !isString(decl['default'])) {
+      return `props.${clip(name)} must be an object with a string default`;
+    }
+  }
+  return null;
+}
+
+// Why `tokens` is not a record of groups, each a record of string values, or null.
+export function tokensProblem(tokens: unknown): string | null {
+  if (!isPlainObject(tokens)) return 'expected an object';
+  for (const [group, names] of Object.entries(tokens)) {
+    if (!isStringMap(names)) return `token group "${clip(group)}" must be an object of strings`;
+  }
+  return null;
+}
+
 // Why `value` is not a well-formed op, or null when it is. Restore ops are internal and are refused here.
 export function opProblem(value: unknown): string | null {
   if (!isPlainObject(value)) return 'Malformed op: op must be an object';

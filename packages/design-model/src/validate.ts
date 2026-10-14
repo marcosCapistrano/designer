@@ -2,7 +2,7 @@ import { validateOpInternal } from './apply.js';
 import { validateStyle } from './css.js';
 import { validateAttrValue, validateNodeId, validatePageId, validateTag, VOID_TAGS } from './rules.js';
 import { ownValue, validateAttrName } from './ops/util.js';
-import { MAX_DEPTH } from './shape.js';
+import { componentFieldsProblem, MAX_DEPTH, pageFieldsProblem, tokensProblem } from './shape.js';
 import {
   DEVICES,
   type DesignDoc,
@@ -17,11 +17,18 @@ import {
 // Returns the first problem as "<where>: <problem>", where <where> is "page <id>" or "component <name>",
 // with " node <id>" added when the problem is on a node. Returns null when every rule holds.
 export function validateDoc(doc: DesignDoc): string | null {
+  // Instances read their component's props, so every component's fields are checked before any page.
+  for (const [key, def] of sortedEntries(doc.components)) {
+    const fields = componentFieldsProblem(def);
+    if (fields !== null) return `component ${label(key)}: ${fields}`;
+  }
   const ids = new Set<string>();
   for (const [key, page] of sortedEntries(doc.pages)) {
     const where = `page ${label(key)}`;
     const keyProblem = validatePageId(key);
     if (keyProblem !== null) return `${where}: ${keyProblem}`;
+    const fields = pageFieldsProblem(page);
+    if (fields !== null) return `${where}: ${fields}`;
     if (page.id !== key) return `${where}: page id "${label(page.id)}" does not match its key`;
     const problem = nodeIssue(doc, where, page.root, 1, ids);
     if (problem !== null) return problem;
@@ -115,6 +122,8 @@ function styleIssue(style: NodeStyle): string | null {
 
 // Each token goes through setToken's own validator, so a token is valid exactly when setToken accepts it.
 function tokensIssue(doc: DesignDoc): string | null {
+  const shape = tokensProblem(doc.tokens);
+  if (shape !== null) return `tokens: ${shape}`;
   for (const [group, names] of sortedEntries(doc.tokens)) {
     for (const [name, value] of sortedEntries(names)) {
       const problem = validateOpInternal(doc, { op: 'setToken', group, name, value });

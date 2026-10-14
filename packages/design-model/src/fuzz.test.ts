@@ -1,6 +1,7 @@
 import * as fc from 'fast-check';
 import { describe, expect, test } from 'vitest';
 import { applyOp } from './apply.js';
+import { exportPage } from './export.js';
 import { parseDoc, serializeDoc } from './files.js';
 import { sampleDoc } from './fixtures.js';
 import { allIds, allocIds } from './tree.js';
@@ -106,4 +107,158 @@ describe('op fuzz', () => {
       { numRuns: 200 },
     );
   }, 20000);
+});
+
+// Mutates a JSON value at a path chosen by `steps`: each step picks a child by index. Returns a new value.
+type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
+
+const JUNK: Json[] = [
+  null, null, true, 0, -1, 1.5, '', 'x', '{{title}}', 'javascript:alert(1)', '__proto__', [], {}, [null],
+  { default: null }, { default: 3 }, { default: 'ok' }, { color: null }, 'x'.repeat(5000), 'url(a "b) c")',
+  JSON.parse('{"__proto__":{"x":1}}') as Json,
+];
+
+function childKeys(value: Json): (string | number)[] {
+  if (Array.isArray(value)) return value.map((_, i) => i);
+  if (typeof value === 'object' && value !== null) return Object.keys(value);
+  return [];
+}
+
+function mutateAt(value: Json, steps: number[], mode: 'replace' | 'delete', junk: Json): Json {
+  const [step, ...rest] = steps;
+  const keys = childKeys(value);
+  const key = step === undefined || keys.length === 0 ? undefined : keys[step % keys.length];
+  if (key === undefined) return mode === 'replace' ? structuredClone(junk) : value;
+  if (rest.length === 0 && mode === 'delete') {
+    if (Array.isArray(value)) return value.filter((_, i) => i !== key);
+    const copy = { ...(value as { [key: string]: Json }) };
+    delete copy[String(key)];
+    return copy;
+  }
+  if (Array.isArray(value)) {
+    return value.map((item, i) => (i === key ? mutateAt(item, rest, mode, junk) : item));
+  }
+  const object = value as { [key: string]: Json };
+  return { ...object, [String(key)]: mutateAt(object[String(key)] as Json, rest, mode, junk) };
+}
+
+interface FileMutation {
+  kind: number;
+  file: number;
+  steps: number[];
+  junk: number;
+  pos: number;
+  ch: number;
+}
+
+// Most mutations replace or delete a value near the top of a file, where the fields the loader reads sit.
+const fileMutation: fc.Arbitrary<FileMutation> = fc.record({
+  kind: fc.constantFrom(0, 0, 0, 1, 1, 1, 2, 3, 4, 5, 6),
+  file: fc.nat(),
+  steps: fc.array(fc.nat(), { maxLength: 3 }),
+  junk: fc.nat(),
+  pos: fc.nat(),
+  ch: fc.nat(),
+});
+
+const BREAKERS = ['{', '}', '[', ']', '"', ',', ':', 'null', '0', '\\'];
+const EXTRA_NAMES = ['pages/other.json', 'components/Other.json', 'pages/constructor.json', 'components/__proto__.json', 'pages/Bad Name.json', 'notes.txt', 'archive/x.json'];
+
+function mutateFiles(files: Record<string, string>, m: FileMutation): Record<string, string> {
+  const next = { ...files };
+  const names = Object.keys(next).sort();
+  const name = names[m.file % names.length] ?? 'meta.json';
+  const text = next[name] ?? '';
+  switch (m.kind) {
+    case 0:
+    case 1: {
+      let parsed: Json;
+      try {
+        parsed = JSON.parse(text) as Json;
+      } catch {
+        return next;
+      }
+      const junk = JUNK[m.junk % JUNK.length] ?? null;
+      next[name] = JSON.stringify(mutateAt(parsed, m.steps, m.kind === 0 ? 'replace' : 'delete', junk));
+      return next;
+    }
+    case 2:
+      next[name] = text.slice(0, m.pos % (text.length + 1));
+      return next;
+    case 3: {
+      const at = m.pos % (text.length + 1);
+      next[name] = text.slice(0, at) + (BREAKERS[m.ch % BREAKERS.length] ?? '') + text.slice(at + 1);
+      return next;
+    }
+    case 4:
+      delete next[name];
+      return next;
+    case 5:
+      next[EXTRA_NAMES[m.junk % EXTRA_NAMES.length] ?? 'x.json'] = text;
+      return next;
+    default: {
+      const other = names[m.pos % names.length] ?? name;
+      next[name] = next[other] ?? '';
+      next[other] = text;
+      return next;
+    }
+  }
+}
+
+describe('file fuzz', () => {
+  test('parseDoc never throws on mutated file sets, and accepted docs export', () => {
+    const base = serializeDoc(sampleDoc());
+    fc.assert(
+      fc.property(fc.array(fileMutation, { minLength: 1, maxLength: 6 }), (mutations) => {
+        const files = mutations.reduce(mutateFiles, base);
+        const result = parseDoc(files);
+        if (!result.ok) {
+          expect(typeof result.error).toBe('string');
+          expect(result.error).not.toBe('');
+          return;
+        }
+        expect(validateDoc(result.value)).toBeNull();
+        for (const id of Object.keys(result.value.pages)) {
+          const exported = exportPage(result.value, id);
+          expect(typeof exported.ok).toBe('boolean');
+        }
+      }),
+      { numRuns: 500, seed: 0x5eed },
+    );
+  }, 60000);
+});
+
+function childValues(value: Json): Json[] {
+  if (Array.isArray(value)) return value;
+  return typeof value === 'object' && value !== null ? Object.values(value) : [];
+}
+
+// Every key path of `value` down to `depth` levels, as the index steps mutateAt follows.
+function stepsOf(value: Json, depth: number): number[][] {
+  if (depth === 0) return [];
+  return childValues(value).flatMap((child, index): number[][] => [
+    [index],
+    ...stepsOf(child, depth - 1).map((rest) => [index, ...rest]),
+  ]);
+}
+
+describe('file sweep', () => {
+  test('replacing or deleting any value near the top of any file never makes parseDoc throw', () => {
+    const base = serializeDoc(sampleDoc());
+    let tried = 0;
+    for (const [name, text] of Object.entries(base)) {
+      const parsed = JSON.parse(text) as Json;
+      for (const steps of stepsOf(parsed, 3)) {
+        for (const junk of JUNK) {
+          for (const mode of ['replace', 'delete'] as const) {
+            const files = { ...base, [name]: JSON.stringify(mutateAt(parsed, steps, mode, junk)) };
+            const result = parseDoc(files);
+            expect(typeof result.ok, `${name} ${steps.join('.')} ${mode} ${JSON.stringify(junk)?.slice(0, 40)}`).toBe('boolean');
+            tried += 1;
+          }
+        }
+      }
+    }
+    expect(tried).toBeGreaterThan(1000);
+  });
 });

@@ -197,6 +197,28 @@ describe('validateDoc', () => {
   });
 });
 
+// I1/N1: validateDoc reports a malformed header field or token group, and never throws on it.
+describe('validateDoc shapes', () => {
+  function asDoc(patch: (doc: Record<string, any>) => void): DesignDoc {
+    const doc: Record<string, any> = mutableDoc();
+    patch(doc);
+    return doc as DesignDoc;
+  }
+
+  test.each<[string, (doc: Record<string, any>) => void, string]>([
+    ['a component without props', (d) => { delete d['components'].Card.props; }, 'component Card: props must be an object'],
+    ['a component with null props', (d) => { d['components'].Card.props = null; }, 'component Card: props must be an object'],
+    ['a prop declared as null', (d) => { d['components'].Card.props = { title: null }; }, 'component Card: props.title must be an object with a string default'],
+    ['a prop without a default', (d) => { d['components'].Card.props = { title: {} }; }, 'component Card: props.title must be an object with a string default'],
+    ['a null token group', (d) => { d['tokens'] = { color: null }; }, 'tokens: token group "color" must be an object of strings'],
+    ['a non-string token value', (d) => { d['tokens'] = { color: { primary: 3 } }; }, 'tokens: token group "color" must be an object of strings'],
+    ['a page name that is a number', (d) => { d['pages'].home.name = 3; }, 'page home: name must be a string'],
+    ['a page route that is missing', (d) => { delete d['pages'].home.route; }, 'page home: route must be a string'],
+  ])('returns an error for %s', (_label, patch, error) => {
+    expect(validateDoc(asDoc(patch))).toBe(error);
+  });
+});
+
 describe('parseDoc uses validateDoc', () => {
   test('rejects a doc that validateDoc rejects, with the same message', () => {
     const doc = mutableDoc();
