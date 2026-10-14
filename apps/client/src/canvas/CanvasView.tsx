@@ -17,6 +17,12 @@ import type { TileSource } from './source.js';
 
 export interface CanvasViewProps {
   source: TileSource;
+  /**
+   * Must serve exactly one manifest's tiles and hit maps. Once the manifest loads,
+   * the view deletes everything in the cache that the manifest does not reference,
+   * so two apps sharing a cache would erase each other's tiles. Give each app its
+   * own, with `createIdbCache(name)`.
+   */
   cache: BlobCache;
   onSelect?: (s: NodeSelection | null) => void;
   debug?: boolean;
