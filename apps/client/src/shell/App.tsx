@@ -9,30 +9,35 @@ import { WsClient, wsUrl } from '../net/ws.js';
 import { AppList } from './AppList.js';
 import { AppView } from './AppView.js';
 import { Login } from './Login.js';
+import { INITIAL_AUTH, withAuth, withLogoutError } from './auth.js';
+import type { Auth } from './auth.js';
 import { LOGOUT_ERROR_TEXT, logoutLocks } from './logout.js';
 import { parseHash } from './route.js';
 import type { Route } from './route.js';
-
-type Auth = 'checking' | 'in' | 'out' | 'offline';
+import { SessionCheck } from './session-check.js';
 
 export function App(): JSX.Element {
-  const [auth, setAuth] = useState<Auth>('checking');
+  const [{ auth, logoutError }, setShell] = useState(INITIAL_AUTH);
   const [route, setRoute] = useState<Route>(() => parseHash(location.hash));
-  const [logoutError, setLogoutError] = useState<string | null>(null);
-  const api = useMemo(() => new ApiClient({ onUnauthorized: () => setAuth('out') }), []);
+  const setAuth = useCallback((next: Auth): void => setShell((s) => withAuth(s, next)), []);
+  const setLogoutError = useCallback((text: string | null): void => setShell((s) => withLogoutError(s, text)), []);
+  const api = useMemo(() => new ApiClient({ onUnauthorized: () => setAuth('out') }), [setAuth]);
   const ws = useMemo(() => new WsClient({ url: wsUrl(location) }), []);
+  // The start-up check, and the Retry button's. A newer one replaces an older one in flight.
+  const startupCheck = useMemo(
+    () => new SessionCheck(api, { onResult: (ok) => setAuth(ok ? 'in' : 'out'), onError: () => setAuth('offline') }),
+    [api, setAuth],
+  );
 
   const checkSession = useCallback((): void => {
     setAuth('checking');
-    api.session().then(
-      (ok) => setAuth(ok ? 'in' : 'out'),
-      () => setAuth('offline'),
-    );
-  }, [api]);
+    startupCheck.run();
+  }, [setAuth, startupCheck]);
 
   useEffect(() => {
     checkSession();
-  }, [checkSession]);
+    return () => startupCheck.stop();
+  }, [checkSession, startupCheck]);
 
   useEffect(() => {
     const onHash = (): void => setRoute(parseHash(location.hash));
@@ -44,24 +49,26 @@ export function App(): JSX.Element {
   // An expired session refuses the socket's upgrade with a 401, which the browser reports only as a
   // close. So each close asks the server whether the session still holds. A rejected check is ignored:
   // the network is down, and the socket's backoff keeps going. The listener comes off before close(),
-  // so closing here never starts a check.
+  // so closing here never starts a check, and the check is stopped with the effect: an answer about a
+  // session that has since been logged out must not log out the next one.
   useEffect(() => {
     if (auth !== 'in') return;
+    const expiry = new SessionCheck(api, {
+      onResult: (ok) => {
+        if (!ok) setAuth('out');
+      },
+      onError: () => {},
+    });
     const offStatus = ws.onStatus((s) => {
-      if (s !== 'closed') return;
-      void api.session().then(
-        (ok) => {
-          if (!ok) setAuth('out');
-        },
-        () => {},
-      );
+      if (s === 'closed') expiry.run();
     });
     ws.connect();
     return () => {
       offStatus();
+      expiry.stop();
       ws.close();
     };
-  }, [auth, api, ws]);
+  }, [auth, api, ws, setAuth]);
 
   // A phone or tablet wakes with a socket that may be dead, and a network that returns may have
   // dropped one too. Returning to the page or coming back online reconnects it at once.

@@ -20,6 +20,8 @@ export interface WsClientOptions {
   pingMs?: number;
   pongTimeoutMs?: number;
   maxBackoffMs?: number;
+  /** Where an error thrown by a listener goes. It never stops the client. Defaults to console.error. */
+  onListenerError?: (error: unknown) => void;
 }
 
 const BASE_BACKOFF_MS = 1000;
@@ -39,6 +41,7 @@ export class WsClient {
   private readonly pingMs: number;
   private readonly pongTimeoutMs: number;
   private readonly maxBackoffMs: number;
+  private readonly onListenerError: (error: unknown) => void;
 
   private readonly listeners = new Set<(msg: ServerMsg) => void>();
   private readonly statusListeners = new Set<(s: WsStatus) => void>();
@@ -58,6 +61,7 @@ export class WsClient {
     this.pingMs = opts.pingMs ?? 25_000;
     this.pongTimeoutMs = opts.pongTimeoutMs ?? 10_000;
     this.maxBackoffMs = opts.maxBackoffMs ?? 30_000;
+    this.onListenerError = opts.onListenerError ?? ((e) => console.error('WebSocket listener failed', e));
   }
 
   get status(): WsStatus {
@@ -113,13 +117,23 @@ export class WsClient {
 
   private openSocket(): void {
     this.setStatus('connecting');
-    const socket = this.makeSocket(this.url);
+    let socket: SocketLike;
+    try {
+      socket = this.makeSocket(this.url);
+    } catch {
+      // new WebSocket() throws for a URL it refuses. That is a failed attempt like any other: back off and retry.
+      this.scheduleReconnect();
+      this.setStatus('closed');
+      return;
+    }
     this.socket = socket;
     socket.onopen = () => {
       if (this.socket !== socket) return;
+      // Bookkeeping first: a listener that throws or closes the client must not leave the socket without pings.
       this.attempt = 0;
-      this.setStatus('open');
+      this.clearLiveness();
       this.pingTimer = setInterval(() => this.ping(), this.pingMs);
+      this.setStatus('open');
     };
     socket.onmessage = (ev) => {
       if (this.socket === socket) this.receive(ev.data);
@@ -134,14 +148,26 @@ export class WsClient {
       this.clearPongTimer();
       return;
     }
-    for (const listener of this.listeners) listener(msg);
+    for (const listener of [...this.listeners]) {
+      try {
+        listener(msg);
+      } catch (e) {
+        this.onListenerError(e);
+      }
+    }
   }
 
   private ping(): void {
     const socket = this.socket;
     if (socket === null || this.currentStatus !== 'open') return;
     const msg: ClientMsg = { type: 'ping', t: this.now() };
-    socket.send(JSON.stringify(msg));
+    try {
+      socket.send(JSON.stringify(msg));
+    } catch {
+      // The socket is not open any more (closing, or closed without an event yet).
+      this.abandon(socket);
+      return;
+    }
     this.clearPongTimer();
     this.pongTimer = setTimeout(() => {
       this.pongTimer = null;
@@ -161,23 +187,33 @@ export class WsClient {
     if (this.socket !== socket) return;
     this.socket = null;
     this.clearLiveness();
-    this.setStatus('closed');
+    // The reconnect is scheduled before anyone is told, so no listener can get in its way.
     if (this.running) this.scheduleReconnect();
+    this.setStatus('closed');
   }
 
   private scheduleReconnect(): void {
+    // One timer at most: a second schedule replaces the first rather than adding a socket later.
+    this.clearReconnect();
     const delay = Math.min(this.maxBackoffMs, BASE_BACKOFF_MS * 2 ** this.attempt);
     this.attempt += 1;
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
-      this.openSocket();
+      if (this.running) this.openSocket();
     }, delay);
   }
 
+  /** Updates the status, then tells every listener. A listener that throws does not stop the others. */
   private setStatus(next: WsStatus): void {
     if (next === this.currentStatus) return;
     this.currentStatus = next;
-    for (const listener of this.statusListeners) listener(next);
+    for (const listener of [...this.statusListeners]) {
+      try {
+        listener(next);
+      } catch (e) {
+        this.onListenerError(e);
+      }
+    }
   }
 
   private clearReconnect(): void {

@@ -1,19 +1,19 @@
 // The Build area for one app: the task card, the chat with Claude and the composer.
-// Live server messages are applied as they arrive. Each time the socket opens, the chat
-// refetches everything after its newest message, so a reconnect neither drops nor repeats any.
+// BuildSync keeps the view current (snapshot on load, catch-up on every reconnect, live messages in
+// between); this component draws it and runs the user's actions.
 
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks';
+import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks';
 import type { JSX } from 'preact';
-import type { BuildMessage, BuildTask } from '@hub/protocol';
+import type { BuildMessage } from '@hub/protocol';
 import type { ApiClient } from '../../net/api.js';
+import { errorText } from '../../net/errors.js';
 import type { WsClient } from '../../net/ws.js';
-import { EMPTY_VIEW, applyServerMsg, applyState, lastMessageId } from './state.js';
-import type { BuildView } from './state.js';
-import { TaskCard, errorText } from './TaskCard.js';
+import { EMPTY_VIEW } from './state.js';
+import { BuildSync } from './sync.js';
+import type { BuildSyncSnapshot } from './sync.js';
+import { TaskCard } from './TaskCard.js';
 import './build.css';
 
-/** The server's default page of messages. A full page after a cursor may be followed by more. */
-const PAGE_SIZE = 500;
 /** Auto-scroll only when the list was this close to the bottom before new messages arrived. */
 const STICK_PX = 80;
 
@@ -31,135 +31,86 @@ function MessageBubble({ message }: { message: BuildMessage }): JSX.Element {
   );
 }
 
+/** One app's Build area. The parent keys it by app, so a different app is a fresh instance with fresh state. */
 export function BuildArea({ app, api, ws }: BuildAreaProps): JSX.Element {
-  const [view, setView] = useState<BuildView>(EMPTY_VIEW);
+  const [snap, setSnap] = useState<BuildSyncSnapshot>({ view: EMPTY_VIEW, loadError: null });
   const [draft, setDraft] = useState('');
   const [sending, setSending] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const viewRef = useRef<BuildView>(EMPTY_VIEW);
-  /** Bumped when the app changes, so responses for an earlier app are ignored. */
-  const generation = useRef(0);
+  /** The error of the user's own send or stop. Kept apart from snap.loadError so a refetch never wipes it. */
+  const [actionError, setActionError] = useState<string | null>(null);
+  const syncRef = useRef<BuildSync | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const stickRef = useRef(true);
-  /** The app the state above belongs to. The effect resets that state only when this changes. */
-  const stateApp = useRef(app);
 
-  /** Applies `fn` to the latest view. viewRef tracks the state, so back-to-back updates never read a stale view. */
-  const update = useCallback((fn: (v: BuildView) => BuildView): void => {
-    const next = fn(viewRef.current);
-    viewRef.current = next;
-    setView(next);
-  }, []);
+  const { view, loadError } = snap;
+  const shownError = actionError ?? loadError;
 
   useEffect(() => {
-    const gen = generation.current;
-    const live = (): boolean => generation.current === gen;
-
-    // Effects run after the first paint, so on mount the state is already empty and the user may already
-    // have typed: resetting then would erase the draft. Reset only when the app really changed.
-    // This relies on `api` and `ws` being stable (memoized in App): a rerun for the same app does not reset.
-    if (stateApp.current !== app) {
-      stateApp.current = app;
-      viewRef.current = EMPTY_VIEW;
-      setView(EMPTY_VIEW);
-      setDraft('');
-      setSending(false);
-      setError(null);
-      stickRef.current = true;
-    }
-
-    /** Applies the server's state for `after`. With a cursor, keeps paging while the pages come back full. */
-    const fetchFrom = async (after: number | undefined): Promise<void> => {
-      let cursor = after;
-      for (;;) {
-        const state = await api.buildState(app, cursor);
-        if (!live()) return;
-        update((v) => applyState(v, state));
-        setError(null);
-        const last = state.messages.at(-1)?.id;
-        if (cursor === undefined || state.messages.length < PAGE_SIZE || last === undefined || last <= cursor) return;
-        cursor = last;
-      }
-    };
-
-    const failed = (e: unknown): void => {
-      if (live()) setError(errorText(e));
-    };
-
-    const catchUp = (): void => {
-      // With no messages held yet, ask for the newest page rather than the oldest after 0.
-      const last = lastMessageId(viewRef.current);
-      void fetchFrom(last === 0 ? undefined : last).catch(failed);
-    };
-
-    const offMessage = ws.on((m) => update((v) => applyServerMsg(v, app, m)));
-    const offStatus = ws.onStatus((s) => {
-      if (s === 'open') catchUp();
-    });
-    void fetchFrom(undefined).catch(failed);
-
+    const sync = new BuildSync({ app, api, ws, onChange: setSnap });
+    syncRef.current = sync;
+    sync.start();
     return () => {
-      generation.current += 1;
-      offMessage();
-      offStatus();
+      sync.stop();
+      syncRef.current = null;
     };
-  }, [app, api, ws, update]);
+  }, [app, api, ws]);
 
+  // Pinned to the bottom stays pinned when the list resizes: the task card appearing or an error line
+  // opening above the composer both change its height without a scroll event.
   useLayoutEffect(() => {
     const el = listRef.current;
     if (el !== null && stickRef.current) el.scrollTop = el.scrollHeight;
-  }, [view.messages]);
+  }, [view.messages, view.task, shownError]);
 
   const onScroll = (): void => {
     const el = listRef.current;
     if (el !== null) stickRef.current = el.scrollHeight - el.scrollTop - el.clientHeight <= STICK_PX;
   };
 
-  /** Applies a task returned by an action. The live-update rule decides whether it replaces the current one. */
-  const applyTask = (task: BuildTask): void => {
-    update((v) => applyServerMsg(v, app, { type: 'build.task', app, task, running: v.running }));
-  };
-
   const canSend = draft.trim() !== '' && !view.running && !sending;
 
   const send = async (): Promise<void> => {
     const text = draft.trim();
-    if (text === '' || view.running || sending) return;
-    const gen = generation.current;
+    const sync = syncRef.current;
+    if (text === '' || view.running || sending || sync === null) return;
     setSending(true);
-    setError(null);
+    setActionError(null);
     try {
       const task = await api.sendBuild(app, text);
-      if (generation.current !== gen) return;
-      applyTask(task);
+      if (syncRef.current !== sync) return;
+      sync.applyTask(task);
       // Keep anything typed while the request was in flight.
       setDraft((d) => (d.trim() === text ? '' : d));
     } catch (e) {
-      if (generation.current === gen) setError(errorText(e));
+      if (syncRef.current === sync) setActionError(errorText(e));
     } finally {
-      if (generation.current === gen) setSending(false);
+      if (syncRef.current === sync) setSending(false);
     }
   };
 
   const stop = async (): Promise<void> => {
-    const gen = generation.current;
+    const sync = syncRef.current;
+    if (sync === null) return;
+    setActionError(null);
     try {
-      await api.stopBuild(app);
+      const stopped = await api.stopBuild(app);
+      // Nothing was running, so the Stop button was stale: fetch the real state.
+      if (!stopped && syncRef.current === sync) sync.refresh();
     } catch (e) {
-      if (generation.current === gen) setError(errorText(e));
+      if (syncRef.current === sync) setActionError(errorText(e));
     }
   };
 
   const mergeTask = async (id: number): Promise<void> => {
-    const gen = generation.current;
+    const sync = syncRef.current;
     const task = await api.merge(app, id);
-    if (generation.current === gen) applyTask(task);
+    if (sync !== null && syncRef.current === sync) sync.applyTask(task);
   };
 
   const closeTask = async (id: number): Promise<void> => {
-    const gen = generation.current;
+    const sync = syncRef.current;
     const task = await api.closeTask(app, id);
-    if (generation.current === gen) applyTask(task);
+    if (sync !== null && syncRef.current === sync) sync.applyTask(task);
   };
 
   const task = view.task;
@@ -181,9 +132,9 @@ export function BuildArea({ app, api, ws }: BuildAreaProps): JSX.Element {
         ))}
       </div>
       <div class="build-composer">
-        {error !== null && (
+        {shownError !== null && (
           <p class="build-error" role="alert" data-testid="build-error">
-            {error}
+            {shownError}
           </p>
         )}
         <textarea
@@ -202,6 +153,11 @@ export function BuildArea({ app, api, ws }: BuildAreaProps): JSX.Element {
           }}
         />
         <div class="build-actions">
+          {actionError === null && loadError !== null && (
+            <button type="button" class="btn" data-testid="build-retry" onClick={() => syncRef.current?.refresh()}>
+              Retry
+            </button>
+          )}
           {view.running && (
             <button type="button" class="btn btn-stop" data-testid="build-stop" onClick={() => void stop()}>
               Stop

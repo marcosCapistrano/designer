@@ -1,5 +1,13 @@
 import { expect, test } from '@playwright/test';
 
+test('the served service worker has its cache name stamped by the build', async ({ request }) => {
+  const res = await request.get('/sw.js');
+  expect(res.ok()).toBe(true);
+  const source = await res.text();
+  expect(source).not.toContain('__BUILD_ID__');
+  expect(source).toMatch(/const CACHE = 'hub-shell-[0-9a-f]{12}';/);
+});
+
 test('the app shell loads offline after one visit', async ({ page, context }) => {
   await page.goto('/');
   await page.evaluate(() => navigator.serviceWorker.ready.then(() => true));

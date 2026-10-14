@@ -2,27 +2,40 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { BuildTask, ServerMsg } from '@hub/protocol';
 import { WsClient, wsUrl, type SocketLike, type WsStatus } from './ws.js';
 
+/** Errors that escaped an event handler. A browser reports these and carries on; it never rethrows to the caller. */
+const escaped: unknown[] = [];
+
+function dispatch<E>(handler: ((ev: E) => void) | null, ev: E): void {
+  try {
+    handler?.(ev);
+  } catch (e) {
+    escaped.push(e);
+  }
+}
+
 class FakeSocket implements SocketLike {
   readyState = 0;
   sent: string[] = [];
+  sendThrows = false;
   onopen: ((ev: unknown) => void) | null = null;
   onclose: ((ev: unknown) => void) | null = null;
   onmessage: ((ev: { data: unknown }) => void) | null = null;
   onerror: ((ev: unknown) => void) | null = null;
 
   send(data: string): void {
+    if (this.sendThrows) throw new Error('InvalidStateError');
     this.sent.push(data);
   }
 
   close(): void {
     if (this.readyState === 3) return;
     this.readyState = 3;
-    this.onclose?.({});
+    dispatch(this.onclose, {});
   }
 
   open(): void {
     this.readyState = 1;
-    this.onopen?.({});
+    dispatch(this.onopen, {});
   }
 
   receive(obj: unknown): void {
@@ -30,7 +43,7 @@ class FakeSocket implements SocketLike {
   }
 
   raw(data: string): void {
-    this.onmessage?.({ data });
+    dispatch(this.onmessage, { data });
   }
 }
 
@@ -59,11 +72,15 @@ describe('WsClient', () => {
     sockets.push(socket);
     return socket;
   };
-  const makeClient = (): WsClient => new WsClient({ url: 'ws://h/ws', makeSocket: newSocket });
+  const reported: unknown[] = [];
+  const makeClient = (makeSocket: (url: string) => SocketLike = newSocket): WsClient =>
+    new WsClient({ url: 'ws://h/ws', makeSocket, onListenerError: (e) => void reported.push(e) });
 
   beforeEach(() => {
     vi.useFakeTimers();
     sockets = [];
+    reported.length = 0;
+    escaped.length = 0;
   });
 
   afterEach(() => {
@@ -202,5 +219,138 @@ describe('WsClient', () => {
     sockets[0]!.close();
     vi.advanceTimersByTime(1000);
     expect(seen).toEqual(['connecting', 'open', 'closed', 'connecting']);
+  });
+
+  it('close during the backoff cancels the pending reconnect', () => {
+    const client = makeClient();
+    client.connect();
+    sockets[0]!.open();
+    sockets[0]!.close();
+    vi.advanceTimersByTime(500);
+    client.close();
+    vi.advanceTimersByTime(60_000);
+    expect(sockets).toHaveLength(1);
+    expect(client.status).toBe('closed');
+  });
+
+  it('close from a closed-status listener leaves no reconnect behind', () => {
+    const client = makeClient();
+    client.onStatus((s) => {
+      if (s === 'closed') client.close();
+    });
+    client.connect();
+    sockets[0]!.open();
+    sockets[0]!.close();
+    vi.advanceTimersByTime(60_000);
+    expect(sockets).toHaveLength(1);
+  });
+
+  describe('a throwing listener', () => {
+    it('on the closed status does not stop the reconnect', () => {
+      const client = makeClient();
+      client.onStatus((s) => {
+        if (s === 'closed') throw new Error('listener bug');
+      });
+      client.connect();
+      sockets[0]!.open();
+      sockets[0]!.close();
+      expect(escaped).toEqual([]);
+      vi.advanceTimersByTime(1000);
+      expect(sockets).toHaveLength(2);
+      expect(reported).toHaveLength(1);
+    });
+
+    it('on the open status does not stop the pings', () => {
+      const client = makeClient();
+      client.onStatus((s) => {
+        if (s === 'open') throw new Error('listener bug');
+      });
+      client.connect();
+      const socket = sockets[0]!;
+      socket.open();
+      expect(escaped).toEqual([]);
+      vi.advanceTimersByTime(25_000);
+      expect(socket.sent[0]).toMatch(/"type":"ping"/);
+      vi.advanceTimersByTime(10_000);
+      expect(socket.readyState).toBe(3);
+    });
+
+    it('on a message does not starve the listeners after it', () => {
+      const client = makeClient();
+      const got: ServerMsg[] = [];
+      client.on(() => {
+        throw new Error('listener bug');
+      });
+      client.on((msg) => got.push(msg));
+      client.connect();
+      sockets[0]!.open();
+      const msg: ServerMsg = { type: 'build.task', app: 'demo', task, running: false };
+      sockets[0]!.receive(msg);
+      expect(got).toEqual([msg]);
+      expect(escaped).toEqual([]);
+      expect(reported).toHaveLength(1);
+    });
+  });
+
+  describe('a socket that cannot be made', () => {
+    it('is a drop: connect does not throw and the backoff retries', () => {
+      let calls = 0;
+      const client = makeClient(() => {
+        calls += 1;
+        if (calls === 1) throw new SyntaxError('bad url');
+        return newSocket();
+      });
+      expect(() => client.connect()).not.toThrow();
+      expect(client.status).toBe('closed');
+      vi.advanceTimersByTime(999);
+      expect(calls).toBe(1);
+      vi.advanceTimersByTime(1);
+      expect(calls).toBe(2);
+      expect(client.status).toBe('connecting');
+    });
+
+    it('keeps backing off while it keeps failing', () => {
+      let calls = 0;
+      const client = makeClient(() => {
+        calls += 1;
+        throw new Error('no network stack');
+      });
+      client.connect();
+      vi.advanceTimersByTime(1000);
+      expect(calls).toBe(2);
+      vi.advanceTimersByTime(1999);
+      expect(calls).toBe(2);
+      vi.advanceTimersByTime(1);
+      expect(calls).toBe(3);
+      client.close();
+      vi.advanceTimersByTime(60_000);
+      expect(calls).toBe(3);
+    });
+  });
+
+  it('a ping that cannot be sent drops the socket and reconnects', () => {
+    const client = makeClient();
+    client.connect();
+    const socket = sockets[0]!;
+    socket.open();
+    socket.sendThrows = true;
+    vi.advanceTimersByTime(25_000);
+    expect(escaped).toEqual([]);
+    expect(client.status).toBe('closed');
+    vi.advanceTimersByTime(1000);
+    expect(sockets).toHaveLength(2);
+  });
+
+  it('kick while a reconnect is pending leaves exactly one timer', () => {
+    const client = makeClient();
+    client.connect();
+    sockets[0]!.close();
+    client.kick();
+    sockets[1]!.close();
+    vi.advanceTimersByTime(1000);
+    expect(sockets).toHaveLength(3);
+    // The timer the kick replaced must not fire a second socket later.
+    vi.advanceTimersByTime(60_000);
+    expect(sockets).toHaveLength(3);
   });
 });
