@@ -28,6 +28,20 @@ describe('openRepo', () => {
     expect(await repo.currentBranch()).toBe('main');
   });
 
+  it('currentBranch is the plain branch name even when a tag has the same name, and HEAD when detached', async () => {
+    const { work } = newRepo();
+    const repo = openRepo(work, { identity: TEST_IDENTITY });
+    await repo.createBranchFrom('build/x-1', 'main');
+    git(work, 'tag', 'build/x-1');
+    // `rev-parse --abbrev-ref HEAD` answers heads/build/x-1 here.
+    expect(git(work, 'rev-parse', '--abbrev-ref', 'HEAD')).toBe('heads/build/x-1');
+
+    expect(await repo.currentBranch()).toBe('build/x-1');
+
+    git(work, 'checkout', '--detach');
+    expect(await repo.currentBranch()).toBe('HEAD');
+  });
+
   it('creates a branch from origin', async () => {
     const { work } = newRepo();
     const repo = openRepo(work, { identity: TEST_IDENTITY });

@@ -603,7 +603,7 @@ describe('finishTask', () => {
     expect(h.github.calls).toEqual([]);
   });
 
-  it('refuses to commit or push a default branch that origin/HEAD does not name', async () => {
+  it('refuses to commit or push a default branch that only origin itself names (origin/HEAD unset locally)', async () => {
     const h = setup();
     git(h.work, 'checkout', '-b', 'trunk');
     git(h.work, 'push', 'origin', 'trunk');
@@ -667,6 +667,66 @@ describe('finishTask', () => {
     expect(result.error).toContain('base branch');
     expect(commits).toEqual([]);
     expect(pushes).toEqual([]);
+  });
+
+  it('a Stop that arrives during the branch check wins over the branch complaint', async () => {
+    const controller = new AbortController();
+    const h = setup();
+    writeNotes(h.work);
+    git(h.work, 'checkout', 'main');
+    const task = h.store.createTask({ app: 'demo', title: 'Add notes', branch: 'build/notes-1', base: 'main' });
+    const deps: BuildDeps = {
+      ...h.deps,
+      openRepo: (dir) => {
+        const repo = h.deps.openRepo(dir);
+        return {
+          ...repo,
+          async currentBranch() {
+            controller.abort(); // the Stop lands while the branch is being read
+            return repo.currentBranch(); // main: not the task's branch
+          },
+        };
+      },
+    };
+
+    const result = await finishTask(deps, { task, dir: h.work, manifest, signal: controller.signal });
+
+    expect(result).toMatchObject({ status: 'failed', error: 'Stopped by you.' });
+    expect(texts(h.store)).not.toContain('Claude switched to branch main; the work must stay on build/notes-1.');
+  });
+
+  it('an earlier error does not stay on a task that now has no changes', async () => {
+    const h = setup();
+    const stale = h.store.updateTask(h.task.id, { status: 'failed', error: 'Stopped by you.' });
+
+    const result = await finish(h, stale);
+
+    expect(result).toMatchObject({ status: 'no_changes', error: null });
+    expect(h.store.task(h.task.id)?.error).toBeNull();
+  });
+
+  it('an earlier error does not stay on a task whose follow-up made no new changes', async () => {
+    const h = setup();
+    writeNotes(h.work);
+    const first = await finish(h, h.task);
+    expect(first.status).toBe('review');
+    const stale = h.store.updateTask(first.id, { status: 'failed', error: 'Stopped by you.' });
+
+    const result = await finish(h, stale);
+
+    expect(result).toMatchObject({ status: 'review', error: null });
+    expect(texts(h.store)).toContain('No new changes.');
+  });
+
+  it('a tag named like the work branch does not make the branch look switched', async () => {
+    const h = setup();
+    writeNotes(h.work);
+    git(h.work, 'tag', 'build/notes-1');
+
+    const result = await finish(h, h.task);
+
+    expect(result.status).toBe('review');
+    expect(result.error).toBeNull();
   });
 
   it('refuses to commit or push an empty branch name', async () => {

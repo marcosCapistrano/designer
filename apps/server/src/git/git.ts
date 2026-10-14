@@ -93,8 +93,15 @@ export function openRepo(dir: string, opts: RepoOptions = {}): GitRepo {
   return {
     dir,
 
+    /**
+     * The checked-out branch's name, or 'HEAD' when the checkout is detached. It reads the full ref and strips
+     * refs/heads/, because `rev-parse --abbrev-ref` answers `heads/<name>` when a tag has the same name.
+     */
     async currentBranch() {
-      return (await local.raw(['rev-parse', '--abbrev-ref', 'HEAD'])).trim();
+      // -q: a detached HEAD is an empty answer, not an error; a real failure still throws.
+      const ref = (await local.raw(['symbolic-ref', '-q', 'HEAD'])).trim();
+      if (ref === '') return 'HEAD';
+      return ref.startsWith('refs/heads/') ? ref.slice('refs/heads/'.length) : ref;
     },
 
     /**

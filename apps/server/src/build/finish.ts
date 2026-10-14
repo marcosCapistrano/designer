@@ -7,11 +7,13 @@ import { fixPrompt, prBody } from './naming.js';
 import type { TaskPatch } from './store.js';
 import { queueAfterLimit, runTurn } from './turn.js';
 
-/** Fix attempts Claude gets for a failing build command before the task fails. */
+/** Fix attempts Claude gets in all, across every build command of a task, before the task fails. */
 export const MAX_FIX_ATTEMPTS = 2;
 
 /** Output tail shown in the feed when a command still fails after its last fix attempt. */
 const FAILURE_OUTPUT_TAIL = 1500;
+
+const STOPPED = 'Stopped by you.';
 
 export interface FinishInput {
   task: BuildTask;
@@ -35,8 +37,8 @@ function isRunning(status: BuildTask['status']): boolean {
 }
 
 /**
- * Finishes a Build task: commits what Claude left, verifies it (each failing command gets up to
- * MAX_FIX_ATTEMPTS Claude fixes), pushes the work branch and opens or updates its pull request.
+ * Finishes a Build task: commits what Claude left, verifies it (failing commands get Claude fixes, up to
+ * MAX_FIX_ATTEMPTS in all, shared by the commands), pushes the work branch and opens or updates its pull request.
  * Returns the task's final row. Nothing is committed or pushed unless the work branch is the
  * checked-out branch and is not the repo's default branch.
  */
@@ -62,8 +64,15 @@ export async function finishTask(deps: BuildDeps, input: FinishInput): Promise<B
   /**
    * Why the checkout may not be committed to or pushed, or null when it may. Allowlist: the checked-out
    * branch must be the task's own build/ branch, and not the default branch or the PR base.
+   * A Stop that arrived while this was being worked out wins over whatever it found: the user sees
+   * 'Stopped by you.', not a branch complaint about a run they already cancelled.
    */
   const blockedReason = async (): Promise<string | null> => {
+    const reason = await checkBranch();
+    return signal.aborted ? STOPPED : reason;
+  };
+
+  const checkBranch = async (): Promise<string | null> => {
     const branch = task.branch;
     if (branch.trim() === '') return 'Refusing to commit or push: the task has no work branch.';
     const current = await repo.currentBranch();
@@ -102,7 +111,7 @@ export async function finishTask(deps: BuildDeps, input: FinishInput): Promise<B
       for (const c of commands) {
         note('status', `Running ${c.name}: ${c.cmd}`);
         const r: CommandResult = await deps.runCommand(c.cmd, { cwd: dir, signal });
-        if (r.aborted) return fail('Stopped by you.');
+        if (r.aborted) return fail(STOPPED);
         if (r.ok) continue;
         if (attempt === MAX_FIX_ATTEMPTS) {
           note('error', r.output.slice(-FAILURE_OUTPUT_TAIL));
@@ -122,7 +131,7 @@ export async function finishTask(deps: BuildDeps, input: FinishInput): Promise<B
         });
         if (turn.limited) return queueAfterLimit(deps, task, prompt, turn);
         if (!turn.ok) {
-          return fail(turn.error === 'aborted' ? 'Stopped by you.' : (turn.error ?? 'Claude Code failed'));
+          return fail(turn.error === 'aborted' ? STOPPED : (turn.error ?? 'Claude Code failed'));
         }
         const blocked = await blockedReason();
         if (blocked !== null) return fail(blocked);
@@ -140,12 +149,12 @@ export async function finishTask(deps: BuildDeps, input: FinishInput): Promise<B
     await commitLeftovers();
 
     if ((await repo.commitsAhead(task.base)) === 0) {
-      set({ status: 'no_changes' });
+      set({ status: 'no_changes', error: null });
       note('status', 'No code changes, so no pull request.');
       return task;
     }
     if (task.prNumber !== null && (await repo.headSha()) === task.headSha) {
-      set({ status: 'review' });
+      set({ status: 'review', error: null });
       note('status', 'No new changes.');
       return task;
     }
@@ -154,12 +163,11 @@ export async function finishTask(deps: BuildDeps, input: FinishInput): Promise<B
     if (commands.length === 0) note('status', 'No typecheck or test commands found; skipped checks.');
     const stopped = await verify(commands);
     if (stopped !== null) return stopped;
-    if (signal.aborted) return fail('Stopped by you.');
+    if (signal.aborted) return fail(STOPPED);
 
+    // blockedReason reports a Stop that arrived during the branch check too: nothing is pushed after it.
     const beforePush = await blockedReason();
     if (beforePush !== null) return fail(beforePush);
-    // A stop that arrived during the branch check above must not be dropped: nothing is pushed after it.
-    if (signal.aborted) return fail('Stopped by you.');
     set({ status: 'pushing' });
     // A task that has pushed before may have been amended or rebased since (a squash, a rebase onto the base).
     // The branch is the hub's own, so the push may rewrite it, but only while GitHub still has the commit the hub

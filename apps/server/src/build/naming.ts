@@ -43,6 +43,12 @@ function displayPath(cwd: string, file: string): string {
   return inside ? rel : absolute;
 }
 
+/** The first line of `text`, cut to TOOL_COMMAND_MAX characters with an ellipsis. */
+function oneLineCut(text: string): string {
+  const line = text.split('\n')[0] ?? '';
+  return line.length > TOOL_COMMAND_MAX ? `${line.slice(0, TOOL_COMMAND_MAX)}…` : line;
+}
+
 /** One-line description of a tool call for the Build activity feed. */
 export function summarizeTool(name: string, input: unknown, cwd: string): string {
   if (!isRecord(input)) return name;
@@ -50,9 +56,7 @@ export function summarizeTool(name: string, input: unknown, cwd: string): string
     case 'Bash': {
       const command = input.command;
       if (typeof command !== 'string') return name;
-      const line = command.split('\n')[0] ?? '';
-      const shown = line.length > TOOL_COMMAND_MAX ? `${line.slice(0, TOOL_COMMAND_MAX)}…` : line;
-      return `$ ${shown}`;
+      return `$ ${oneLineCut(command)}`;
     }
     case 'Read':
     case 'Edit':
@@ -66,7 +70,7 @@ export function summarizeTool(name: string, input: unknown, cwd: string): string
     case 'Glob': {
       const pattern = input.pattern;
       if (typeof pattern !== 'string') return name;
-      return `${name} ${pattern}`;
+      return `${name} ${oneLineCut(pattern)}`;
     }
     default:
       return name;
