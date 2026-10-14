@@ -19,7 +19,18 @@ function parseParam(text: string): number | null {
   return DECIMAL.test(text) ? Number(text) : null;
 }
 
-/** Checks a passphrase against a stored hash. Malformed input returns false and never throws. */
+function isPowerOfTwo(n: number): boolean {
+  if (!Number.isSafeInteger(n) || n < 2) return false;
+  const big = BigInt(n);
+  return (big & (big - 1n)) === 0n;
+}
+
+/**
+ * Checks a passphrase against a stored hash. Malformed or weak input returns false and never throws.
+ * The stored cost parameters must be no cheaper than the ones hashPassphrase writes (N a power of two,
+ * r and p at least 1), the salt must not be empty, and the key must be the full SCRYPT_PARAMS.keylen bytes:
+ * a short stored key would let a wrong passphrase match by chance.
+ */
 export function verifyPassphrase(passphrase: string, stored: string): boolean {
   try {
     const parts = stored.split(':');
@@ -31,11 +42,14 @@ export function verifyPassphrase(passphrase: string, stored: string): boolean {
     const r = parseParam(rText);
     const p = parseParam(pText);
     if (N === null || r === null || p === null) return false;
+    if (!isPowerOfTwo(N) || N < SCRYPT_PARAMS.N) return false;
+    if (r < SCRYPT_PARAMS.r || p < SCRYPT_PARAMS.p) return false;
     if (!BASE64URL.test(saltText) || !BASE64URL.test(keyText)) return false;
 
+    const salt = Buffer.from(saltText, 'base64url');
     const expected = Buffer.from(keyText, 'base64url');
-    if (expected.length === 0) return false;
-    const actual = scryptSync(passphrase, Buffer.from(saltText, 'base64url'), expected.length, {
+    if (salt.length === 0 || expected.length !== SCRYPT_PARAMS.keylen) return false;
+    const actual = scryptSync(passphrase, salt, expected.length, {
       N,
       r,
       p,
