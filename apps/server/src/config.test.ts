@@ -99,6 +99,6 @@ describe('scrubEnv', () => {
         CLAUDE_CODE_OAUTH_TOKEN: 'o',
         U: undefined,
       }),
-    ).toEqual({ PATH: '/bin', CLAUDE_CODE_OAUTH_TOKEN: 'o' });
+    ).toEqual({ PATH: '/bin' });
   });
 });
