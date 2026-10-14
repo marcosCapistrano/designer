@@ -64,6 +64,11 @@ describe('docs/hub-bootstrap.md', () => {
     }
   });
 
+  it('tells the user to protect each app default branch', () => {
+    expect(docs).toMatch(/Protect each app's default branch/);
+    expect(docs).toMatch(/Require a pull request before merging/);
+  });
+
   it('numbers its steps in order', () => {
     const numbers = [...docs.matchAll(/^(\d+)\. \*\*/gm)].map((m) => Number(m[1]));
     expect(numbers).toEqual(numbers.map((_, i) => i + 1));

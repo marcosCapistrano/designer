@@ -60,16 +60,18 @@ Scripts live in `ops/hub/`: `bootstrap.sh` (server setup), `set-secret.sh` (stor
    unset T
    ```
 
-9. **Start the hub:**
+9. **Protect each app's default branch** on GitHub, until the deploy plan ships. The hub only ever pushes `build/` branches and opens pull requests, but nothing on GitHub enforces that yet. For every app repo: Settings → Rules → Rulesets (or Branches → Add branch protection rule) → target the default branch → turn on **Require a pull request before merging**. Requiring the CI checks to pass is a good addition.
+
+10. **Start the hub:**
    - `sudo systemctl start hub && journalctl -u hub -n 20` shows `Hub listening on http://127.0.0.1:8787`.
    - `curl -s http://127.0.0.1:8787/api/health` prints `{"ok":true}`.
 
-10. **On the tablet:**
+11. **On the tablet:**
     - Install Tailscale and join the tailnet.
     - Open `https://hub.<tailnet>.ts.net` in Chrome and unlock with the passphrase.
     - Menu → **Add to Home screen**.
 
-11. **Update later.** A private repo needs the GitHub header for `git pull`, passed through git's environment like step 8, so the token never appears on a command line. The update runs outside the hub's unit, which mounts `/opt/hub` read-only:
+12. **Update later.** A private repo needs the GitHub header for `git pull`, passed through git's environment like step 8, so the token never appears on a command line. The update runs outside the hub's unit, which mounts `/opt/hub` read-only:
     ```bash
     printf 'GitHub token: '; stty -echo; IFS= read -r T; stty echo; printf '\n'
     printf 'AUTHORIZATION: basic %s\n' "$(printf 'x-access-token:%s' "$T" | base64 -w0)" \
@@ -85,7 +87,7 @@ Scripts live in `ops/hub/`: `bootstrap.sh` (server setup), `set-secret.sh` (stor
     unset T
     ```
 
-12. **Known limits**
+13. **Known limits**
     Claude runs as the same Unix user as the hub. The deploy guard is a tool policy, not a sandbox. The hub's unit mounts `/opt/hub` read-only, so a Claude run cannot edit the hub's own code; it can still read the hub's credentials.
 
     Secrets are encrypted with the systemd host key (Hetzner CX servers have no TPM).
