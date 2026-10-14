@@ -38,21 +38,32 @@ afterEach(async () => {
 
 const sessionCookieOk = (h: string | undefined): boolean => readCookie(h, 'hub_session') === 'good';
 
-async function startServer(hub: SocketHub, isAuthed = sessionCookieOk): Promise<string> {
+async function startAttached(
+  hub: SocketHub,
+  isAuthed = sessionCookieOk,
+  heartbeatMs?: number,
+): Promise<{ base: string; attached: ReturnType<typeof attachWebSocket> }> {
   const server = createServer((_req, res) => res.end());
   servers.push(server);
-  attachments.push(attachWebSocket(server, hub, { isAuthed }));
+  const attached = attachWebSocket(server, hub, { isAuthed, ...(heartbeatMs === undefined ? {} : { heartbeatMs }) });
+  attachments.push(attached);
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
   const { port } = server.address() as AddressInfo;
-  return `ws://127.0.0.1:${port}`;
+  return { base: `ws://127.0.0.1:${port}`, attached };
+}
+
+async function startServer(hub: SocketHub, isAuthed = sessionCookieOk): Promise<string> {
+  return (await startAttached(hub, isAuthed)).base;
 }
 
 function portOf(base: string): number {
   return Number(new URL(base).port);
 }
 
-function connect(base: string, path: string, cookie?: string): WebSocket {
-  const client = new WebSocket(`${base}${path}`, { headers: cookie ? { cookie } : {} });
+function connect(base: string, path: string, cookie?: string, origin?: string): WebSocket {
+  const client = new WebSocket(`${base}${path}`, {
+    headers: { ...(cookie ? { cookie } : {}), ...(origin === undefined ? {} : { origin }) },
+  });
   clients.push(client);
   return client;
 }
@@ -323,5 +334,157 @@ describe('attachWebSocket', () => {
 
     await expect.poll(() => closeCode).toBe(1009);
     await expect.poll(() => hub.size()).toBe(0);
+  });
+});
+
+function closed(client: WebSocket): Promise<number> {
+  return new Promise<number>((resolve) => {
+    if (client.readyState === WebSocket.CLOSED) resolve(0);
+    client.once('close', (code) => resolve(code));
+  });
+}
+
+const LIVE_MS = 1000;
+
+describe('attachWebSocket origin check', () => {
+  it('connects when the Origin host matches the Host header, or when there is no Origin', async () => {
+    const hub = new SocketHub();
+    const base = await startServer(hub);
+    const host = new URL(base).host;
+
+    const same = connect(base, WS_PATH, 'hub_session=good', `http://${host}`);
+    await opened(same);
+    const secure = connect(base, WS_PATH, 'hub_session=good', `https://${host}`);
+    await opened(secure);
+    const none = connect(base, WS_PATH, 'hub_session=good');
+    await opened(none);
+
+    expect(hub.size()).toBe(3);
+  });
+
+  it('refuses a cross-site Origin with 403 even when the session is valid', async () => {
+    const hub = new SocketHub();
+    const base = await startServer(hub);
+
+    const status = await refusedStatus(connect(base, WS_PATH, 'hub_session=good', 'https://other.tailnet.ts.net'));
+
+    expect(status).toBe(403);
+    expect(hub.size()).toBe(0);
+  });
+
+  it('refuses the same host on another port, and an Origin that is not a URL', async () => {
+    const hub = new SocketHub();
+    const base = await startServer(hub);
+    const url = new URL(base);
+
+    expect(await refusedStatus(connect(base, WS_PATH, 'hub_session=good', `http://${url.hostname}:1`))).toBe(403);
+    expect(await refusedStatus(connect(base, WS_PATH, 'hub_session=good', 'null'))).toBe(403);
+    expect(await refusedStatus(connect(base, WS_PATH, 'hub_session=good', ''))).toBe(403);
+    expect(hub.size()).toBe(0);
+  });
+
+  it('answers a cross-site request without a session with a refusal too, and keeps accepting', async () => {
+    const hub = new SocketHub();
+    const base = await startServer(hub);
+
+    const status = await refusedStatus(connect(base, WS_PATH, undefined, 'https://other.tailnet.ts.net'));
+    expect([401, 403]).toContain(status);
+
+    await opened(connect(base, WS_PATH, 'hub_session=good'));
+    expect(hub.size()).toBe(1);
+  });
+});
+
+describe('attachWebSocket session recheck', () => {
+  function liveSessions(...tokens: string[]): { live: Set<string>; isAuthed: (h: string | undefined) => boolean } {
+    const live = new Set(tokens);
+    return { live, isAuthed: (h) => live.has(readCookie(h, 'hub_session') ?? '') };
+  }
+
+  it('recheck() closes a socket whose session ended and leaves the others open', async () => {
+    const hub = new SocketHub();
+    const { live, isAuthed } = liveSessions('a', 'b');
+    const { base, attached } = await startAttached(hub, isAuthed);
+    const a = connect(base, WS_PATH, 'hub_session=a');
+    const b = connect(base, WS_PATH, 'hub_session=b');
+    await opened(a);
+    await opened(b);
+    const aClosed = closed(a);
+
+    live.delete('a');
+    attached.recheck();
+
+    await aClosed;
+    await expect.poll(() => hub.size(), { timeout: LIVE_MS }).toBe(1);
+    expect(b.readyState).toBe(WebSocket.OPEN);
+    const received = nextMessage(b);
+    hub.broadcast({ type: 'pong', t: 3 });
+    expect(await received).toBe(JSON.stringify({ type: 'pong', t: 3 }));
+  });
+
+  it('recheck() with every session still valid closes nothing', async () => {
+    const hub = new SocketHub();
+    const { isAuthed } = liveSessions('a');
+    const { base, attached } = await startAttached(hub, isAuthed);
+    const a = connect(base, WS_PATH, 'hub_session=a');
+    await opened(a);
+
+    attached.recheck();
+    attached.recheck();
+
+    expect(a.readyState).toBe(WebSocket.OPEN);
+    expect(hub.size()).toBe(1);
+  });
+
+  it('a heartbeat sweep rechecks every socket against the cookie it connected with', async () => {
+    const hub = new SocketHub();
+    const { live, isAuthed } = liveSessions('a', 'b');
+    const { base } = await startAttached(hub, isAuthed, 40);
+    const a = connect(base, WS_PATH, 'hub_session=a');
+    const b = connect(base, WS_PATH, 'hub_session=b');
+    await opened(a);
+    await opened(b);
+    const aClosed = closed(a);
+
+    live.delete('a');
+
+    await aClosed;
+    expect(b.readyState).toBe(WebSocket.OPEN);
+    await expect.poll(() => hub.size(), { timeout: LIVE_MS }).toBe(1);
+  });
+
+  it('a check that throws during a recheck closes the socket instead of crashing', async () => {
+    const hub = new SocketHub();
+    let broken = false;
+    const { base, attached } = await startAttached(hub, (h) => {
+      if (broken) throw new Error('session store unavailable');
+      return readCookie(h, 'hub_session') === 'good';
+    });
+    const client = connect(base, WS_PATH, 'hub_session=good');
+    await opened(client);
+    const done = closed(client);
+
+    broken = true;
+
+    expect(() => attached.recheck()).not.toThrow();
+    await done;
+  });
+
+  it('a socket that closed on its own is forgotten by the next recheck', async () => {
+    const hub = new SocketHub();
+    const checks: Array<string | undefined> = [];
+    const { base, attached } = await startAttached(hub, (h) => {
+      checks.push(h);
+      return true;
+    });
+    const client = connect(base, WS_PATH, 'hub_session=good');
+    await opened(client);
+    client.close();
+    await expect.poll(() => hub.size(), { timeout: LIVE_MS }).toBe(0);
+    checks.length = 0;
+
+    attached.recheck();
+
+    expect(checks).toEqual([]);
   });
 });

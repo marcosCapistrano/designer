@@ -535,6 +535,34 @@ describe('hub app', () => {
     expect((await bare.request('/api/health')).status).toBe(200);
   });
 
+  it('logout calls onLogout', async () => {
+    const onLogout = vi.fn();
+    const withHook = createApp({
+      sessions: new SessionStore(db),
+      limiter: new LoginLimiter(),
+      passphraseHash: HASH,
+      registry: new AppRegistry(appsDir),
+      build: build as unknown as BuildService,
+      dataDir,
+      onLogout,
+    });
+    const login = await withHook.request('/api/login', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ passphrase: PASS }),
+    });
+    const token = /hub_session=([^;]+)/.exec(login.headers.get('set-cookie') ?? '')?.[1] ?? '';
+    expect(onLogout).not.toHaveBeenCalled();
+
+    const out = await withHook.request('/api/logout', {
+      method: 'POST',
+      headers: { cookie: `hub_session=${token}`, 'sec-fetch-site': 'same-origin' },
+    });
+
+    expect(out.status).toBe(204);
+    expect(onLogout).toHaveBeenCalledTimes(1);
+  });
+
   it('sets security headers', async () => {
     const res = await app.request('/api/health');
     expect(res.headers.get('x-content-type-options')).toBe('nosniff');

@@ -138,6 +138,28 @@ describe('auth routes', () => {
     expect((await app.request('/api/secret', { headers: { cookie } })).status).toBe(401);
   });
 
+  it('logout calls onLogout once the session is revoked, and a missing cookie still calls it', async () => {
+    const token = tokenFrom(await login(PASS));
+    const seen: boolean[] = [];
+    const other = new Hono();
+    other.route(
+      '/api',
+      authRoutes({
+        sessions,
+        limiter: new LoginLimiter(),
+        passphraseHash: HASH,
+        onLogout: () => seen.push(sessions.valid(token)),
+      }),
+    );
+
+    const out = await other.request('/api/logout', { method: 'POST', headers: { cookie: `hub_session=${token}` } });
+    expect(out.status).toBe(204);
+    expect(seen).toEqual([false]);
+
+    expect((await other.request('/api/logout', { method: 'POST' })).status).toBe(204);
+    expect(seen).toEqual([false, false]);
+  });
+
   it('expired sessions are rejected', () => {
     let now = 0;
     const store = new SessionStore(db, () => now);

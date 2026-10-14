@@ -26,6 +26,8 @@ export interface AppDeps {
   /** The built client. When unset the hub serves only /api. */
   clientDir?: string | null;
   now?: () => number;
+  /** Called after a logout has revoked its session. startHub uses it to close that session's sockets. */
+  onLogout?: () => void;
 }
 
 const IMMUTABLE = 'public, max-age=31536000, immutable';
@@ -123,7 +125,13 @@ export function createApp(deps: AppDeps): Hono {
   app.get('/api/health', (c) => c.json({ ok: true }));
   app.route(
     '/api',
-    authRoutes({ sessions, limiter: deps.limiter, passphraseHash: deps.passphraseHash, now: deps.now }),
+    authRoutes({
+      sessions,
+      limiter: deps.limiter,
+      passphraseHash: deps.passphraseHash,
+      now: deps.now,
+      onLogout: deps.onLogout,
+    }),
   );
 
   // Everything under /api from here on needs a session: apps, build and render routes alike.
