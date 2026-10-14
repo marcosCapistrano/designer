@@ -1,4 +1,5 @@
 import { resolveProps, substituteProps } from '../props.js';
+import { validateNodeId } from '../rules.js';
 import { allIds } from '../tree.js';
 import type {
   ComponentDef,
@@ -100,6 +101,8 @@ export const componentHandlers: HandlerMap = {
       if (ownValue(doc.components, op.component) !== undefined) {
         return `Component ${op.component} already exists`;
       }
+      const idProblem = validateNodeId(op.instanceId);
+      if (idProblem !== null) return idProblem;
       return allIds(doc).includes(op.instanceId) ? `Id ${op.instanceId} already exists` : null;
     },
     mutate(draft, op) {

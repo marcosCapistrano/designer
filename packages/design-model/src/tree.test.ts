@@ -143,6 +143,16 @@ describe('allocIds', () => {
     homeRoot(doc).children.push({ id: 'n41', kind: 'text', text: 'far' });
     expect(allocIds(doc, 1)).toEqual(['n42']);
   });
+
+  test('accepts counts of 0 and 1000', () => {
+    expect(allocIds(sampleDoc(), 0)).toEqual([]);
+    expect(allocIds(sampleDoc(), 1000)).toHaveLength(1000);
+  });
+
+  test.each([-1, 1.5, 1001, NaN, Infinity])('throws a RangeError for the count %s', (count) => {
+    expect(() => allocIds(sampleDoc(), count)).toThrow(RangeError);
+    expect(() => allocIds(sampleDoc(), count)).toThrow('allocIds count must be an integer from 0 to 1000');
+  });
 });
 
 describe('nextSeq', () => {

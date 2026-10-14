@@ -1,4 +1,5 @@
 import { validateStyle } from '../css.js';
+import { validateAttrValue } from '../rules.js';
 import {
   DEVICES,
   type DesignDoc,
@@ -98,7 +99,9 @@ export const basicHandlers: HandlerMap = {
       const found = lookupNode(doc, op.node);
       if (!found.ok) return found.error;
       if (found.hit.node.kind !== 'element') return `Node ${op.node} is not an element`;
-      return validateAttrName(op.name);
+      const nameProblem = validateAttrName(op.name);
+      if (nameProblem !== null) return nameProblem;
+      return op.value === null ? null : validateAttrValue(op.name, op.value);
     },
     mutate(draft, op) {
       writeEntry(requireElement(draft, op.node).attrs, op.name, op.value);

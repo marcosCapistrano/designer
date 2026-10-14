@@ -1,13 +1,13 @@
+import { validatePageId } from '../rules.js';
 import type { DesignDoc, DesignNode, ElementNode, Page } from '../types.js';
 import type { HandlerMap } from './handler.js';
 import { validateSubtree } from './structure.js';
 import { ownValue } from './util.js';
 
-const PAGE_ID_PATTERN = /^[a-z0-9-]+$/;
-
 // Returns the reason a new page id or route cannot be used in doc, or null.
 function pageHeaderProblem(doc: DesignDoc, id: string, route: string): string | null {
-  if (!PAGE_ID_PATTERN.test(id)) return `Invalid page id "${id}"`;
+  const idProblem = validatePageId(id);
+  if (idProblem !== null) return idProblem;
   if (ownValue(doc.pages, id) !== undefined) return `Page ${id} already exists`;
   if (!route.startsWith('/')) return `Route ${route} must start with /`;
   if (Object.values(doc.pages).some((page) => page.route === route)) {

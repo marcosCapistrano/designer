@@ -1,4 +1,10 @@
 import { validateStyle } from '../css.js';
+import {
+  validateAttrValue,
+  validateNodeId,
+  validateTag,
+  VOID_TAGS,
+} from '../rules.js';
 import { allIds, isDescendant, type Container, type Located } from '../tree.js';
 import {
   DEVICES,
@@ -18,8 +24,11 @@ import {
   validateAttrName,
 } from './util.js';
 
-const TAG_PATTERN = /^[a-z][a-z0-9-]*$/;
 const NOT_SIBLINGS = 'nodes must be contiguous siblings';
+
+function voidError(tag: string): string {
+  return `Void element ${tag} cannot have children`;
+}
 
 // Returns the reason a subtree cannot be added to doc, or null. Ids must be unique within the
 // subtree and absent from doc and from ctx.extraIds. Used by insertNode, wrapNodes and later
@@ -45,6 +54,8 @@ interface IdState {
 
 function checkNode(doc: DesignDoc, node: DesignNode, state: IdState): string | null {
   const { id } = node;
+  const idProblem = validateNodeId(id);
+  if (idProblem !== null) return idProblem;
   if (state.seen.has(id) || state.taken.has(id) || state.extra.has(id)) {
     return `Id ${id} already exists`;
   }
@@ -52,19 +63,23 @@ function checkNode(doc: DesignDoc, node: DesignNode, state: IdState): string | n
 
   if (node.kind === 'text') return null;
   if (node.kind === 'instance') {
-    if (ownValue(doc.components, node.component) === undefined) {
-      return `Component ${node.component} not found`;
+    const def = ownValue(doc.components, node.component);
+    if (def === undefined) return `Component ${node.component} not found`;
+    for (const prop of Object.keys(node.props)) {
+      if (!Object.hasOwn(def.props, prop)) return `Component ${node.component} has no prop "${prop}"`;
     }
     return checkStyle(node.style);
   }
 
-  if (!TAG_PATTERN.test(node.tag)) return `Invalid tag "${node.tag}"`;
-  for (const name of Object.keys(node.attrs)) {
-    const problem = validateAttrName(name);
+  const tagProblem = validateTag(node.tag);
+  if (tagProblem !== null) return tagProblem;
+  for (const [name, value] of Object.entries(node.attrs)) {
+    const problem = validateAttrName(name) ?? validateAttrValue(name, value);
     if (problem !== null) return problem;
   }
   const styleProblem = checkStyle(node.style);
   if (styleProblem !== null) return styleProblem;
+  if (VOID_TAGS.has(node.tag) && node.children.length > 0) return voidError(node.tag);
   for (const child of node.children) {
     const problem = checkNode(doc, child, state);
     if (problem !== null) return problem;
@@ -100,6 +115,7 @@ export const structureHandlers: HandlerMap = {
       const found = lookupNode(doc, op.parent);
       if (!found.ok) return found.error;
       if (found.hit.node.kind !== 'element') return `Node ${op.parent} is not an element`;
+      if (VOID_TAGS.has(found.hit.node.tag)) return voidError(found.hit.node.tag);
       if (!indexInRange(op.index, found.hit.node.children.length)) {
         return `Index ${op.index} is out of range`;
       }
@@ -132,6 +148,7 @@ export const structureHandlers: HandlerMap = {
 
       if (moved.hit.parent === null) return 'cannot move a root';
       if (target.hit.node.kind !== 'element') return `Node ${op.parent} is not an element`;
+      if (VOID_TAGS.has(target.hit.node.tag)) return voidError(target.hit.node.tag);
       if (!sameContainer(moved.hit.container, target.hit.container)) {
         return 'cannot move a node to another container';
       }
@@ -175,6 +192,7 @@ export const structureHandlers: HandlerMap = {
       if (op.wrapper.kind !== 'element' || op.wrapper.children.length !== 0) {
         return 'wrapper must be an element with no children';
       }
+      if (VOID_TAGS.has(op.wrapper.tag)) return voidError(op.wrapper.tag);
       return validateSubtree(doc, op.wrapper);
     },
     mutate(draft, op) {

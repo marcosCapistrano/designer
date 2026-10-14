@@ -82,7 +82,7 @@ describe('addPage', () => {
     })).toBe('Route / already used');
   });
 
-  test.each(['Pricing', 'pricing_page', 'pricing page', ''])('rejects the page id %j', (id) => {
+  test.each(['Pricing', 'Home', 'a/b', 'pricing_page', 'pricing page', ''])('rejects the page id %j', (id) => {
     expect(rejected(sampleDoc(), {
       op: 'addPage', page: { ...pricing, id },
     })).toBe(`Invalid page id "${id}"`);
@@ -94,11 +94,10 @@ describe('addPage', () => {
     })).toBe('Route pricing must start with /');
   });
 
-  test('accepts a page id named like an Object.prototype member', () => {
-    const next = applied(sampleDoc(), {
-      op: 'addPage', page: { ...pricing, id: 'constructor', route: '/c' },
-    });
-    expect(pageOf(next, 'constructor').route).toBe('/c');
+  test.each(['constructor', 'prototype'])('rejects the page id %s, an Object.prototype member', (id) => {
+    expect(rejected(sampleDoc(), {
+      op: 'addPage', page: { ...pricing, id, route: '/c' },
+    })).toBe(`Invalid page id "${id}"`);
   });
 
   test('rejects a root id that is already in the document', () => {
@@ -202,6 +201,12 @@ describe('duplicatePage', () => {
     expect(rejected(sampleDoc(), {
       ...homeCopy(), page: { id: 'Home B', name: 'Home B', route: '/b' },
     })).toBe('Invalid page id "Home B"');
+  });
+
+  test.each(['constructor', 'a/b'])('rejects the page id %j', (id) => {
+    expect(rejected(sampleDoc(), {
+      ...homeCopy(), page: { id, name: 'Copy', route: '/c' },
+    })).toBe(`Invalid page id "${id}"`);
   });
 
   test('undo removes the copy', () => {

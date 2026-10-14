@@ -79,6 +79,12 @@ describe('extractComponent', () => {
     })).toBe('Id n3 already exists');
   });
 
+  test('rejects an instance id that is not a valid node id', () => {
+    expect(rejected(sampleDoc(), {
+      op: 'extractComponent', node: 'n2', component: 'SiteHeader', instanceId: 'bad id',
+    })).toBe('Invalid node id "bad id"');
+  });
+
   test('rejects a node inside a component', () => {
     expect(rejected(sampleDoc(), {
       op: 'extractComponent', node: 'n7', component: 'SiteHeader', instanceId: 'n9',
@@ -218,6 +224,12 @@ describe('detachInstance', () => {
     expect(rejected(sampleDoc(), {
       op: 'detachInstance', node: 'n5', idMap: { ...cardIds, n2: 'n12' },
     })).toBe('idMap has unknown key n2');
+  });
+
+  test('rejects an idMap value that is not a valid node id', () => {
+    expect(rejected(sampleDoc(), {
+      op: 'detachInstance', node: 'n5', idMap: { n6: 'bad id', n7: 'n10', n8: 'n11' },
+    })).toBe('Invalid node id "bad id"');
   });
 
   test('rejects a new id that is already in the doc', () => {
