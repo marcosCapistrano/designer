@@ -6,16 +6,13 @@ import { useEffect, useRef, useState } from 'preact/hooks';
 import type { JSX } from 'preact';
 import { DEVICES, DEVICE_LABEL } from '@hub/protocol';
 import type { Device, NodeSelection } from '@hub/protocol';
-import { CanvasController } from './controller.js';
-import type { ControllerStats } from './controller.js';
+import type { CanvasController, ControllerStats } from './controller.js';
 import type { BlobCache } from './cache.js';
-import { liveKeys } from './cache.js';
 import type { Camera } from './geom.js';
 import type { PointerIn, Tool, WheelIn } from './gestures.js';
 import type { Frame } from './layout.js';
-import { HitMapStore } from './hitmaps.js';
-import { TileLoader } from './loader.js';
 import type { LoaderStats } from './loader.js';
+import { createCanvasRuntime } from './runtime.js';
 import type { TileSource } from './source.js';
 
 export interface CanvasViewProps {
@@ -58,10 +55,6 @@ function buttonStyle(pressed: boolean): string {
     : 'font:inherit;padding:6px 10px;border:1px solid #dadce0;border-radius:6px;background:#fff;color:#202124;cursor:pointer';
 }
 
-function errorMessage(e: unknown): string {
-  return e instanceof Error ? e.message : String(e);
-}
-
 export function CanvasView({ source, cache, onSelect, debug = false }: CanvasViewProps): JSX.Element {
   const rootRef = useRef<HTMLDivElement>(null);
   const baseRef = useRef<HTMLCanvasElement>(null);
@@ -93,22 +86,17 @@ export function CanvasView({ source, cache, onSelect, debug = false }: CanvasVie
     const overlay = overlayCanvas.getContext('2d');
     if (!base || !overlay) return;
 
-    let disposed = false;
-    const loader = new TileLoader({
-      source,
-      cache,
-      onLoad: (key, x, y) => controller.tileLoaded(key, x, y),
-    });
-    const hitMaps = new HitMapStore(source, cache);
-    const controller = new CanvasController({
+    const runtime = createCanvasRuntime({
       base,
       overlay,
-      tiles: loader,
-      hitMaps,
+      source,
+      cache,
       requestFrame: (cb) => requestAnimationFrame(() => cb()),
       now: () => performance.now(),
       onSelect,
+      onError: setError,
     });
+    const { controller, loader } = runtime;
     controllerRef.current = controller;
 
     const sizeToRoot = (): void => {
@@ -117,18 +105,6 @@ export function CanvasView({ source, cache, onSelect, debug = false }: CanvasVie
     const observer = new ResizeObserver(sizeToRoot);
     observer.observe(root);
     sizeToRoot();
-
-    source.manifest().then(
-      (m) => {
-        if (disposed) return;
-        controller.setManifest(m);
-        void cache.gc(liveKeys(m));
-      },
-      (e: unknown) => {
-        if (!disposed) setError(`Could not load the render manifest: ${errorMessage(e)}`);
-      },
-    );
-    const unsubscribe = source.subscribe((m) => controller.setManifest(m));
 
     const onPointer =
       (kind: PointerIn['kind']) =>
@@ -183,14 +159,13 @@ export function CanvasView({ source, cache, onSelect, debug = false }: CanvasVie
     }
 
     return () => {
-      disposed = true;
+      runtime.dispose();
       root.removeEventListener('pointerdown', onDown);
       root.removeEventListener('pointermove', onMove);
       root.removeEventListener('pointerup', onUp);
       root.removeEventListener('pointercancel', onCancel);
       root.removeEventListener('wheel', onWheel);
       observer.disconnect();
-      unsubscribe();
       controllerRef.current = null;
       if (debug) delete window.__hubCanvas;
     };
