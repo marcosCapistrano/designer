@@ -329,6 +329,44 @@ describe('finishTask', () => {
     expect(remoteHasBranch(h.origin, 'build/notes-1')).toBe(false);
   });
 
+  it('stops before the push when stopped during the branch check just before it', async () => {
+    const controller = new AbortController();
+    const h = setup({
+      command: async () => OK,
+    });
+    writeNotes(h.work);
+    let checks = 0;
+    const pushes: string[] = [];
+    const deps: BuildDeps = {
+      ...h.deps,
+      openRepo: (dir) => {
+        const repo = h.deps.openRepo(dir);
+        return {
+          ...repo,
+          async currentBranch() {
+            const branch = await repo.currentBranch();
+            checks += 1;
+            // The 1st read is the start check; the 2nd is the check made right before the push.
+            if (checks === 2) controller.abort();
+            return branch;
+          },
+          async push(branch) {
+            pushes.push(branch);
+            return repo.push(branch);
+          },
+        };
+      },
+    };
+
+    const result = await finishTask(deps, { task: h.task, dir: h.work, manifest, signal: controller.signal });
+
+    expect(checks).toBe(2);
+    expect(result).toMatchObject({ status: 'failed', error: 'Stopped by you.' });
+    expect(pushes).toEqual([]);
+    expect(h.github.calls).toEqual([]);
+    expect(remoteHasBranch(h.origin, 'build/notes-1')).toBe(false);
+  });
+
   it('a rejected push fails the task and opens no pull request', async () => {
     const h = setup();
     writeNotes(h.work);

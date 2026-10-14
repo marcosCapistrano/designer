@@ -158,6 +158,8 @@ export async function finishTask(deps: BuildDeps, input: FinishInput): Promise<B
 
     const beforePush = await blockedReason();
     if (beforePush !== null) return fail(beforePush);
+    // A stop that arrived during the branch check above must not be dropped: nothing is pushed after it.
+    if (signal.aborted) return fail('Stopped by you.');
     set({ status: 'pushing' });
     try {
       await repo.push(task.branch);

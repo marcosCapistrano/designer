@@ -39,9 +39,9 @@ interface Prepared {
 export class BuildService {
   private readonly deps: BuildDeps;
   private readonly runs = new Map<string, Run>();
-  /** CI refreshes in flight, by task id, so concurrent callers share one call. */
-  private readonly refreshes = new Map<number, Promise<void>>();
-  /** The poll in flight, so refreshes and polls never read one task's CI at the same time. */
+  /** CI refreshes in flight, by task id, so concurrent callers (state, send, poll) share one read. */
+  private readonly refreshes = new Map<number, Promise<BuildTask | null>>();
+  /** The poll pass in flight; a second pass joins it instead of overlapping. */
   private polling: Promise<void> | null = null;
 
   constructor(deps: BuildDeps) {
@@ -167,15 +167,18 @@ export class BuildService {
   }
 
   /**
-   * Polls CI of every idle review task. It starts after the refreshes already in flight (and any earlier poll)
-   * have settled, and refreshes requested while it runs wait for it, so one green PR is announced once.
+   * Polls CI of every idle review task. Each task's read goes through the same per-task single-flight as
+   * state() and send(), so a poll and a state() on one task share one read and announce a green PR once.
+   * A pass that starts while another is running joins it. Nothing but another poll waits for a pass, so a
+   * slow GitHub read for one app cannot hold up another app's send or state().
    */
   pollCi(): Promise<void> {
-    const before = [this.polling, ...this.refreshes.values()];
-    const poll: Promise<void> = (async () => {
-      await Promise.allSettled(before);
-      await pollCi(this.deps, (app) => this.isRunning(app));
-    })().finally(() => {
+    if (this.polling !== null) return this.polling;
+    const poll: Promise<void> = pollCi(
+      this.deps,
+      (app) => this.isRunning(app),
+      (taskId) => this.refreshOnce(taskId),
+    ).finally(() => {
       if (this.polling === poll) this.polling = null;
     });
     this.polling = poll;
@@ -183,17 +186,17 @@ export class BuildService {
   }
 
   /**
-   * Refreshes a task's CI from GitHub, sharing the call with concurrent callers and waiting out a poll.
-   * `needed` is checked on the stored task once the refresh may start, so a task a poll just brought up
-   * to date is not read again.
+   * Refreshes a task's CI from GitHub. Callers that ask while a refresh of the same task is in flight
+   * share it. `needed` is checked on the stored task when the refresh starts, so a task that is no
+   * longer in the state the caller saw is returned as stored.
    */
-  private refreshOnce(taskId: number, needed: (task: BuildTask) => boolean): Promise<void> {
+  private refreshOnce(taskId: number, needed: (task: BuildTask) => boolean = () => true): Promise<BuildTask | null> {
     const flying = this.refreshes.get(taskId);
     if (flying !== undefined) return flying;
-    const flight: Promise<void> = (async () => {
-      if (this.polling !== null) await this.polling.catch(() => undefined);
+    const flight: Promise<BuildTask | null> = (async () => {
       const task = this.deps.store.task(taskId);
-      if (task !== null && needed(task)) await refreshCi(this.deps, taskId);
+      if (task === null || !needed(task)) return task;
+      return refreshCi(this.deps, taskId);
     })().finally(() => {
       this.refreshes.delete(taskId);
     });
@@ -273,7 +276,7 @@ export class BuildService {
     const { store } = this.deps;
     let task = store.openTask(app);
     if (task?.status === 'review') {
-      await this.refreshOnce(task.id, () => true);
+      await this.refreshOnce(task.id);
       task = store.task(task.id);
     }
     if (task !== null && !isOpenTask(task.status)) task = null;
