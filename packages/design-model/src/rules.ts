@@ -6,7 +6,8 @@ export const RESERVED_KEYS: ReadonlySet<string> = new Set(['__proto__', 'constru
 
 const NODE_ID_PATTERN = /^[A-Za-z][A-Za-z0-9_.:-]{0,127}$/;
 const SEQUENCE_ID_PATTERN = /^n(\d+)$/;
-const MAX_SEQUENCE = 999999999999999;
+// The largest sequence number a node id of the form n<digits> may carry.
+export const MAX_SEQUENCE = 999999999999999;
 
 // The message names the id, truncated to 64 characters so an overlong value cannot flood it.
 export function validateNodeId(id: unknown): string | null {
@@ -35,6 +36,8 @@ export const VOID_TAGS: ReadonlySet<string> = new Set([
 export const DENIED_TAGS: ReadonlySet<string> = new Set([
   'script', 'style', 'iframe', 'frame', 'frameset', 'object', 'embed', 'applet', 'base', 'meta',
   'link', 'noscript', 'template', 'slot', 'portal', 'title', 'head', 'html', 'body',
+  // Raw-text and fallback elements that a browser parses by other rules than ordinary markup.
+  'xmp', 'plaintext', 'noembed', 'noframes', 'listing',
 ]);
 
 const TAG_PATTERN = /^[a-z][a-z0-9-]*$/;

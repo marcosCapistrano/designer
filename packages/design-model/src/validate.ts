@@ -2,7 +2,7 @@ import { validateOpInternal } from './apply.js';
 import { validateStyle } from './css.js';
 import { defaultProps, propAttrIssue, resolveProps, templatedAttrs } from './props.js';
 import { validateAttrValue, validateNodeId, validatePageId, validateTag, VOID_TAGS } from './rules.js';
-import { ownValue, validateAttrName } from './ops/util.js';
+import { componentReaches, instanceComponents, ownValue, validateAttrName } from './ops/util.js';
 import { componentFieldsProblem, MAX_DEPTH, pageFieldsProblem, tokensProblem } from './shape.js';
 import {
   DEVICES,
@@ -43,7 +43,20 @@ export function validateDoc(doc: DesignDoc): string | null {
     const unsafe = propAttrIssue(def, defaultProps(def), attrsOf(scan, def));
     if (unsafe !== null) return `${where}: ${unsafe}`;
   }
+  const cycle = cycleIssue(doc);
+  if (cycle !== null) return cycle;
   return tokensIssue(doc);
+}
+
+// Ruling 21: no component may contain itself, directly or through the components it uses. This runs
+// after every component tree has passed its depth check, because it walks all of them.
+function cycleIssue(doc: DesignDoc): string | null {
+  for (const [key, def] of sortedEntries(doc.components)) {
+    if (instanceComponents([def.root]).some((name) => componentReaches(doc, name, key))) {
+      return `component ${label(key)}: Component cycle at ${label(key)}`;
+    }
+  }
+  return null;
 }
 
 // Ids and keys are echoed into messages, so they are cut short.

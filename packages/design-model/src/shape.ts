@@ -4,8 +4,6 @@ import { DEVICES, type Op } from './types.js';
 // run against a doc is decided by its handler.
 
 export const MAX_DEPTH = 64;
-// Ids and names become object keys, so these would collide with Object.prototype.
-export const RESERVED_KEYS: ReadonlySet<string> = new Set(['__proto__', 'constructor', 'prototype']);
 
 // A plain object: a literal, a JSON value or Object.create(null). Arrays and class instances are not.
 export function isPlainObject(value: unknown): value is Record<string, unknown> {

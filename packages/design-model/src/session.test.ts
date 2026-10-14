@@ -422,3 +422,48 @@ describe('DesignSession documents', () => {
     }
   });
 });
+
+// The constructor takes the batches already in changes.jsonl. They are checked like any other ops.
+describe('DesignSession changes', () => {
+  const RESTORE: Op = { op: 'restore', seq: 9, entries: [] };
+  const BAD_TEXT = { op: 'setText', node: 'n4', text: 5 } as unknown as Op;
+
+  test.each<[string, unknown, string]>([
+    ['changes that is not an array', null, 'changes must be an array of batches'],
+    ['changes that is a string', 'x', 'changes must be an array of batches'],
+    ['a batch that is not an array', [[TEXT_N4], 'x'], 'changes[1] must be an array of ops'],
+    ['a null op', [[null]], 'changes[0][0]: Malformed op: op must be an object'],
+    ['a malformed op', [[TEXT_N4], [PAD_N3, BAD_TEXT]], 'changes[1][1]: Malformed op: setText.text must be a string'],
+    ['a restore op', [[TEXT_N4], [RESTORE]], 'changes[1][0]: restore ops are internal'],
+    ['an unknown op', [[{ op: 'explode' }]], 'changes[0][0]: Unknown op "explode"'],
+  ])('refuses %s', (_label, changes, reason) => {
+    expect(() => new DesignSession(sampleDoc(), changes as Op[][])).toThrow(
+      new TypeError(`DesignSession: ${reason}`),
+    );
+    expect(DesignSession.create(sampleDoc(), changes as Op[][])).toEqual({
+      ok: false,
+      error: `DesignSession: ${reason}`,
+    });
+  });
+
+  test('create returns the session when the changes are fine', () => {
+    const result = DesignSession.create(sampleDoc(), [[TEXT_N4], [PAD_N3, NAME_N2]]);
+    if (!result.ok) throw new Error(result.error);
+    expect(result.value.changelist()).toEqual([TEXT_N4, PAD_N3, NAME_N2]);
+    expect(result.value.undo()).toBe(false);
+  });
+
+  test('an op with a value that cannot be copied is refused, not thrown from', () => {
+    const op = { op: 'setText', node: 'n4', text: 'x', extra: () => 1 } as unknown as Op;
+    expect(DesignSession.create(sampleDoc(), [[op]])).toEqual({
+      ok: false,
+      error: 'DesignSession: changes must be plain data',
+    });
+  });
+
+  test('accepts no changes, empty changes and empty batches', () => {
+    expect(new DesignSession(sampleDoc()).changelist()).toEqual([]);
+    expect(new DesignSession(sampleDoc(), []).changelist()).toEqual([]);
+    expect(new DesignSession(sampleDoc(), [[], []]).changelist()).toEqual([]);
+  });
+});

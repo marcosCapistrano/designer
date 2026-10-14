@@ -197,6 +197,65 @@ describe('validateDoc', () => {
   });
 });
 
+// Ruling 21: a component must not contain itself, directly or through other components.
+describe('validateDoc component cycles', () => {
+  function inst(id: string, component: string): InstanceNode {
+    return { id, kind: 'instance', component, props: {}, style: { base: {} } };
+  }
+
+  function component(name: string, rootId: string, children: DesignNode[]): DesignDoc['components'][string] {
+    return {
+      name,
+      props: {},
+      root: { id: rootId, kind: 'element', tag: 'div', attrs: {}, style: { base: {} }, children },
+    };
+  }
+
+  test('rejects a component that contains an instance of itself', () => {
+    const doc = mutableDoc();
+    doc.components['Loop'] = component('Loop', 'n30', [inst('n31', 'Loop')]);
+    expect(validateDoc(doc)).toBe('component Loop: Component cycle at Loop');
+  });
+
+  test('rejects two components that contain each other', () => {
+    const doc = mutableDoc();
+    doc.components['Aa'] = component('Aa', 'n30', [inst('n31', 'Bb')]);
+    doc.components['Bb'] = component('Bb', 'n32', [inst('n33', 'Aa')]);
+    expect(validateDoc(doc)).toBe('component Aa: Component cycle at Aa');
+  });
+
+  test('rejects a cycle of three, found from the component that starts it', () => {
+    const doc = mutableDoc();
+    doc.components['Aa'] = component('Aa', 'n30', [component('x', 'n31', [inst('n32', 'Bb')]).root]);
+    doc.components['Bb'] = component('Bb', 'n33', [inst('n34', 'Cc')]);
+    doc.components['Cc'] = component('Cc', 'n35', [inst('n36', 'Aa')]);
+    expect(validateDoc(doc)).toBe('component Aa: Component cycle at Aa');
+  });
+
+  test('a page that uses a cyclic component is refused', () => {
+    const doc = mutableDoc();
+    doc.components['Loop'] = component('Loop', 'n30', [inst('n31', 'Loop')]);
+    element(doc, 'n2').children.push(inst('n32', 'Loop'));
+    expect(validateDoc(doc)).toContain('Component cycle at Loop');
+  });
+
+  test('parseDoc refuses a cyclic component', () => {
+    const doc = mutableDoc();
+    doc.components['Aa'] = component('Aa', 'n30', [inst('n31', 'Bb')]);
+    doc.components['Bb'] = component('Bb', 'n32', [inst('n33', 'Aa')]);
+    expect(parseDoc(serializeDoc(doc))).toEqual({ ok: false, error: 'component Aa: Component cycle at Aa' });
+  });
+
+  test('accepts components that share a component without a cycle', () => {
+    const doc = mutableDoc();
+    doc.components['Leaf'] = component('Leaf', 'n30', []);
+    doc.components['Left'] = component('Left', 'n31', [inst('n32', 'Leaf')]);
+    doc.components['Right'] = component('Right', 'n33', [inst('n34', 'Leaf')]);
+    doc.components['Top'] = component('Top', 'n35', [inst('n36', 'Left'), inst('n37', 'Right')]);
+    expect(validateDoc(doc)).toBeNull();
+  });
+});
+
 // I1/N1: validateDoc reports a malformed header field or token group, and never throws on it.
 describe('validateDoc shapes', () => {
   function asDoc(patch: (doc: Record<string, any>) => void): DesignDoc {

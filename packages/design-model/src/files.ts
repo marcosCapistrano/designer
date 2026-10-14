@@ -5,9 +5,9 @@ import {
   nodeProblem,
   opProblem,
   pageFieldsProblem,
-  RESERVED_KEYS,
   tokensProblem,
 } from './shape.js';
+import { RESERVED_KEYS } from './rules.js';
 import { type Container, walkDoc } from './tree.js';
 import type { ComponentDef, DesignDoc, Op, Page, Result, Tokens } from './types.js';
 import { validateDoc } from './validate.js';
