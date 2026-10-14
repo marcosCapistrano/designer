@@ -10,6 +10,7 @@ import { makeTestRepo, TEST_IDENTITY } from '../git/test-repo.js';
 import { FakeGitHub } from '../github/fake.js';
 import { startHub } from '../server.js';
 import type { DesignToolActions } from '../design/chat.js';
+import type { PreviewActions } from '../sync/preview.js';
 
 // The app manifest of the spec's example, named after the demo app, with build steps that always pass.
 const DEMO_MANIFEST = {
@@ -30,7 +31,8 @@ async function main(): Promise<void> {
     workDir: join(root, 'apps', 'demo'),
     files: { '.hub/app.json': JSON.stringify(DEMO_MANIFEST), 'app/page.tsx': 'import Button from "./Button"; export default () => <main style={{ padding: "32px", color: "#124" }}><h1>Imported demo</h1><Button label="Start" /><Button label="Go" /></main>', 'app/Button.tsx': 'export default ({label}) => <button>{label}</button>' },
   });
-  const scratch = [root, dirname(repo.origin)];
+  const samples=makeTestRepo({workDir:join(root,'apps','samples'),files:{'app/page.tsx':'const user=loadUser();export default () => <main><h1>{user.name}</h1></main>'}});
+  const scratch = [root, dirname(repo.origin),dirname(samples.origin)];
   const removeScratch = (): void => {
     for (const dir of scratch) rmSync(dir, { recursive: true, force: true });
   };
@@ -70,6 +72,11 @@ async function main(): Promise<void> {
       },
       { type: 'text', text: 'Prepared a shared button-color preview. Tap Apply to change it.' },
       { type: 'done', sessionId: 'fake-design-session', ok: true },
+    ]]),
+    previewMcp:actions=>({actions}),
+    previewRunner:new FakeClaudeRunner([[
+      async options=>{const actions=(options.mcpServers!['preview'] as {actions:PreviewActions}).actions;for(const gap of await actions.gaps())await actions.choose(gap.key,gap.kind==='value'?{kind:'value',value:{name:'Preview Alice'}}:{kind:'nodes',nodes:['Sample item']});},
+      {type:'done',ok:true,sessionId:'fake-preview-session'},
     ]]),
     openRepo: (dir) => openRepo(dir, { identity: TEST_IDENTITY }),
     ciPollMs: 1000,

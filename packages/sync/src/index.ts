@@ -5,4 +5,5 @@ export { serializeSyncState, parseSyncState } from './files.js';
 export { FsSyncStore, atomicWrite } from './store.js';
 export type { SyncStore, StoredSync, AtomicWrite } from './store.js';
 export type { PageBaseline, SyncBaseline, SyncState, SyncConflict, SyncResult } from './synchronize.js';
-export type { SourceProject, RouteEntry, ExtractResult, ExtractOptions, SourceDiagnostic } from './types.js';
+export type { SourceProject, RouteEntry, ExtractResult, ExtractOptions, SourceDiagnostic, SourceGap, PreviewNode, PreviewChoice, PreviewChoices } from './types.js';
+export { choiceKey, choicesProblem } from './choices.js';

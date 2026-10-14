@@ -1,7 +1,8 @@
 import ts from '@typescript/typescript6';
 import { canonicalStringify, validateDoc, type ComponentDef, type DesignDoc, type DesignNode, type ElementNode, type StyleMap } from '@hub/design-model';
 import { applyStyles, parseStyles } from './css.js';
-import type { ExtractOptions, ExtractResult, RouteEntry, SourceProject } from './types.js';
+import type { ExtractOptions, ExtractResult, PreviewNode, RouteEntry, SourceDiagnostic, SourceProject } from './types.js';
+import { choiceKey, choicesProblem, PreviewRequired } from './choices.js';
 
 // No ambient clock, filesystem or execution: extraction is a pure function of source text.
 function stableId(key: string): string {
@@ -39,13 +40,18 @@ function resolveFile(project: SourceProject, from: string, specifier: string): s
 }
 
 class PropValue { constructor(readonly name: string) {} }
-type Value = string | number | boolean | null | Record<string, unknown> | DesignNode[] | PropValue;
+type Value = string | number | boolean | null | Record<string, unknown> | unknown[] | PropValue;
 interface Module { source: ts.SourceFile; imports: Map<string, { file: string; name: string }>; styles: Map<string, string>; constants: Map<string, ts.Expression> }
 
 export function extractPages(project: SourceProject, entries: RouteEntry[], options: ExtractOptions = {}): ExtractResult {
   const doc: DesignDoc = { meta: { version: 1, seq: 0 }, pages: {}, components: {}, tokens: {} };
   const dependencies: Record<string, string[]> = {};
-  const diagnostics: { file: string; message: string }[] = [];
+  const diagnostics: SourceDiagnostic[] = [];
+  const choiceError = options.choices ? choicesProblem(options.choices) : null;
+  if (choiceError) return { ok: false, diagnostics: [{ file: '', message: choiceError }] };
+  const sampleArrays = new WeakSet<unknown[]>();
+  function markSamples(value: unknown): void { if (Array.isArray(value)) { sampleArrays.add(value); value.forEach(markSamples); } else if (value && typeof value === 'object') Object.values(value).forEach(markSamples); }
+  for (const choice of Object.values(options.choices ?? {})) if (choice.kind === 'value') markSamples(choice.value);
   const seenRoutes = new Set<string>();
   for (const entry of [...entries].sort((a, b) => a.route < b.route ? -1 : a.route > b.route ? 1 : 0)) {
     let currentFile = entry.file;
@@ -66,6 +72,17 @@ export function extractPages(project: SourceProject, entries: RouteEntry[], opti
       const definitions: Record<string, ComponentDef> = {};
       const requirements = new Map<string, Set<string>>();
       const nodeId = (file: string, path: string) => `s${stableId(`${idNamespace}:${file}:${path}`)}`;
+      function reactHook(expression: ts.Expression, mod: Module, hook: string): boolean {
+        if (ts.isIdentifier(expression)) { const imported=mod.imports.get(expression.text); return imported?.file==='react'&&imported.name===hook; }
+        if (ts.isPropertyAccessExpression(expression)&&ts.isIdentifier(expression.expression)&&expression.name.text===hook) { const imported=mod.imports.get(expression.expression.text);return imported?.file==='react'&&(imported.name==='default'||imported.name==='*'); }
+        return false;
+      }
+      function previewValue(expression: ts.Expression, mod: Module): Value {
+        const code=expression.getText(mod.source),key=choiceKey(mod.source.fileName,code);
+        const choice=options.choices?.[key];
+        if(choice?.kind==='value')return choice.value;
+        throw new PreviewRequired({key,file:mod.source.fileName,expression:code,kind:'value'});
+      }
       function module(file: string): Module {
         currentFile = file;
         const cached = modules.get(file); if (cached) return cached;
@@ -98,7 +115,15 @@ export function extractPages(project: SourceProject, entries: RouteEntry[], opti
               if (clause.namedBindings && ts.isNamedImports(clause.namedBindings)) {
                 for (const binding of clause.namedBindings.elements) if (!binding.isTypeOnly) mod.imports.set(binding.name.text, { file: specifier, name: binding.propertyName?.text ?? binding.name.text });
               }
+              if (clause.namedBindings && ts.isNamespaceImport(clause.namedBindings)) mod.imports.set(clause.namedBindings.name.text,{file:specifier,name:'*'});
+              const runtime=clause.name||clause.namedBindings&&(!ts.isNamedImports(clause.namedBindings)||clause.namedBindings.elements.some(binding=>!binding.isTypeOnly));
+              if(runtime&&specifier.startsWith('.')) { module(resolveFile(project,file,specifier)); currentFile=file; }
             } else if (!statement.importClause) throw new Error(`Side-effect import ${specifier} needs a preview adapter`);
+          }
+          if(ts.isExpressionStatement(statement)&&!ts.isStringLiteral(statement.expression))throw new Error('Module side effects need an explicit preview adapter');
+          if(ts.isExportDeclaration(statement)&&!statement.isTypeOnly&&statement.moduleSpecifier&&ts.isStringLiteral(statement.moduleSpecifier)&&statement.moduleSpecifier.text.startsWith('.')) {
+            const runtime=!statement.exportClause||!ts.isNamedExports(statement.exportClause)||statement.exportClause.elements.some(binding=>!binding.isTypeOnly);
+            if(runtime){module(resolveFile(project,file,statement.moduleSpecifier.text));currentFile=file;}
           }
           if (ts.isVariableStatement(statement)) for (const declaration of statement.declarationList.declarations) {
             if (ts.isIdentifier(declaration.name) && declaration.initializer) mod.constants.set(declaration.name.text, declaration.initializer);
@@ -118,6 +143,13 @@ export function extractPages(project: SourceProject, entries: RouteEntry[], opti
           if (Object.hasOwn(env, expression.text)) return env[expression.text]!;
           const constant = mod.constants.get(expression.text);
           if (constant) return value(constant, mod, env, depth + 1);
+          const imported=mod.imports.get(expression.text);
+          if(imported?.file.startsWith('.')) {
+            const target=module(resolveFile(project,mod.source.fileName,imported.file));
+            const exported=target.constants.get(imported.name);
+            if(exported)return value(exported,target,{},depth+1);
+            if(imported.name==='default')for(const statement of target.source.statements)if(ts.isExportAssignment(statement))return value(statement.expression,target,{},depth+1);
+          }
         }
         if (ts.isPropertyAccessExpression(expression)) {
           if (ts.isIdentifier(expression.expression)) {
@@ -137,7 +169,15 @@ export function extractPages(project: SourceProject, entries: RouteEntry[], opti
           }
           return result;
         }
-        throw new Error(`Dynamic expression needs a saved preview choice: ${expression.getText(mod.source).slice(0, 100)}`);
+        if (ts.isArrayLiteralExpression(expression)) {
+          if(expression.elements.some((item)=>ts.isOmittedExpression(item)||ts.isSpreadElement(item)))throw new Error('Sparse or spread source arrays need a preview adapter');
+          const result=expression.elements.map((item)=>value(item,mod,env,depth+1));sampleArrays.add(result);return result;
+        }
+        const code = expression.getText(mod.source);
+        const key = choiceKey(mod.source.fileName,code);
+        const chosen = options.choices?.[key];
+        if (chosen?.kind === 'value') return chosen.value;
+        throw new PreviewRequired({ key, file: mod.source.fileName, expression: code, kind: 'value' });
       }
       function renderComponent(file: string, name: string, props: Record<string, Value>, path: string): DesignNode[] {
         const mod = module(file);
@@ -169,6 +209,7 @@ export function extractPages(project: SourceProject, entries: RouteEntry[], opti
             else if (ts.isObjectBindingPattern(parameter.name)) for (const binding of parameter.name.elements) {
               if (!ts.isIdentifier(binding.name) || binding.dotDotDotToken) throw new Error('Unsupported component props');
               const key = binding.propertyName?.getText(mod.source) ?? binding.name.text;
+              if(/^on[A-Z]/.test(key))continue; // callback-only props do not affect a static preview unless read elsewhere
               if (declarations && key !== 'children') {
                 if (!Object.hasOwn(props, key) && !binding.initializer) throw new Error(`Missing preview prop ${key} for ${name}`);
                 if (binding.initializer) requiredProps?.delete(key);
@@ -188,9 +229,17 @@ export function extractPages(project: SourceProject, entries: RouteEntry[], opti
             for (const statement of fn.body.statements) {
               if (ts.isVariableStatement(statement)) for (const declaration of statement.declarationList.declarations) {
                 if (ts.isIdentifier(declaration.name) && declaration.initializer) env[declaration.name.text] = value(declaration.initializer, mod, env);
+                else if (ts.isArrayBindingPattern(declaration.name)&&declaration.initializer&&ts.isCallExpression(declaration.initializer)&&reactHook(declaration.initializer.expression,mod,'useState')) {
+                  const first=declaration.name.elements[0];
+                  if(!first||!ts.isBindingElement(first)||!ts.isIdentifier(first.name)||first.dotDotDotToken||declaration.name.elements.length>2)throw new Error('Unsupported state binding');
+                  env[first.name.text]=previewValue(declaration.initializer,mod);
+                }
                 else throw new Error('Unsupported local binding');
               }
               else if (ts.isReturnStatement(statement)) body = statement.expression;
+              else if (ts.isExpressionStatement(statement)&&ts.isCallExpression(statement.expression)&&(reactHook(statement.expression.expression,mod,'useEffect')||reactHook(statement.expression.expression,mod,'useLayoutEffect'))) {
+                if(previewValue(statement.expression,mod)!==null)throw new Error('Effect preview choices must be null: effects are never executed');
+              }
               else throw new Error('Component execution needs a saved preview choice');
             }
           } else body = fn.body;
@@ -199,13 +248,75 @@ export function extractPages(project: SourceProject, entries: RouteEntry[], opti
         } finally { stack.pop(); }
       }
       function renderExpression(expression: ts.Expression, mod: Module, env: Record<string, Value>, path: string): DesignNode[] {
-        if (ts.isParenthesizedExpression(expression)) return renderExpression(expression.expression, mod, env, path);
+        if (ts.isParenthesizedExpression(expression)||ts.isAsExpression(expression)||ts.isSatisfiesExpression(expression)) return renderExpression(expression.expression, mod, env, path);
         if (ts.isJsxElement(expression) || ts.isJsxSelfClosingElement(expression)) return renderJsx(expression, mod, env, path);
         if (ts.isJsxFragment(expression)) return children(expression.children, mod, env, path);
-        const literal = value(expression, mod, env);
+        if(ts.isConditionalExpression(expression)) {
+          const condition=value(expression.condition,mod,env);
+          if(condition instanceof PropValue)throw new Error('Prop-dependent shared branches need a preview adapter');
+          return renderExpression(condition?expression.whenTrue:expression.whenFalse,mod,env,`${path}/${condition?'then':'else'}`);
+        }
+        if(ts.isBinaryExpression(expression)&&(expression.operatorToken.kind===ts.SyntaxKind.AmpersandAmpersandToken||expression.operatorToken.kind===ts.SyntaxKind.BarBarToken)) {
+          const left=value(expression.left,mod,env);
+          if(left instanceof PropValue)throw new Error('Prop-dependent shared branches need a preview adapter');
+          const right=expression.operatorToken.kind===ts.SyntaxKind.AmpersandAmpersandToken?!!left:!left;
+          return renderExpression(right?expression.right:expression.left,mod,env,`${path}/${right?'right':'left'}`);
+        }
+        if(ts.isCallExpression(expression)&&ts.isPropertyAccessExpression(expression.expression)&&expression.expression.name.text==='map') {
+          const callback=expression.arguments[0];
+          if(expression.arguments.length!==1||!callback||!(ts.isArrowFunction(callback)||ts.isFunctionExpression(callback))||callback.parameters.length>3||callback.parameters.some(parameter=>parameter.dotDotDotToken||parameter.initializer))throw new Error('Map previews require one inline arrow/function template with plain parameters');
+          const rows=value(expression.expression.expression,mod,env);
+          if(!Array.isArray(rows)||rows.length>200)throw new Error('Map previews require an array of at most 200 sample rows');
+          let template:ts.Expression|undefined;
+          if(ts.isBlock(callback.body)) { if(callback.body.statements.length===1&&ts.isReturnStatement(callback.body.statements[0]!))template=callback.body.statements[0]!.expression; }
+          else template=callback.body;
+          if(!template)throw new Error('Map templates must return static JSX without executing statements');
+          return rows.flatMap((row,index)=>{
+            const scope={...env};
+            for(const [position,parameter]of callback.parameters.entries()) {
+              const item=position===0?row:position===1?index:rows;
+              if(ts.isIdentifier(parameter.name))scope[parameter.name.text]=item as Value;
+              else if(position===0&&ts.isObjectBindingPattern(parameter.name))for(const binding of parameter.name.elements) {
+                if(!ts.isIdentifier(binding.name)||binding.dotDotDotToken||!item||typeof item!=='object'||Array.isArray(item))throw new Error('Unsupported map row binding');
+                const key=binding.propertyName?.getText(mod.source)??binding.name.text;
+                if(!Object.hasOwn(item,key))throw new Error(`Missing sample row field ${key}`);
+                scope[binding.name.text]=(item as Record<string,Value>)[key]!;
+              }
+              else throw new Error('Unsupported map parameters');
+            }
+            let root=template!;while(ts.isParenthesizedExpression(root))root=root.expression;
+            const opening=ts.isJsxElement(root)?root.openingElement:ts.isJsxSelfClosingElement(root)?root:null;
+            const keyAttr=opening?.attributes.properties.find((attribute)=>ts.isJsxAttribute(attribute)&&attribute.name.getText(mod.source)==='key');
+            let identity=String(index);
+            if(keyAttr&&ts.isJsxAttribute(keyAttr)&&keyAttr.initializer) {
+              const keyValue=ts.isStringLiteral(keyAttr.initializer)?keyAttr.initializer.text:ts.isJsxExpression(keyAttr.initializer)&&keyAttr.initializer.expression?value(keyAttr.initializer.expression,mod,scope):null;
+              if(typeof keyValue!=='string'&&typeof keyValue!=='number')throw new Error('Map keys require a static string or number');
+              identity=`key-${stableId(String(keyValue))}`;
+            }
+            return renderExpression(template!,mod,scope,`${path}/map/${identity}`);
+          });
+        }
+        const code = expression.getText(mod.source);
+        const key = choiceKey(mod.source.fileName,code);
+        const choice = options.choices?.[key];
+        function sampledNodes(): DesignNode[] {
+          if (choice?.kind !== 'nodes') throw new PreviewRequired({ key, file: mod.source.fileName, expression: code, kind: 'nodes' });
+          function sample(item: PreviewNode | string, at: string): DesignNode {
+            const id = nodeId(mod.source.fileName,at);
+            if (declarations && /\{\{[A-Za-z_][A-Za-z0-9_]*\}\}/.test(JSON.stringify(item))) throw new Error('Literal placeholder syntax in shared preview samples needs an adapter');
+            if (typeof item === 'string') return { id, kind: 'text', text: item };
+            if (!item || typeof item !== 'object' || typeof item.tag !== 'string' || (item.children !== undefined && !Array.isArray(item.children))) throw new Error('Invalid preview node');
+            if (item.style) inline.set(id,structuredClone(item.style));
+            return { id, kind: 'element', tag: item.tag, attrs: structuredClone(item.attrs ?? {}), style: { base: {} }, children: (item.children ?? []).map((child,index) => sample(child,`${at}/${index}`)) };
+          }
+          return choice.nodes.map((item,index) => sample(item,`${path}/preview/${index}`));
+        }
+        let literal: Value;
+        try { literal = value(expression, mod, env); }
+        catch (error) { if (error instanceof PreviewRequired && error.gap.key === key) return sampledNodes(); throw error; }
         if (literal instanceof PropValue) return [{ id: nodeId(mod.source.fileName, path), kind: 'text', text: `{{${literal.name}}}` }];
         if (declarations && typeof literal === 'string' && /\{\{[A-Za-z_][A-Za-z0-9_]*\}\}/.test(literal)) throw new Error('Literal placeholder syntax in shared components needs an adapter');
-        if (Array.isArray(literal)) return literal;
+        if (Array.isArray(literal)) { if (sampleArrays.has(literal)) return sampledNodes(); return literal as DesignNode[]; }
         if (literal === null || typeof literal === 'boolean') return [];
         if (typeof literal === 'object') throw new Error('Object is not a JSX child');
         return [{ id: nodeId(mod.source.fileName, path), kind: 'text', text: String(literal) }];
@@ -322,7 +433,7 @@ export function extractPages(project: SourceProject, entries: RouteEntry[], opti
       }
       doc.pages[id] = { id, name: entry.route, route: entry.route, root };
       dependencies[id] = [...files].sort();
-    } catch (error) { diagnostics.push({ file: currentFile, message: error instanceof Error ? error.message : 'Extraction failed' }); }
+    } catch (error) { diagnostics.push({ file: error instanceof PreviewRequired ? error.gap.file : currentFile, message: error instanceof Error ? error.message : 'Extraction failed', ...(error instanceof PreviewRequired ? { gap: error.gap } : {}) }); }
   }
   if (diagnostics.length) return { ok: false, diagnostics };
   const invalid = validateDoc(doc);

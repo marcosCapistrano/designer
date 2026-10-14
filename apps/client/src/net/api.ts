@@ -10,6 +10,7 @@ import type {
   ImportRequest, ImportResponse, DesignSummary,
   NodeSelection, DesignSelection, DesignEditResult,
   DesignChatState, DesignChatResult,
+  SourcePreviewState, SourcePreviewResult,
 } from '@hub/protocol';
 
 /** A non-OK API response. `message` is the server's `error` text when it sent one. */
@@ -122,6 +123,11 @@ export class ApiClient {
     return this.json(`${appPath(app)}/design/chat`, { method: 'POST', body: { text, selection } });
   }
   stopDesign(app: string): Promise<StopResponse> { return this.json(`${appPath(app)}/design/chat/stop`, { method: 'POST' }); }
+  sourcePreview(app: string): Promise<SourcePreviewState> { return this.json(`${appPath(app)}/design/source-preview`); }
+  generateSourcePreview(app: string, source: ImportRequest, text?:string): Promise<SourcePreviewResult> { return this.json(`${appPath(app)}/design/source-preview`, {method:'POST',body:{source,text}}); }
+  applySourcePreview(app: string,id: string): Promise<ImportResponse> { return this.json(`${appPath(app)}/design/source-preview/apply`, {method:'POST',body:{id}}); }
+  cancelSourcePreview(app: string,id: string): Promise<unknown> { return this.json(`${appPath(app)}/design/source-preview/cancel`, {method:'POST',body:{id}}); }
+  stopSourcePreview(app: string): Promise<StopResponse> { return this.json(`${appPath(app)}/design/source-preview/stop`, {method:'POST'}); }
 
   buildState(app: string, after?: number): Promise<BuildState> {
     const query = after === undefined ? '' : `?after=${after}`;

@@ -1,7 +1,7 @@
 import type { RenderManifest, NodeSelection } from './render.js';
 export interface ImportRoute { route: string; file: string; exportName?: string; layouts?: string[] }
 export type ImportRequest = { mode: 'next'; appDir?: string } | { mode: 'react'; entries: ImportRoute[] };
-export interface ImportDiagnostic { file: string; message: string }
+export interface ImportDiagnostic { file: string; message: string; gap?: { key: string; file: string; expression: string; kind: 'value' | 'nodes' } }
 export type ImportResponse =
   | { ok: true; revision: string; rebuilt: string[]; reused: string[]; removed: string[]; manifest: RenderManifest | null; warnings: string[] }
   | { ok: false; kind: 'source'; diagnostics: ImportDiagnostic[] }
@@ -20,3 +20,7 @@ export type DesignEditResult = { mode: 'applied'; revision: string; warnings: st
 export interface DesignMessage { id: number; app: string; kind: 'user' | 'assistant' | 'error'; text: string; at: number }
 export interface DesignChatState { running: boolean; messages: DesignMessage[] }
 export interface DesignChatResult { ok: boolean; text: string; edit: DesignEditResult | null; error?: string }
+export interface SourcePreviewProposal { id: string; sourceCommit: string; samples: { file: string; expression: string; value: unknown }[]; manifest: RenderManifest | null; warnings: string[] }
+export type SourcePreviewResult = { ok: true; proposal: SourcePreviewProposal } | Exclude<ImportResponse,{ok:true}>;
+export interface SourcePreviewState { running: boolean; proposal: SourcePreviewProposal | null; acceptedSamples: number }
+export interface SourcePreviewRequest { source: ImportRequest; text?: string }

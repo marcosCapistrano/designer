@@ -21,3 +21,11 @@
 .design-message-user { font-weight: 600; }
 .design-message-error { color: #a21d27; }
 .design-chat textarea { box-sizing: border-box; width: 100%; min-height: 96px; font: inherit; padding: 8px; border: 1px solid #aaa; border-radius: 6px; }
+.design-samples { padding: 8px 12px; flex-shrink: 0; max-height: 50vh; overflow: auto; }
+.design-samples > span { margin-left: 12px; font-size: 13px; }
+.design-samples > label { display: inline-flex; flex-direction: column; gap: 4px; font-size: 13px; margin: 0 12px 8px 0; }
+.design-samples > label > input { box-sizing: border-box; width: 300px; max-width: 80vw; min-height: 44px; padding: 8px; font: inherit; border: 1px solid #aaa; border-radius: 6px; }
+.design-sample-proposal { padding: 12px; border: 1px solid #aaa; border-radius: 8px; margin-top: 12px; }
+.design-sample-proposal h2 { font-size: 16px; }
+.design-sample-proposal pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+.design-source-preview { height: 260px; position: relative; margin: 12px 0; }

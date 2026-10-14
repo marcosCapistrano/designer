@@ -8,6 +8,7 @@ import type { TileSource } from '../../canvas/source.js';
 import { CanvasView } from '../../canvas/index.js';
 import './design.css';
 import { EditorPanel } from './EditorPanel.js';
+import { SourceSamples } from './SourceSamples.js';
 
 export interface DesignAreaProps { app: string; api: ApiClient; ws: WsClient; source: TileSource; cache: BlobCache }
 export function DesignArea({ app, api, ws, source, cache }: DesignAreaProps): JSX.Element {
@@ -23,6 +24,8 @@ export function DesignArea({ app, api, ws, source, cache }: DesignAreaProps): JS
   const [previewVersion, setPreviewVersion] = useState(0);
   const [selection, setSelection] = useState<NodeSelection | null>(null);
   const [revision, setRevision] = useState<string | null>(null);
+  const [sampleBusy,setSampleBusy]=useState(false);
+  const imported=useCallback((out:ImportResponse)=>{setResult(out);if(out.ok){setRevision(out.revision);setSelection(null);setNote(`Imported ${out.rebuilt.length} pages; reused ${out.reused.length}.${out.removed.length?` Removed ${out.removed.length} source routes.`:''}`);setPreviewVersion(value=>value+1)}},[]);
   const edited = useCallback((next: string, warnings: string[]) => { setRevision(next); setNote(warnings.join(' ') || 'Design updated.'); setPreviewVersion((value) => value + 1); setSelection(null); }, []);
   useEffect(() => { let active = true; void api.designSummary(app).then((summary) => { if (active) setRevision((current) => current ?? summary.revision); }).catch(() => {}); return () => { active = false; }; }, [app, api]);
   useEffect(() => {
@@ -35,8 +38,7 @@ export function DesignArea({ app, api, ws, source, cache }: DesignAreaProps): JS
     setBusy(true); setError(null); setNote(null);
     try {
       const out = await api.importPages(app, mode === 'next' ? { mode, ...(appDir.trim() ? { appDir: appDir.trim() } : {}) } : { mode, entries: [{ route: route.trim(), file: file.trim() }] });
-      setResult(out);
-      if (out.ok) { setRevision(out.revision); setSelection(null); setNote(`Imported ${out.rebuilt.length} pages; reused ${out.reused.length}.${out.removed.length ? ` Removed ${out.removed.length} source routes.` : ''}`); setPreviewVersion((value) => value + 1); }
+      imported(out);
     } catch (error) { setError(error instanceof Error ? error.message : 'Import failed.'); }
     finally { setBusy(false); }
   };
@@ -53,9 +55,10 @@ export function DesignArea({ app, api, ws, source, cache }: DesignAreaProps): JS
         <label>Entry file <input value={file} required disabled={busy} onInput={(event) => setFile(event.currentTarget.value)} /></label>
         <label>Route <input value={route} required disabled={busy} onInput={(event) => setRoute(event.currentTarget.value)} /></label>
       </>}
-      <button class="shell-button" type="submit" disabled={busy || building}>{busy ? 'Working…' : 'Import pages'}</button>
-      <button class="shell-button" type="button" disabled={busy || building} onClick={() => void retry()}>Retry preview</button>
+      <button class="shell-button" type="submit" disabled={busy || building || sampleBusy}>{busy ? 'Working…' : 'Import pages'}</button>
+      <button class="shell-button" type="button" disabled={busy || building || sampleBusy} onClick={() => void retry()}>Retry preview</button>
     </form>
+    <SourceSamples app={app} api={api} source={source} request={mode==='next'?{mode,...(appDir.trim()?{appDir:appDir.trim()}:{})}:{mode,entries:[{route:route.trim(),file:file.trim()}]}} disabled={busy||building} onBusy={setSampleBusy} onImported={imported}/>
     {building && <p class="design-status">Wait for Build to finish before importing.</p>}
     {note && <p class="design-status" role="status">{note}</p>}
     {error && <p class="design-status" role="alert">{error}</p>}
@@ -67,7 +70,7 @@ export function DesignArea({ app, api, ws, source, cache }: DesignAreaProps): JS
     <div class="design-workspace"><div class="design-canvas"><CanvasView key={previewVersion} source={source} cache={cache} onSelect={setSelection} />
       {!revision && <div class="design-empty">Import your pages to start designing.</div>}
     </div>
-      <EditorPanel app={app} api={api} ws={ws} source={source} selection={selection} revision={revision} disabled={busy || building} onApplied={edited} />
+      <EditorPanel app={app} api={api} ws={ws} source={source} selection={selection} revision={revision} disabled={busy || building || sampleBusy} onApplied={edited} />
     </div>
   </div>;
 }

@@ -12,7 +12,7 @@ function setup(shared = false) {
   let writes = 0, renders = 0, time = 0;
   const sync = {
     load: async () => structuredClone(saved),
-    save: async (_app: string, state: SyncState, revision: string) => {
+    save: async (_app: string, state: SyncState, revision: string | null) => {
       if (revision !== saved.revision) throw new Error('stale');
       const decoded = parseSyncState(serializeSyncState(state));
       if (!decoded.ok) throw new Error(decoded.error);
