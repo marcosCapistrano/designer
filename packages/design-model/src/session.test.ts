@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'vitest';
+import { describe, expect, test, vi } from 'vitest';
 import { applyOpInternal } from './apply.js';
 import { canonicalStringify } from './canonical.js';
 import { sampleDoc } from './fixtures.js';
@@ -308,5 +308,117 @@ describe('DesignSession', () => {
 describe('classifyBatch with a malformed op', () => {
   test('a null op needs preview and does not throw', () => {
     expect(classifyBatch(sampleDoc(), [null as unknown as Op])).toBe('preview');
+  });
+});
+
+// I5 residual (Ruling 38): the session no longer copies the doc before it runs an op, because
+// applyOpInternal already copies it. The docs the session hands out stay out of callers' reach.
+describe('DesignSession documents', () => {
+  const homeName = (doc: DesignDoc): string => doc.pages['home']?.name ?? '';
+  const rename = (doc: DesignDoc): void => {
+    const home = doc.pages['home'];
+    if (home) home.name = 'Mutated by the caller';
+  };
+  const restyle = (doc: DesignDoc): void => {
+    const hit = findNode(doc, 'n3');
+    if (hit?.node.kind === 'element') hit.node.style.base['padding'] = '999px';
+  };
+  const reorder = (doc: DesignDoc): void => {
+    const hit = findNode(doc, 'n2');
+    if (hit?.node.kind === 'element') hit.node.children.pop();
+  };
+
+  test.each([
+    ['session.doc', (session: DesignSession) => session.doc],
+    ['the doc apply returns', (session: DesignSession) => okDoc(session.apply([PAD_N3]))],
+  ])('%s cannot be changed by a caller', (_label, get) => {
+    const session = new DesignSession(sampleDoc());
+    const doc = get(session);
+    const before = canon(session.doc);
+    for (const change of [rename, restyle, reorder]) {
+      expect(() => change(doc)).toThrow(TypeError);
+    }
+    expect(canon(session.doc)).toBe(before);
+    expect(homeName(session.doc)).toBe('Home');
+  });
+
+  test('the doc after undo and after redo cannot be changed by a caller', () => {
+    const session = new DesignSession(sampleDoc());
+    okDoc(session.apply([PAD_N3]));
+    expect(session.undo()).toBe(true);
+    expect(() => rename(session.doc)).toThrow(TypeError);
+    expect(session.redo()).toBe(true);
+    expect(() => restyle(session.doc)).toThrow(TypeError);
+  });
+
+  test('a doc the caller keeps is not changed by later edits', () => {
+    const session = new DesignSession(sampleDoc());
+    const first = session.doc;
+    const firstCanon = canon(first);
+    okDoc(session.apply([PAD_N3, TEXT_N4]));
+    okDoc(session.apply([NAME_N2]));
+    expect(session.undo()).toBe(true);
+    expect(canon(first)).toBe(firstCanon);
+  });
+
+  test('a previewed doc belongs to the caller and cannot reach the session', () => {
+    const session = new DesignSession(sampleDoc());
+    const before = canon(session.doc);
+    for (const ops of [[PAD_N3], []]) {
+      const previewed = okDoc(session.preview(ops));
+      expect(previewed).not.toBe(session.doc);
+      rename(previewed);
+      restyle(previewed);
+      reorder(previewed);
+      expect(canon(session.doc)).toBe(before);
+    }
+  });
+
+  test('applyBatch returns a doc of its own, also for an empty batch', () => {
+    const doc = sampleDoc();
+    for (const ops of [[PAD_N3], []]) {
+      const result = applyBatch(doc, ops);
+      if (!result.ok) throw new Error(result.error);
+      expect(result.value.doc).not.toBe(doc);
+      rename(result.value.doc);
+      expect(homeName(doc)).toBe('Home');
+    }
+  });
+
+  test('the input doc is not frozen, and the session keeps its own copy', () => {
+    const doc = sampleDoc();
+    const session = new DesignSession(doc);
+    rename(doc);
+    expect(homeName(doc)).toBe('Mutated by the caller');
+    expect(homeName(session.doc)).toBe('Home');
+  });
+
+  test('applying one batch copies the doc once, not twice', () => {
+    const session = new DesignSession(sampleDoc());
+    const spy = vi.spyOn(globalThis, 'structuredClone');
+    try {
+      okDoc(session.apply([PAD_N3]));
+      const isDoc = (value: unknown): boolean =>
+        typeof value === 'object' && value !== null && 'pages' in value && 'components' in value;
+      const copiesOfTheDoc = spy.mock.calls.filter(([value]) => isDoc(value)).length;
+      expect(copiesOfTheDoc).toBe(1);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test('undo and redo copy the doc once each', () => {
+    const session = new DesignSession(sampleDoc());
+    okDoc(session.apply([PAD_N3]));
+    const spy = vi.spyOn(globalThis, 'structuredClone');
+    try {
+      expect(session.undo()).toBe(true);
+      expect(session.redo()).toBe(true);
+      const isDoc = (value: unknown): boolean =>
+        typeof value === 'object' && value !== null && 'pages' in value && 'components' in value;
+      expect(spy.mock.calls.filter(([value]) => isDoc(value)).length).toBe(2);
+    } finally {
+      spy.mockRestore();
+    }
   });
 });

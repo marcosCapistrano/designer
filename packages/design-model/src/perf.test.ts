@@ -1,5 +1,6 @@
 import { expect, test } from 'vitest';
 import { applyOp } from './apply.js';
+import { DesignSession } from './session.js';
 import type { DesignDoc, DesignNode, ElementNode, Op, Page } from './types.js';
 
 const PAGES = 50;
@@ -50,6 +51,23 @@ test('applying one setStyle to a 50-page doc has a median under 150 ms', () => {
   for (let i = 0; i < 5; i++) {
     const started = performance.now();
     const result = applyOp(doc, op);
+    durations.push(performance.now() - started);
+    expect(result.ok).toBe(true);
+  }
+
+  durations.sort((a, b) => a - b);
+  expect(durations[2]).toBeLessThan(150);
+}, 30_000);
+
+test('applying one setStyle through a session on a 50-page doc has a median under 150 ms', () => {
+  const { doc, target } = buildDoc();
+  const session = new DesignSession(doc);
+  const durations: number[] = [];
+  for (let i = 0; i < 5; i++) {
+    // A different value each time, so every apply changes the doc.
+    const op: Op = { op: 'setStyle', node: target, device: 'base', prop: 'padding', value: `${i + 1}px` };
+    const started = performance.now();
+    const result = session.apply([op]);
     durations.push(performance.now() - started);
     expect(result.ok).toBe(true);
   }
