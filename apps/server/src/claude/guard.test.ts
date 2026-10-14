@@ -222,6 +222,330 @@ const DENIED: Array<[string, string]> = [
   ['curl https://API.HETZNER.CLOUD/v1', HETZNER],
 ];
 
+// ---------------------------------------------------------------------------------------------
+// Fix round 3: one quote-aware lexer decides where words, separators and bodies are.
+// ---------------------------------------------------------------------------------------------
+
+/** A commit body full of punctuation that must never be read as commands. */
+const BODY_LINES = [
+  'fix: handle render() and foo()',
+  '',
+  '* bullet',
+  '**Note:** careful',
+  '- [x] done',
+  '[WIP] x',
+  '$ cmd',
+  '{"a":1}',
+  '[Bulleted markdown checklist...]',
+  'ssh host',
+  'docker & ssh docs',
+];
+const BODY = BODY_LINES.join('\n');
+const BODY_DQ = BODY.replace('{"a":1}', '{a:1}');
+
+/** False denies that round 2 left behind. Each must be allowed. */
+const ALLOWED_3: string[] = [
+  // Empty parentheses and other punctuation inside quotes are text.
+  'git commit -m "fix: handle foo() returning null"',
+  'grep -rn "foo()" src',
+  "sed -i 's/foo()/bar()/g' f.ts",
+  'node -e "fn()"',
+  'git grep "foo()"',
+  'pnpm test -- -t "calls render()"',
+  'psql -c "select now()"',
+  'sqlite3 db "select count(*) from t"',
+  // Separators and keywords inside quotes are text.
+  'git commit -m "fix: docker & ssh docs"',
+  'git commit -m "chore: bump (docker) base image"',
+  'git commit -m "feat(docker): x"',
+  'git commit -m "feat(ssh): x"',
+  'echo "a;b" && echo \'c|d\'',
+  'echo "a\\"; git push; echo \\"b"',
+  'echo \'"; git push; echo "\'',
+  "echo $'it\\'s; git push' ok",
+  'echo \\; git push',
+  // Heredoc and quoted bodies are data.
+  `git commit -F - <<'EOF'\n${BODY}\nEOF`,
+  `git commit -m "$(cat <<'EOF'\n${BODY}\nEOF\n)"`,
+  `cat <<EOF > notes.md\n${BODY}\nEOF`,
+  `cat <<-EOF\n${BODY_LINES.map((l) => `\t${l}`).join('\n')}\n\tEOF`,
+  `cat > notes.md <<"EOF"\n${BODY}\nEOF\ngit status`,
+  `git commit -m "${BODY_DQ}"`,
+  `git commit -m '${BODY}'`,
+  "cat <<'EOF'\n$(ssh host)\nEOF",
+  'echo hi # it\'s fine',
+  'pnpm test # ssh docs',
+  // Version and help flags run nothing.
+  'npm -v',
+  'npm --version',
+  'pnpm -v',
+  'pnpm --version',
+  'yarn --version',
+  'bun --version',
+  'pnpm --help',
+  'pnpm -h',
+  'npm',
+  'pnpm',
+  // pnpm -w is a boolean, npm -w takes a value: both readings must allow these.
+  'pnpm -w test',
+  'pnpm -w install',
+  'pnpm -w lint',
+  // Ordinary commands stay allowed.
+  'pnpm test',
+  'pnpm -F x build',
+  'git status',
+  'git commit -m "x"',
+  'git log --oneline',
+  'npm run build',
+  'ls >out',
+  'echo $HOME',
+  'cat a | grep b',
+  'node -e "1"',
+  'git diff -- src',
+  'rg foo src',
+  'sed -n 1,5p f',
+  'git checkout -b feat/x',
+  'git add -A',
+  'mkdir -p a/b',
+  'pnpm -F @hub/server exec vitest run',
+  'tsc --noEmit',
+  'git stash list',
+  "find . -name '*.ts'",
+  'git stash show stash@{0}',
+  'git checkout HEAD@{1} -- a.ts',
+  "curl -d '{\"a\":1.5}' http://localhost:8787/x",
+  "curl -s 'http://localhost:8787/health?x=1'",
+  'echo $((1 + 2))',
+  'echo $(( $i + 1 ))',
+  'x=$(( 1 << 2 )); echo $x',
+  'echo "$(date)"',
+  'corepack enable',
+  'corepack prepare pnpm@9 --activate',
+  'git bisect run pnpm test',
+  'git rebase main',
+  'git rebase -Xours main',
+  'git submodule update --init',
+  'git subtree split --prefix=x',
+  'git lfs pull',
+  'source .env',
+  '. ./env.sh',
+  'shopt -s nullglob',
+  'ls | xargs wc -l',
+  'ls | xargs',
+  'ls | xargs -I {} echo {}',
+  // case patterns are not commands.
+  'case "$1" in\n  a) echo a ;;\n  *) echo other ;;\nesac',
+  'case x in a|b) echo ab ;; (c) echo c ;; [d]*) echo d ;; esac',
+  'case x in a) echo a;; esac; echo done',
+];
+
+/** Parts used to build prefix cases. */
+const PREFIXES = [
+  'FOO="a;b" ',
+  "FOO='a;b' ",
+  'FOO="a(b" ',
+  'FOO="a|b" ',
+  'FOO=a\\;b ',
+  'A="1;2" B="3;4" ',
+  'FOO+=1 ',
+  'A=1 B+=2 ',
+  'FOO+=1 >x ',
+];
+const TARGETS: Array<[string, string]> = [
+  ['git push', GIT_PUSH],
+  ['ssh h', SSH],
+  ['docker ps', DOCKER],
+  ['pnpm exec git push', GIT_PUSH],
+  ['npm run deploy', DEPLOY_SCRIPT],
+  ['gh pr merge 3', GH],
+];
+const PREFIX_CASES: Array<[string, string]> = PREFIXES.flatMap((prefix) =>
+  TARGETS.map(([target, reason]): [string, string] => [`${prefix}${target}`, reason]),
+);
+
+const VERCEL = program('vercel');
+
+/** Bypasses that round 2 left behind, plus the new fail-closed rules. Each has an exact reason. */
+const DENIED_3: Array<[string, string]> = [
+  ...PREFIX_CASES,
+  ['env "FOO=a;b" git push', GIT_PUSH],
+  ['>"a;b" git push', GIT_PUSH],
+  ['sudo -u "a;b" git push', GIT_PUSH],
+
+  // pnpm -w is boolean, npm -w takes a value: deny when either reading denies.
+  ['pnpm -w exec git push', GIT_PUSH],
+  ['pnpm -w exec ssh h', SSH],
+
+  // Unknown --opt without = after run fails closed.
+  ['npm run --loglevel silent deploy', UNCLEAR],
+  ['npm run --registry http://x deploy', UNCLEAR],
+  ['npm run --script-shell /bin/sh deploy', UNCLEAR],
+  ['pnpm run --reporter silent deploy', UNCLEAR],
+
+  // corepack is a wrapper, and @version is not part of the program name.
+  ['corepack pnpm exec git push', GIT_PUSH],
+  ['corepack pnpm@9 exec git push', GIT_PUSH],
+  ['corepack npm run deploy', DEPLOY_SCRIPT],
+  ['corepack pnpm deploy:prod', DEPLOY_SCRIPT],
+  ['corepack yarn exec ssh h', SSH],
+  ['corepack npm publish', PUBLISH],
+  ['corepack pnpm publish', PUBLISH],
+  ['npx vercel@latest deploy', VERCEL],
+  ['pnpm dlx vercel@latest', VERCEL],
+
+  // xargs -I: words with the replace string are filled in at run time.
+  ['xargs -I X sh -c X', UNCLEAR],
+  ['xargs -I X env X push', UNCLEAR],
+  ['xargs -IX sh -c X', UNCLEAR],
+  ['xargs -i sh -c {}', UNCLEAR],
+  ['xargs --replace=X sh -c X', UNCLEAR],
+  ['echo publish | xargs pnpm', UNCLEAR],
+  ['echo "merge 3" | xargs gh pr', UNCLEAR],
+  ['echo main | xargs git checkout', UNCLEAR],
+  ['echo "ssh h" | xargs env', UNCLEAR],
+  ['echo "ssh h" | xargs nice', UNCLEAR],
+  ['echo "ssh h" | xargs timeout 5', UNCLEAR],
+
+  // Script selectors that can match deploy scripts.
+  ["pnpm run '/^dep/'", UNCLEAR],
+  ["pnpm -r run '/deploy/'", UNCLEAR],
+  ["pnpm run 'dep*'", UNCLEAR],
+  ["pnpm run '*'", UNCLEAR],
+
+  // Runner subcommands.
+  ['npm explore foo -- git push', GIT_PUSH],
+  ['npm explore foo', UNCLEAR],
+  ['pnpm recursive exec git push', GIT_PUSH],
+  ['pnpm m exec git push', GIT_PUSH],
+  ['pnpm multi run deploy', DEPLOY_SCRIPT],
+  ['yarn workspace web run deploy', DEPLOY_SCRIPT],
+  ['yarn workspaces foreach -A exec git push', GIT_PUSH],
+  ['yarn workspaces run deploy', DEPLOY_SCRIPT],
+
+  // Alias denial ignores case; git config files from the environment are not trusted.
+  ['git config ALIAS.p push', ALIAS],
+  ['git -c Alias.p=push p', ALIAS],
+  ['GIT_CONFIG_KEY_0=ALIAS.p GIT_CONFIG_VALUE_0=push git p', ALIAS],
+  ['GIT_CONFIG_GLOBAL=/tmp/c git p', UNCLEAR],
+  ['GIT_CONFIG_SYSTEM=/tmp/c git status', UNCLEAR],
+  ['env GIT_CONFIG_GLOBAL=/tmp/c git p', UNCLEAR],
+
+  // More wrappers and shells.
+  ['pkexec git push', GIT_PUSH],
+  ['pkexec --user root git push', GIT_PUSH],
+  ['run0 git push', GIT_PUSH],
+  ['run0 -u root git push', GIT_PUSH],
+  ['systemd-run git push', GIT_PUSH],
+  ['systemd-run -u job git push', GIT_PUSH],
+  ['ssh-agent git push', GIT_PUSH],
+  ['ssh-agent -t 60 git push', GIT_PUSH],
+  ['sshpass -p x git push', GIT_PUSH],
+  ['sshpass -p x ssh h', SSH],
+  ['fakeroot git push', GIT_PUSH],
+  ['numactl -N 0 git push', GIT_PUSH],
+  ['numactl --cpunodebind=0 git push', GIT_PUSH],
+  ["tmux new-session -d 'git push'", UNCLEAR],
+  ['at now', UNCLEAR],
+  ['rbash -c "git push"', GIT_PUSH],
+  ['mksh -c "ssh h"', SSH],
+  ['sudo -s', UNCLEAR],
+  ['sudo -i', UNCLEAR],
+
+  // Builtins that run code later or read it from somewhere else.
+  ["trap 'git push' EXIT", UNCLEAR],
+  ['source <(echo x)', UNCLEAR],
+  ['. $(echo f)', UNCLEAR],
+  ['source "$F"', UNCLEAR],
+  ['source /dev/stdin <<< x', UNCLEAR],
+  ["alias gp='git push'", UNCLEAR],
+  ['shopt -s expand_aliases', UNCLEAR],
+
+  // More git subcommands that push or run commands.
+  ["git submodule foreach 'echo hi'", GIT_PUSH],
+  ['git rebase -x make main', GIT_PUSH],
+  ['git rebase --exec make main', GIT_PUSH],
+  ['git rebase --exec=make main', GIT_PUSH],
+  ["git rebase -i -x 'pnpm test' main", GIT_PUSH],
+  ['git subtree push --prefix=x origin main', GIT_PUSH],
+  ['git lfs push origin main', GIT_PUSH],
+  ['git for-each-repo --config=x.y push', GIT_PUSH],
+  ['git bisect run git push', GIT_PUSH],
+  ['git bisect run', UNCLEAR],
+
+  // Brace expansion in a git word stays denied.
+  ['git checkout -b feat/x-{a,b}', UNCLEAR],
+
+  // A line that is not a command in bash must not hide the commands after it.
+  ["echo hi # it's\ngit push", GIT_PUSH],
+  ['echo $((1 << 2))\ngit push', GIT_PUSH],
+  ['(( x = 1 << 2 ))\ngit push', GIT_PUSH],
+  ['for ((i=0; i<(1<<2); i++)); do :; done\ngit push', GIT_PUSH],
+  ['echo $[1 << 2]\ngit push', GIT_PUSH],
+  ["echo $'\\'' ; git push", GIT_PUSH],
+  // bash 5 reads the ' as a quote here and older bash does not, so the guard will not guess.
+  ['echo "${x:-\'}" ; git push ; echo "\'"', UNCLEAR],
+  ['echo "${x:-\'a\'}"', UNCLEAR],
+  ['echo "${x:-"a;b"}" ; git push', GIT_PUSH],
+  ['echo "$(case x in a) echo hi;; esac; git push)"', GIT_PUSH],
+  ["echo 'a'; git push; echo 'b'", GIT_PUSH],
+  ['echo \'"\'; git push; echo \'"\'', GIT_PUSH],
+  ['echo "\'"; git push; echo "\'"', GIT_PUSH],
+
+  // case: patterns are skipped, clause bodies are commands.
+  ['case x in a) git push ;; esac', GIT_PUSH],
+  ['case x in a) echo ;; *) git push ;; esac', GIT_PUSH],
+  ['case x in a) echo; esac; git push', GIT_PUSH],
+  ['case x in $(ssh h)) echo ;; esac', SSH],
+  ['case x in a) case y in b) git push ;; esac ;; esac', GIT_PUSH],
+  ['echo "$(case x in a) echo hi;; esac)"; git push', GIT_PUSH],
+
+  // ((...)) that is not arithmetic is read by bash in its own way, so the guard will not guess.
+  ['((cat <<EOF\ngit push\nEOF\n)\n)', UNCLEAR],
+  ['((echo a) && (echo b))', UNCLEAR],
+  ['echo $((echo a) )', UNCLEAR],
+
+  // Substitutions are commands wherever they are.
+  ['echo "$(echo "$(ssh h)")"', SSH],
+  ['echo `echo \\`ssh h\\``', SSH],
+  ['diff <(ls) <(ssh h)', SSH],
+  ['echo ${x:-$(ssh h)}', SSH],
+  ['echo $(( $(ssh h) + 1 ))', SSH],
+  ['cat > >(ssh h)', SSH],
+  ['echo "${x:-`ssh h`}"', SSH],
+
+  // Heredocs: bodies are data, but substitutions in unquoted bodies run.
+  ['cat <<EOF\n$(ssh host)\nEOF', SSH],
+  ['cat <<EOF\n`ssh host`\nEOF', SSH],
+  ['cat <<EOF\nbody\nEOF\ngit push', GIT_PUSH],
+  ['cat <<EOF && git push\nbody\nEOF', GIT_PUSH],
+  ['cat <<-EOF\n\tbody\n\tEOF\ngit push', GIT_PUSH],
+  ['echo "$(cat <<\'EOF\'\nx\nEOF\n)"; git push', GIT_PUSH],
+  ["cat <<'EOF' | sh\ngit push\nEOF", UNCLEAR],
+  ['bash <<EOF\ngit push\nEOF', UNCLEAR],
+  ["sh <<'EOF'\nssh h\nEOF", UNCLEAR],
+  ['bash script.sh <<EOF\nx\nEOF', UNCLEAR],
+  ['xargs echo <<EOF\nx\nEOF', UNCLEAR],
+  ['at now <<EOF\ngit push\nEOF', UNCLEAR],
+  ['sudo bash <<EOF\nx\nEOF', UNCLEAR],
+  ['bash <<< "git push"', UNCLEAR],
+  ['. /dev/stdin <<EOF\ngit push\nEOF', UNCLEAR],
+
+  // The operand of sh -c is read again by the inner shell, so quotes and escapes in it still hide nothing.
+  ['bash -c "s\\sh"', SSH],
+  ['sh -c "\'ssh\'"', SSH],
+  ["bash -c 'ss\"\"h'", SSH],
+  ['bash -c ssh', SSH],
+  ['bash -c "git"', UNCLEAR],
+
+  // for ((...)) may be followed by do with no separator.
+  ['for ((i=0; i<2; i++)) do git push; done', GIT_PUSH],
+  ['for ((i=0; i<2; i++)) do ssh h; done', SSH],
+
+  // eval re-parses its expanded arguments.
+  ['eval "echo $X"', UNCLEAR],
+  ['eval echo *', UNCLEAR],
+];
+
 describe('deployDenyReason', () => {
   it.each(ALLOWED)('allows %s', (command) => {
     expect(deployDenyReason(command)).toBeNull();
@@ -229,6 +553,40 @@ describe('deployDenyReason', () => {
 
   it.each(DENIED)('denies %s', (command, reason) => {
     expect(deployDenyReason(command)).toBe(reason);
+  });
+
+  it.each(ALLOWED_3)('round 3 allows %j', (command) => {
+    expect(deployDenyReason(command)).toBeNull();
+  });
+
+  it.each(DENIED_3)('round 3 denies %j', (command, reason) => {
+    expect(deployDenyReason(command)).toBe(reason);
+  });
+
+  it('fails closed on pathological nesting instead of throwing', () => {
+    expect(deployDenyReason('$('.repeat(2500))).toBe(UNCLEAR);
+    expect(deployDenyReason('$(('.repeat(2500))).toBe(UNCLEAR);
+    expect(deployDenyReason('`'.repeat(2501))).toBe(UNCLEAR);
+    expect(deployDenyReason(`echo ${'$(echo '.repeat(40)}x${')'.repeat(40)}`)).toBe(UNCLEAR);
+    expect(deployDenyReason(`${'eval '.repeat(40)}ls`)).toBe(UNCLEAR);
+    expect(deployDenyReason(`echo ${'$(echo '.repeat(5)}x${')'.repeat(5)}`)).toBeNull();
+    expect(deployDenyReason(`${'eval '.repeat(3)}ls`)).toBeNull();
+    expect(deployDenyReason(`${'('.repeat(5000)}ls${')'.repeat(5000)}`)).toBeNull();
+    expect(deployDenyReason(`${'(('.repeat(5000)}ls`)).toBe(UNCLEAR);
+  });
+
+  it('fails closed on input it cannot finish reading', () => {
+    expect(deployDenyReason('echo "unterminated')).toBe(UNCLEAR);
+    expect(deployDenyReason("echo 'unterminated")).toBe(UNCLEAR);
+    expect(deployDenyReason('echo `unterminated')).toBe(UNCLEAR);
+    expect(deployDenyReason('echo $(unterminated')).toBe(UNCLEAR);
+    expect(deployDenyReason('echo ${unterminated')).toBe(UNCLEAR);
+  });
+
+  it('reads long commands in linear time', () => {
+    expect(deployDenyReason('echo a '.repeat(50_000))).toBeNull();
+    expect(deployDenyReason(`echo "${'x'.repeat(500_000)}"`)).toBeNull();
+    expect(deployDenyReason(`${'echo a;'.repeat(20_000)} git push`)).toBe(GIT_PUSH);
   });
 
   it('push reason is exact', () => {
