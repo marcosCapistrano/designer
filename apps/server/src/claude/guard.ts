@@ -62,36 +62,103 @@ const DEPLOY_PROGRAMS: ReadonlySet<string> = new Set([
 
 /**
  * Programs and builtins that run other code in a way this guard does not model (a later time,
- * another terminal, a root shell, a job queue, a handler). Build does not run them.
+ * another terminal, a root shell, a job queue, a handler, a debugger, a sandbox, a personality or
+ * resource wrapper with an option grammar not worth modelling). Build does not run them (Ruling 14).
  */
 const FAIL_CLOSED_PROGRAMS: ReadonlySet<string> = new Set([
   'alias',
   'at',
   'batch',
   'bwrap',
+  'capsh',
   'chroot',
+  'chrt',
   'coproc',
   'crontab',
+  'dbus-run-session',
   'dtach',
+  'eatmydata',
   'expect',
+  'faketime',
   'firejail',
   'flock',
   'function',
+  'gdb',
+  'i386',
+  'linux32',
+  'linux64',
+  'ltrace',
   'newgrp',
   'nsenter',
   'parallel',
+  'prlimit',
+  'proxychains',
+  'proxychains4',
   'runuser',
   'screen',
   'script',
+  'setarch',
   'setpriv',
   'sg',
+  'start-stop-daemon',
   'strace',
   'su',
+  'systemd-inhibit',
   'tmux',
+  'torify',
+  'torsocks',
   'trap',
   'unshare',
+  'valgrind',
   'watch',
+  'x86_64',
+  'xvfb-run',
 ]);
+
+/**
+ * Builtins and commands that bash evaluates in a way that can run embedded code: array subscripts
+ * are evaluated as arithmetic (which expands `$(...)`), completion/readarray callbacks run commands,
+ * and `let` evaluates its operand. A literal `$(` or backtick in any of their words fails closed.
+ */
+const DATA_CODE_BUILTINS: ReadonlySet<string> = new Set([
+  'declare',
+  'typeset',
+  'local',
+  'export',
+  'readonly',
+  'unset',
+  'read',
+  'printf',
+  'mapfile',
+  'readarray',
+  'compgen',
+  'complete',
+  'test',
+  '[',
+  '[[',
+  'let',
+]);
+
+/** Builtins whose `-C`/`-F` option names a command bash runs. */
+const CALLBACK_BUILTINS: ReadonlySet<string> = new Set(['compgen', 'complete', 'mapfile', 'readarray']);
+
+/** A command word that is an array-element assignment (`a[idx]=v`): bash evaluates the index. */
+const ARRAY_ASSIGN = /^[A-Za-z_][A-Za-z0-9_]*\[/;
+
+/** A literal command substitution (`$(` but not arithmetic `$((`) or a backtick, quoted or not. */
+function hasCommandSubstitutionText(text: string): boolean {
+  return /\$\((?!\()/.test(text) || text.includes('`');
+}
+
+/** A quoted `$(` or backtick that the lexer did not expand (so the inner command was never seen). */
+function hidesCommandSubstitution(word: LexWord): boolean {
+  return !word.expanded && hasCommandSubstitutionText(word.text);
+}
+
+/** `let x` re-evaluates x as arithmetic; a lone name or a `[` subscript is the dangerous operand. */
+function isBareArithOperand(text: string): boolean {
+  return /^[A-Za-z_][A-Za-z0-9_]*$/.test(text) || text.includes('[');
+}
 
 /** Shell keywords that can precede a command. */
 const SHELL_KEYWORDS: ReadonlySet<string> = new Set([
@@ -130,7 +197,29 @@ const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*\+?=/;
 const FIND_EXEC: ReadonlySet<string> = new Set(['-exec', '-execdir', '-ok', '-okdir']);
 
 /** `source /dev/stdin` and friends read commands from somewhere this guard cannot see. */
-const STDIN_SCRIPT = /^\/(?:dev\/(?:stdin|fd\/)|proc\/self\/fd\/)/;
+const STDIN_PATHS: ReadonlySet<string> = new Set(['/dev/stdin', '/dev/fd/0', '/proc/self/fd/0']);
+
+/** Collapses `//`, `/./` and `/../` so `/dev//stdin` and `/dev/../dev/stdin` are recognised. */
+function normalizeUnixPath(p: string): string {
+  const absolute = p.startsWith('/');
+  const out: string[] = [];
+  for (const part of p.split('/')) {
+    if (part === '' || part === '.') continue;
+    if (part === '..') {
+      if (out.length > 0 && out[out.length - 1] !== '..') out.pop();
+      else if (!absolute) out.push('..');
+    } else {
+      out.push(part);
+    }
+  }
+  return (absolute ? '/' : '') + out.join('/');
+}
+
+/** A path that reads this process's stdin (so a shell or `source` would run commands from it). */
+function isStdinPath(text: string): boolean {
+  const p = normalizeUnixPath(text);
+  return STDIN_PATHS.has(p) || p.startsWith('/dev/fd/') || p.startsWith('/proc/self/fd/');
+}
 
 const GIT_PUSH_SUBCOMMANDS: ReadonlySet<string> = new Set(['push', 'send-pack', 'http-push']);
 /** git subcommands that push when their own subcommand is `push`. */
@@ -565,10 +654,19 @@ function findProgram(input: readonly LexWord[], ctx: Ctx): Found {
     const word = words[i];
     if (word === undefined) break;
     const { text, dynamic } = word;
-    if (ASSIGNMENT.test(text) || SHELL_KEYWORDS.has(text)) {
+    if (ASSIGNMENT.test(text)) {
+      // A single-quoted `$(` in an assignment value is a command bash runs when the value is used.
+      if (hidesCommandSubstitution(word)) return { kind: 'reason', reason: UNCLEAR_REASON };
       i++;
       continue;
     }
+    if (SHELL_KEYWORDS.has(text)) {
+      i++;
+      continue;
+    }
+    // `a[idx]=v` (possibly split by a space inside the index) is an array assignment; bash evaluates
+    // the index as arithmetic, so a `$(...)` in it would run. Fail closed.
+    if (ARRAY_ASSIGN.test(text)) return { kind: 'reason', reason: UNCLEAR_REASON };
     if (dynamic) break;
     if (text.startsWith('-')) {
       i++;
@@ -593,9 +691,15 @@ function findProgram(input: readonly LexWord[], ctx: Ctx): Found {
         return { kind: 'script', word: script };
       }
       if (operandMissing || skipped.letters.includes('s')) return { kind: 'reason', reason: UNCLEAR_REASON };
+      // `bash /dev/stdin`, `sh /dev/fd/0`: the shell reads its script from this process's stdin.
+      const scriptOperand = words[skipped.next];
+      if (scriptOperand !== undefined && !scriptOperand.dynamic && isStdinPath(scriptOperand.text)) {
+        return { kind: 'reason', reason: UNCLEAR_REASON };
+      }
       return { kind: 'program', index: skipped.next, words, open, lastWrapperUnfinished: false };
     }
-    if (open && name !== 'xargs') wrapperUnderXargs = true;
+    // Any wrapper reached while already under xargs may have its program supplied from stdin.
+    if (open) wrapperUnderXargs = true;
     if (name === 'xargs') {
       if (ctx.heredoc) return { kind: 'reason', reason: UNCLEAR_REASON };
       open = true;
@@ -614,6 +718,14 @@ function findProgram(input: readonly LexWord[], ctx: Ctx): Found {
     ) {
       // sudo -s and sudo -i with no command start a shell that reads stdin.
       return { kind: 'reason', reason: UNCLEAR_REASON };
+    }
+    if (name === 'env') {
+      // env treats every leading word that contains '=' as an assignment, valid NAME or not
+      // (env a-b=1, env 'a b=1', env =x). The first word with no '=' is the program.
+      let j = skipped.next;
+      while (j < words.length && (words[j]?.text ?? '').includes('=')) j++;
+      i = j;
+      continue;
     }
     i = skipped.next + (spec.positionals ?? 0);
   }
@@ -641,11 +753,30 @@ function deeper(ctx: Ctx): Ctx {
 
 function gitReason(args: readonly LexWord[], ctx: Ctx): string | null {
   if (args.some((w) => w.text.toLowerCase().includes('alias.'))) return ALIAS_REASON;
+  // A config key built at run time (`-c "$K=push"`, `--config-env=$X`) could define an alias.
+  for (let i = 0; i < args.length; i++) {
+    const w = args[i];
+    if (w === undefined) continue;
+    if ((w.text === '-c' || w.text === '--config-env') && args[i + 1]?.dynamic === true) return UNCLEAR_REASON;
+    if (w.text.startsWith('--config-env=') && w.dynamic) return UNCLEAR_REASON;
+  }
   const operands = operandsAfterOptions(args, GIT_VALUE_FLAGS);
   const sub = operands[0];
-  if (sub === undefined || sub.dynamic) return UNCLEAR_REASON;
+  if (sub === undefined) {
+    // Top-level `git`, `git --version`, `git --help` run nothing deployable and are allowed. Under
+    // xargs the subcommand still arrives from stdin, and a `-c`/eval operand of a bare `git` or a
+    // `-C web` that ate the would-be subcommand is incomplete, so those fail closed.
+    if (ctx.open || ctx.depth > 0) return UNCLEAR_REASON;
+    return args.some((w) => GIT_VALUE_FLAGS.has(w.text)) ? UNCLEAR_REASON : null;
+  }
+  if (sub.dynamic) return UNCLEAR_REASON;
   const later = operands.slice(1);
   if (GIT_PUSH_SUBCOMMANDS.has(sub.text)) return GIT_PUSH_REASON;
+  if (sub.text === 'config') {
+    // A dynamic config key could be an alias the Hub has not seen.
+    const key = later.find((w) => !w.text.startsWith('-'));
+    return key?.dynamic === true ? UNCLEAR_REASON : null;
+  }
   if (sub.text === 'checkout' || sub.text === 'switch') {
     // Under xargs the branch name may still arrive.
     if (ctx.open || later.some((w) => w.dynamic)) return UNCLEAR_REASON;
@@ -682,7 +813,9 @@ function ghReason(args: readonly LexWord[], ctx: Ctx): string | null {
     operands.push(word);
   }
   const [first, second] = operands;
-  if (first === undefined || first.dynamic || second?.dynamic === true) return UNCLEAR_REASON;
+  // `gh`, `gh --version`, `gh --help`: no action runs. Under xargs the action may still arrive.
+  if (first === undefined) return ctx.open ? UNCLEAR_REASON : null;
+  if (first.dynamic || second?.dynamic === true) return UNCLEAR_REASON;
   const sub = first.text;
   const action = second?.text ?? '';
   if (sub === 'alias') return ALIAS_REASON;
@@ -827,6 +960,17 @@ function commandReason(words: readonly LexWord[], ctx: Ctx): string | null {
   const args = found.words.slice(found.index + 1);
   const here: Ctx = { ...ctx, open: found.open };
   if (FAIL_CLOSED_PROGRAMS.has(name)) return UNCLEAR_REASON;
+  // A dashed plumbing name (`git-push`, from /usr/lib/git-core) is read as `git push`.
+  const dashedGit = /^git-(.+)$/.exec(name);
+  if (dashedGit !== null) {
+    const sub: LexWord = { text: dashedGit[1] ?? '', dynamic: false, expanded: false, bracketed: false };
+    return gitReason([sub, ...args], here) ?? UNCLEAR_REASON;
+  }
+  if (DATA_CODE_BUILTINS.has(name)) {
+    if (args.some((w) => hasCommandSubstitutionText(w.text))) return UNCLEAR_REASON;
+    if (CALLBACK_BUILTINS.has(name) && args.some((w) => /^-[CF]/.test(w.text))) return UNCLEAR_REASON;
+    if (name === 'let' && args.some((w) => isBareArithOperand(w.text))) return UNCLEAR_REASON;
+  }
   if (name === 'eval') {
     // eval expands its arguments and then reads the result as commands, so an expansion can add any command.
     if (args.some((w) => w.dynamic)) return UNCLEAR_REASON;
@@ -837,16 +981,20 @@ function commandReason(words: readonly LexWord[], ctx: Ctx): string | null {
     return check(args.map((w) => w.text).join(' '), ctx.depth + 1);
   }
   if (name === 'source' || name === '.') {
-    if (here.heredoc || args.some((w) => w.dynamic || STDIN_SCRIPT.test(w.text))) return UNCLEAR_REASON;
+    if (here.heredoc || args.some((w) => w.dynamic || isStdinPath(w.text))) return UNCLEAR_REASON;
     return null;
   }
-  if (name === 'shopt' && args.some((w) => w.text === 'expand_aliases')) return UNCLEAR_REASON;
-  if (name === 'find' && args.some((w) => FIND_EXEC.has(w.text))) return UNCLEAR_REASON;
+  if (name === 'shopt' && args.some((w) => w.text === 'expand_aliases' || w.text === 'extglob')) {
+    return UNCLEAR_REASON;
+  }
+  // find under xargs takes its action predicate from stdin, so -exec ssh may still arrive.
+  if (name === 'find' && (here.open || args.some((w) => FIND_EXEC.has(w.text)))) return UNCLEAR_REASON;
   if (name === 'git') return gitReason(args, here);
   if (DEPLOY_PROGRAMS.has(name)) return `Deploying is a Hub action; ${name} is not allowed in Build.`;
   if (name === 'gh') return ghReason(args, here);
   if (NPM_FAMILY.has(name)) return npmReason(args, here);
-  if (CURL_FAMILY.has(name)) return curlReason(args);
+  // Under xargs the URL comes from stdin, so curl could reach any host (including Hetzner).
+  if (CURL_FAMILY.has(name)) return here.open ? UNCLEAR_REASON : curlReason(args);
   return null;
 }
 
@@ -859,6 +1007,15 @@ function check(command: string, depth: number): string | null {
   }
   // These point git at config files the Hub has not seen, and those can define aliases.
   if (words.some((w) => /^GIT_CONFIG_(?:GLOBAL|SYSTEM)=/.test(w.text))) return UNCLEAR_REASON;
+  // A git config key, params or count built at run time via the environment could define an alias.
+  if (words.some((w) => w.dynamic && /^GIT_CONFIG_(?:KEY_\d+|PARAMETERS|COUNT)=/.test(w.text))) {
+    return UNCLEAR_REASON;
+  }
+  // PS4 (xtrace prompt), BASH_ENV/ENV (sourced by a shell) and the ${x@P} transform run embedded
+  // `$(...)`; an indirect `${!name}` re-reads a variable whose value could hold a subscript.
+  if (words.some((w) => /^(?:PS4|BASH_ENV|ENV)\+?=/.test(w.text))) return UNCLEAR_REASON;
+  if (words.some((w) => /\$\{[^{}]*@P\}/.test(w.text))) return UNCLEAR_REASON;
+  if (words.some((w) => /\$\{![A-Za-z_][A-Za-z0-9_]*\}/.test(w.text))) return UNCLEAR_REASON;
   for (const { words: commandWords, heredoc } of commands) {
     const reason = commandReason(commandWords, { depth, heredoc, open: false });
     if (reason !== null) return reason;

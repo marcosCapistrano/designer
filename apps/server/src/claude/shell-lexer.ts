@@ -52,9 +52,12 @@ interface Shared {
   budget: number;
 }
 
-/** Words that may stand before a command inside a compound command: `if ((x))`, `for ((;;))`. */
+/**
+ * Words that may stand before a command inside a compound command: `if ((x))`, `while ...`.
+ * `for` and `select` are NOT here: their loop variable (`for case in ...`) must not be read as a
+ * keyword. `for ((` arithmetic is recognised from the preceding `for` word instead.
+ */
 const COMMAND_PREFIX: ReadonlySet<string> = new Set([
-  'for',
   'if',
   'then',
   'else',
@@ -66,6 +69,9 @@ const COMMAND_PREFIX: ReadonlySet<string> = new Set([
   '{',
   'time',
 ]);
+
+/** Characters that turn `(` into an extglob operator (`?(`, `*(`, `+(`, `@(`, `!(`). */
+const EXTGLOB_PREFIX = '?*+@!';
 
 function isBlank(ch: string): boolean {
   return ch === ' ' || ch === '\t' || /\s/.test(ch);
@@ -79,6 +85,8 @@ class WordBuilder {
   bracketed = false;
   /** Some part was quoted or escaped (decides whether a heredoc delimiter expands its body). */
   quoted = false;
+  /** The last unquoted character was one of `?*+@!`: a `(` right after it is an extglob operator. */
+  lastExtglobPrefix = false;
   private onlyDigits = true;
   /** One entry per open unquoted `{`: whether a `,` or `..` has been seen inside it. */
   private readonly braces: boolean[] = [];
@@ -88,6 +96,7 @@ class WordBuilder {
   /** An unquoted, unescaped character. */
   plain(ch: string): void {
     this.text += ch;
+    this.lastExtglobPrefix = EXTGLOB_PREFIX.includes(ch);
     if (ch < '0' || ch > '9') this.onlyDigits = false;
     switch (ch) {
       case '*':
@@ -123,6 +132,7 @@ class WordBuilder {
     this.text += s;
     this.onlyDigits = false;
     this.prevDot = false;
+    this.lastExtglobPrefix = false;
   }
 
   /** `$...`, a backtick or a substitution. `raw` is the source text. */
@@ -132,6 +142,7 @@ class WordBuilder {
     this.expanded = true;
     this.onlyDigits = false;
     this.prevDot = false;
+    this.lastExtglobPrefix = false;
   }
 
   quote(): void {
@@ -142,6 +153,11 @@ class WordBuilder {
   /** Only unquoted digits so far: in front of `<` or `>` it is a file descriptor. */
   isFd(): boolean {
     return this.onlyDigits && this.text !== '';
+  }
+
+  /** `{name}` in front of `<` or `>` is a variable-fd redirection target, not the program word. */
+  isVarFd(): boolean {
+    return !this.dynamic && !this.quoted && /^\{[A-Za-z_][A-Za-z0-9_]*\}$/.test(this.text);
   }
 
   finish(): LexWord {
@@ -163,6 +179,12 @@ class ListState {
   private prefixOnly = true;
   /** One entry per open `case`: reading `case WORD`, reading its patterns, or reading a clause body. */
   private readonly cases: Array<'head' | 'pattern' | 'body'> = [];
+  /** A pattern word has been read in the current case clause (a second bare one is malformed). */
+  private patternWord = false;
+  /** Open `[[ ]]` conditionals: inside one, `#` is not a comment. */
+  private conditional = 0;
+  /** The last word pushed to the current command (`for ((` recognises the `for`). */
+  private lastPushed: string | null = null;
   private builder: WordBuilder | null = null;
 
   constructor(
@@ -184,9 +206,41 @@ class ListState {
     return this.prefixOnly;
   }
 
+  /** `((` is arithmetic at a command start, and after `for` (`for ((;;))`). */
+  canStartArith(): boolean {
+    return this.prefixOnly || this.lastPushed === 'for';
+  }
+
+  /** A redirection seen before any program word means the next word is the program, not a keyword. */
+  markNotPrefix(): void {
+    this.prefixOnly = false;
+  }
+
+  /** Inside `[[ ]]` an unquoted `#` is literal, not the start of a comment. */
+  inConditional(): boolean {
+    return this.conditional > 0;
+  }
+
+  /** The current word ends with an extglob prefix char and the next char is `(`. */
+  pendingExtglob(): boolean {
+    return this.builder !== null && this.builder.lastExtglobPrefix;
+  }
+
+  /** A `|` between case alternatives: the next pattern word is allowed again. */
+  patternAlt(): void {
+    this.patternWord = false;
+  }
+
   /** Drops a bare number that sits right in front of a redirection (the 2 in 2>&1). */
   takeFd(): boolean {
     if (this.builder === null || !this.builder.isFd()) return false;
+    this.builder = null;
+    return true;
+  }
+
+  /** Drops a `{name}` variable-fd target that sits right in front of a redirection operator. */
+  takeVarFd(): boolean {
+    if (this.builder === null || !this.builder.isVarFd()) return false;
     this.builder = null;
     return true;
   }
@@ -209,13 +263,21 @@ class ListState {
     const top = this.cases[this.cases.length - 1];
     if (top === 'pattern') {
       // A case pattern is not a command word. Only `esac` is: it closes the case.
-      if (word.text === 'esac' && !done.quoted) this.cases.pop();
+      if (word.text === 'esac' && !done.quoted) {
+        this.cases.pop();
+        this.patternWord = false;
+        return;
+      }
+      // Two bare pattern words with no `|` between them is not a list bash would accept.
+      if (this.patternWord) throw new LexUnclear('malformed case pattern list');
+      this.patternWord = true;
       return;
     }
     if (!done.quoted) {
       if (top === 'head' && word.text === 'in' && (this.words.length === 0 || this.words.length >= 2)) {
         // `case WORD in` is not a command; the patterns follow.
         this.cases[this.cases.length - 1] = 'pattern';
+        this.patternWord = false;
         this.words = [];
         this.prefixOnly = true;
         return;
@@ -227,8 +289,11 @@ class ListState {
           return;
         }
       }
+      if (word.text === '[[') this.conditional++;
+      else if (word.text === ']]' && this.conditional > 0) this.conditional--;
     }
     this.words.push(word);
+    this.lastPushed = word.text;
     if (!COMMAND_PREFIX.has(word.text)) this.prefixOnly = false;
   }
 
@@ -239,12 +304,18 @@ class ListState {
 
   /** The `)` that ends a case pattern list. */
   patternEnd(): void {
-    if (this.inPattern()) this.cases[this.cases.length - 1] = 'body';
+    if (this.inPattern()) {
+      this.cases[this.cases.length - 1] = 'body';
+      this.patternWord = false;
+    }
   }
 
   /** `;;`, `;&` or `;;&` ends a clause: the next words are patterns again, or `esac`. */
   clauseEnd(): void {
-    if (this.cases[this.cases.length - 1] === 'body') this.cases[this.cases.length - 1] = 'pattern';
+    if (this.cases[this.cases.length - 1] === 'body') {
+      this.cases[this.cases.length - 1] = 'pattern';
+      this.patternWord = false;
+    }
   }
 
   endCommand(): void {
@@ -254,13 +325,14 @@ class ListState {
     this.heredoc = false;
     this.redirect = null;
     this.prefixOnly = true;
+    this.lastPushed = null;
   }
 }
 
 class Lexer {
   private pos = 0;
-  /** Heredocs whose bodies start after the next newline. */
-  private readonly pending: PendingHeredoc[] = [];
+  /** Heredocs whose bodies start after the next newline. A substitution gets its own list. */
+  private pending: PendingHeredoc[] = [];
 
   constructor(
     private readonly src: string,
@@ -366,10 +438,15 @@ class Lexer {
         st.endWord();
         this.pos++;
       } else if (ch === '#' && !st.inWord()) {
-        // A comment runs to the end of the line; what is in it is not code.
+        // A comment runs to the end of the line; what is in it is not code. Inside [[ ]] it is literal.
+        if (st.inConditional()) throw new LexUnclear('# inside [[ ]]');
         const end = src.indexOf('\n', this.pos);
         this.pos = end === -1 ? src.length : end;
       } else if (ch === ';') {
+        // End the pending word first: a trailing `esac` closes the case before this separator.
+        st.endWord();
+        // A lone `;` ends a command; while reading case patterns it is a malformed list.
+        if (next !== ';' && next !== '&' && st.inPattern()) throw new LexUnclear('separator in case pattern');
         st.endCommand();
         if (next === ';') {
           this.pos += src.charAt(this.pos + 2) === '&' ? 3 : 2;
@@ -381,29 +458,38 @@ class Lexer {
           this.pos++;
         }
       } else if (ch === '|') {
-        // Between case patterns (a|b)) a | separates alternatives; elsewhere it ends a command.
-        if (st.inPattern()) st.endWord();
-        else st.endCommand();
+        st.endWord();
+        // Between case patterns (a|b)) a single | separates alternatives; || there is malformed.
+        if (st.inPattern()) {
+          if (next === '|') throw new LexUnclear('separator in case pattern');
+          st.patternAlt();
+        } else {
+          st.endCommand();
+        }
         this.pos++;
       } else if (ch === '&') {
         if (next === '>') {
           // &> and &>> send both streams to a file.
           st.endWord();
+          st.markNotPrefix();
           this.pos += src.charAt(this.pos + 2) === '>' ? 3 : 2;
           st.redirect = 'file';
         } else {
+          st.endWord();
+          if (st.inPattern()) throw new LexUnclear('separator in case pattern');
           st.endCommand();
           this.pos++;
         }
       } else if (ch === '<' || ch === '>') {
         this.redirectOperator(st, ch, next);
       } else if (ch === '(') {
+        if (st.pendingExtglob()) throw new LexUnclear('extglob pattern');
         st.endWord();
         if (st.inPattern()) {
           this.pos++; // the optional ( in front of a case pattern
           continue;
         }
-        if (next === '(' && st.redirect === null && st.atCommandStart()) {
+        if (next === '(' && st.redirect === null && st.canStartArith()) {
           // ((...)) is arithmetic, where << is a shift and not a heredoc. If it does not close with ))
           // bash reads nested subshells instead, and handles a heredoc inside them in its own way.
           this.pos += 2;
@@ -441,12 +527,15 @@ class Lexer {
 
   /** At `<` or `>` (not `<(` or `>(`): reads the operator and marks the next word as its target. */
   private redirectOperator(st: ListState, ch: string, next: string): void {
-    if (!st.takeFd()) st.endWord();
+    st.markNotPrefix();
+    // A bare fd number (2>&1) or a {name} variable-fd target belongs to the redirection, not the command.
+    if (!st.takeFd() && !st.takeVarFd()) st.endWord();
     const third = this.src.charAt(this.pos + 2);
     let kind: Redirect = 'file';
     if (ch === '<') {
       if (next === '<' && third === '<') {
-        this.pos += 3; // here-string
+        this.pos += 3; // here-string: like a heredoc, it feeds this command's stdin
+        st.heredoc = true;
       } else if (next === '<') {
         const dash = third === '-';
         this.pos += dash ? 3 : 2;
@@ -500,7 +589,12 @@ class Lexer {
   /** After `<(`, `>(` or `$(`: reads the commands inside, up to the closing `)`. */
   private scanSubstitution(): void {
     this.enter();
+    // A substitution starts with no pending heredocs of its own, so an outer heredoc body only
+    // begins after the outer newline, not after a newline inside the substitution.
+    const saved = this.pending;
+    this.pending = [];
     this.parseList(true);
+    this.pending = saved;
     this.leave();
   }
 
@@ -660,6 +754,7 @@ class Lexer {
   private scanArith(kind: 'paren' | 'bracket'): boolean {
     this.enter();
     const src = this.src;
+    const innerStart = this.pos;
     // For (( the opening pair is already consumed, so depth 2 means "inside the expression".
     let depth = kind === 'paren' ? 2 : 1;
     for (;;) {
@@ -689,7 +784,10 @@ class Lexer {
         if (depth === 1) {
           // The expression ends here, and only a second ) right after it makes this arithmetic.
           const closed = src.charAt(this.pos + 1) === ')';
-          if (closed) this.pos += 2;
+          if (closed) {
+            checkArithOperand(src.slice(innerStart, this.pos));
+            this.pos += 2;
+          }
           this.leave();
           return closed;
         }
@@ -701,6 +799,7 @@ class Lexer {
         depth--;
         this.pos++;
         if (depth === 0) {
+          checkArithOperand(src.slice(innerStart, this.pos - 1));
           this.leave();
           return true;
         }
@@ -708,6 +807,18 @@ class Lexer {
         this.pos++;
       }
     }
+  }
+}
+
+/**
+ * A bare variable name as the whole arithmetic operand (`$((x))`, `(( x ))`) has bash re-evaluate
+ * that variable's string as arithmetic, which recursively expands any `$(...)` a subscript holds. A
+ * `[` subscript does the same. A literal-number expression (`1 + 2`, `i + 1`, `1 << 2`) is safe.
+ */
+function checkArithOperand(inner: string): void {
+  const trimmed = inner.trim();
+  if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(trimmed) || trimmed.includes('[')) {
+    throw new LexUnclear('arithmetic operand is a bare name or subscript');
   }
 }
 

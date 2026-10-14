@@ -600,6 +600,127 @@ describe('deployDenyReason', () => {
   });
 });
 
+// ---------------------------------------------------------------------------------------------
+// Fix round 4 (re-review N1-N13): fail closed on the constructs below (Ruling 14).
+// ---------------------------------------------------------------------------------------------
+
+/** The re-review's repros, one per row, with the exact reason the guard must give. */
+const DENIED_4: Array<[string, string]> = [
+  // N1 heredoc + multi-line substitution: the substitution body is still commands.
+  ['cat <<EOF $(echo hi\nssh h\nEOF\n)\nEOF', SSH],
+
+  // N2 case/for state machine.
+  ['for case in a; do ssh h; done', SSH],
+  ['>/dev/null case x in ; ssh h', SSH],
+  ['>f case x; for i in a; do ssh h; done', SSH],
+  ['select case in a; do git push; break; done', GIT_PUSH],
+
+  // N3 {name}> / {name}< variable-fd redirections are redirections, not the program word.
+  ['{fd}>/dev/null ssh h', SSH],
+  ['env {fd}>/dev/null ssh h', SSH],
+  ['X=1 {fd}>f git push', GIT_PUSH],
+  ['exec {fd}>/dev/null; ssh h', SSH],
+
+  // N4 a command word starting with NAME[ fails closed.
+  ['a[x y]=1 ssh h', UNCLEAR],
+  ['a[x;y]=1 git push', UNCLEAR],
+  ['a[(]=1 ssh h', UNCLEAR],
+  ['FOO=1 a[x y]=1 ssh h', UNCLEAR],
+
+  // N5 env skips every word that contains '='; -S / --split-string stay unclear.
+  ['env X}=1 git push', GIT_PUSH],
+  ['env a-b=1 ssh h', SSH],
+  ["env 'a b=1' ssh h", SSH],
+  ['env =x git push', GIT_PUSH],
+  ['xargs env a-b=1 ssh', SSH],
+  ['env -S "git push"', UNCLEAR],
+  ['env --split-string="git push"', UNCLEAR],
+
+  // N6 '#' is not a comment inside [[ ]].
+  ['[[ x =~ (a #) ]]; ssh h', UNCLEAR],
+  ['[[ x =~ (#) ]]; git push', UNCLEAR],
+
+  // N7 extglob.
+  ['shopt -s extglob\ngit @(push)', UNCLEAR],
+  ["bash -O extglob -c '@(g)it push'", UNCLEAR],
+  ['shopt -s extglob', UNCLEAR],
+
+  // N8 dynamic git config keys.
+  ['K=alias.p; git -c "$K=push" p', UNCLEAR],
+  ['git -c "ali$E.p=push" p', UNCLEAR],
+  ['git config "$K" push', UNCLEAR],
+  ['GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=ali$E.p GIT_CONFIG_VALUE_0=push git p', UNCLEAR],
+
+  // N9 data evaluated as code.
+  ["declare 'a[$(ssh h)]=1'", UNCLEAR],
+  ["printf -v 'a[$(ssh h)]' x", UNCLEAR],
+  ["read 'a[$(ssh h)]' <<< 1", UNCLEAR],
+  ["[[ -v 'a[$(ssh h)]' ]]", UNCLEAR],
+  ["test -v 'a[$(ssh h)]'", UNCLEAR],
+  ["[ 'a[$(ssh h)]' -eq 1 ]", UNCLEAR],
+  ["compgen -C 'ssh h'", UNCLEAR],
+  ['mapfile -C ssh -c 1 a <<< x', UNCLEAR],
+  ["x='$(ssh h)'; echo ${x@P}", UNCLEAR],
+  ["PS4='$(ssh h) '; set -x; echo hi", UNCLEAR],
+  ["x='a[$(ssh h)]'; (( x ))", UNCLEAR],
+  ['let x', UNCLEAR],
+  ['echo $((x))', UNCLEAR],
+  ['(( x ))', UNCLEAR],
+  ['echo ${!x}', UNCLEAR],
+  ['BASH_ENV=/dev/stdin bash -c : <<< x', UNCLEAR],
+
+  // N10 stdin scripts.
+  ["bash /dev/stdin <<< 'ssh h'", UNCLEAR],
+  ['sh /dev/fd/0 <<< x', UNCLEAR],
+  ['. /dev//stdin <<< x', UNCLEAR],
+  ['source /dev/../dev/stdin <<< x', UNCLEAR],
+  ["echo 'ssh h' | bash /dev/stdin", UNCLEAR],
+
+  // N11 xargs with stdin-supplied arguments.
+  ['echo https://api.hetzner.cloud/v1/servers | xargs curl', UNCLEAR],
+  ["printf '%s\\n' -exec ssh h ';' | xargs find .", UNCLEAR],
+  ['echo ssh h | xargs xargs', UNCLEAR],
+
+  // N12 git dashed builtins.
+  ['/usr/lib/git-core/git-push origin HEAD', GIT_PUSH],
+  ['PATH=/usr/lib/git-core:$PATH git-push origin HEAD', GIT_PUSH],
+
+  // N13 wrappers.
+  ['prlimit --nofile=100 git push', UNCLEAR],
+  ['setarch x86_64 git push', UNCLEAR],
+  ['linux64 git push', UNCLEAR],
+  ['chrt -o 0 git push', UNCLEAR],
+  ['dbus-run-session -- git push', UNCLEAR],
+];
+
+/** The minor: git/gh version and help, and bare git, must stay allowed. */
+const ALLOWED_4: string[] = [
+  'git --version',
+  'git --help',
+  'git',
+  'gh --version',
+  'gh --help',
+  'gh',
+  // Arithmetic that is a real expression, not a bare re-evaluated name, stays allowed.
+  'echo $((1 + 2))',
+  'echo $(( $i + 1 ))',
+  'x=$(( 1 << 2 )); echo $x',
+  // env with a normal assignment still finds the program.
+  'env NODE_ENV=test pnpm test',
+  // ${!arr[@]} is array keys, not indirect bare-name expansion.
+  'echo "${!arr[@]}"',
+];
+
+describe('deployDenyReason fix round 4', () => {
+  it.each(DENIED_4)('denies %j', (command, reason) => {
+    expect(deployDenyReason(command)).toBe(reason);
+  });
+
+  it.each(ALLOWED_4)('allows %j', (command) => {
+    expect(deployDenyReason(command)).toBeNull();
+  });
+});
+
 describe('checkToolUse', () => {
   it('edits stay in the checkout', () => {
     expect(checkToolUse('/repo', 'Write', { file_path: '/repo/src/a.ts' })).toBeNull();
