@@ -11,6 +11,7 @@ import type { BlobCache } from './cache.js';
 import type { Camera } from './geom.js';
 import type { PointerIn, Tool, WheelIn } from './gestures.js';
 import type { Frame } from './layout.js';
+import { COLORS } from './painter.js';
 import type { LoaderStats } from './loader.js';
 import { createCanvasRuntime } from './runtime.js';
 import type { TileSource } from './source.js';
@@ -63,7 +64,9 @@ function buttonStyle(pressed: boolean): string {
 
 export function CanvasView({ source, cache, onSelect, debug = false }: CanvasViewProps): JSX.Element {
   const rootRef = useRef<HTMLDivElement>(null);
+  const layersRef = useRef<HTMLDivElement>(null);
   const baseRef = useRef<HTMLCanvasElement>(null);
+  const spareRef = useRef<HTMLCanvasElement>(null);
   const overlayRef = useRef<HTMLCanvasElement>(null);
   const controllerRef = useRef<CanvasController | null>(null);
   const [visible, setVisible] = useState<Set<Device>>(() => new Set(DEVICES));
@@ -85,16 +88,32 @@ export function CanvasView({ source, cache, onSelect, debug = false }: CanvasVie
 
   useEffect(() => {
     const root = rootRef.current;
+    const layers = layersRef.current;
     const baseCanvas = baseRef.current;
+    const spareCanvas = spareRef.current;
     const overlayCanvas = overlayRef.current;
-    if (!root || !baseCanvas || !overlayCanvas) return;
+    if (!root || !layers || !baseCanvas || !spareCanvas || !overlayCanvas) return;
     const base = baseCanvas.getContext('2d', { alpha: false });
+    const spare = spareCanvas.getContext('2d', { alpha: false });
     const overlay = overlayCanvas.getContext('2d');
-    if (!base || !overlay) return;
+    if (!base || !spare || !overlay) return;
 
     const runtime = createCanvasRuntime({
       base,
+      baseBack: {
+        ctx: spare,
+        // Only the shown canvas is composited; the hidden one costs the page nothing.
+        present: (shown) => {
+          const hidden = shown === base ? spareCanvas : baseCanvas;
+          shown.canvas.style.visibility = 'visible';
+          hidden.style.visibility = 'hidden';
+        },
+      },
       overlay,
+      // The layers sit in one box, so a zoom preview is a single style write for the compositor.
+      setLayerTransform: (t) => {
+        layers.style.transform = t === null ? '' : `translate(${t.x}px,${t.y}px) scale(${t.scale})`;
+      },
       source,
       cache,
       requestFrame: (cb) => requestAnimationFrame(() => cb()),
@@ -193,9 +212,20 @@ export function CanvasView({ source, cache, onSelect, debug = false }: CanvasVie
   }, []);
 
   return (
-    <div ref={rootRef} data-testid="canvas" style="position:fixed;inset:0;touch-action:none;user-select:none">
-      <canvas ref={baseRef} style="position:absolute;inset:0;width:100%;height:100%" />
-      <canvas ref={overlayRef} style="position:absolute;inset:0;width:100%;height:100%;pointer-events:none" />
+    <div
+      ref={rootRef}
+      data-testid="canvas"
+      style={`position:fixed;inset:0;touch-action:none;user-select:none;background:${COLORS.bg}`}
+    >
+      <div ref={layersRef} style="position:absolute;inset:0;transform-origin:0 0">
+        <canvas ref={baseRef} data-testid="canvas-base" style="position:absolute;inset:0;width:100%;height:100%" />
+        <canvas
+          ref={spareRef}
+          data-testid="canvas-base"
+          style="position:absolute;inset:0;width:100%;height:100%;visibility:hidden"
+        />
+        <canvas ref={overlayRef} style="position:absolute;inset:0;width:100%;height:100%;pointer-events:none" />
+      </div>
       {error !== null && (
         <div data-testid="canvas-error" style={ERROR_STYLE}>
           {error}

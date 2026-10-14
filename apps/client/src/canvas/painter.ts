@@ -1,6 +1,11 @@
 // Base layer of the canvas: frames, their tiles and their labels, painted into a
 // 2D context. Between paints the previous image is blitted by the camera delta
 // and only the exposed strips and invalidated world rects are repainted.
+//
+// A canvas drawn onto itself costs the browser a full snapshot copy on top of the
+// blit, which dominates a pan frame at tablet resolution. With a second canvas
+// (`BackBuffer`) the blit goes from the shown canvas into the hidden one, and the
+// hidden one is then shown, so no canvas is ever drawn onto itself.
 
 import { DEVICE_LABEL, ZOOMS } from '@hub/protocol';
 import type { Zoom } from '@hub/protocol';
@@ -29,6 +34,16 @@ export interface PaintStats {
 
 export interface TileGetter {
   get(key: string, x: number, y: number): TileImage | undefined;
+}
+
+/**
+ * A second canvas of the same size as the painter's own. `present` is called each
+ * time a paint makes a different canvas the one that is shown, with that canvas's
+ * context; the caller makes it visible and hides the other.
+ */
+export interface BackBuffer {
+  ctx: CanvasRenderingContext2D;
+  present(shown: CanvasRenderingContext2D): void;
 }
 
 export const COLORS = { bg: '#e9e9ec', frame: '#ffffff', label: '#5f6368', badge: '#d93025' } as const;
@@ -77,15 +92,35 @@ function invalidRegion(r: Rect, cam: Camera, s: number, width: number, height: n
 }
 
 export class BasePainter {
-  private readonly ctx: CanvasRenderingContext2D;
+  /** The canvas holding the last painted image: the one that is shown. */
+  private front: CanvasRenderingContext2D;
+  /** The other canvas of a ping-pong pair; its content is stale until a blit overwrites it. */
+  private back: CanvasRenderingContext2D | null;
+  private readonly present: ((shown: CanvasRenderingContext2D) => void) | null;
   private readonly tiles: TileGetter;
   private last: Last | null = null;
   private invalidated = false;
   private dirty: Rect[] = [];
 
-  constructor(ctx: CanvasRenderingContext2D, tiles: TileGetter) {
-    this.ctx = ctx;
+  constructor(ctx: CanvasRenderingContext2D, tiles: TileGetter, back?: BackBuffer) {
+    this.front = ctx;
+    this.back = back?.ctx ?? null;
+    this.present = back?.present ?? null;
     this.tiles = tiles;
+  }
+
+  /**
+   * The snapped camera of the image on the canvas when that image can stand in for a paint of
+   * `input` after a pure move and scale of the canvas (a CSS transform), else null: the canvas was
+   * resized or cleared, or the frames or dpr changed, so its content no longer matches.
+   */
+  previewOf(input: PaintInput): Camera | null {
+    const last = this.last;
+    if (last === null || this.invalidated) return null;
+    const { canvas } = this.front;
+    if (canvas.width !== last.width || canvas.height !== last.height) return null;
+    if (input.dpr !== last.dpr || input.frames !== last.frames) return null;
+    return last.cam;
   }
 
   /** The next paint repaints the whole canvas. */
@@ -99,13 +134,13 @@ export class BasePainter {
   }
 
   paint(input: PaintInput): PaintStats {
-    const { ctx } = this;
-    const width = ctx.canvas.width;
-    const height = ctx.canvas.height;
+    const front = this.front;
+    const width = front.canvas.width;
+    const height = front.canvas.height;
     const cam = snapCamera(input.camera, input.dpr);
     const s = cam.scale * input.dpr;
     const last = this.last;
-    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    front.setTransform(1, 0, 0, 1, 0, 0);
 
     const dx = last === null ? 0 : Math.round((last.cam.x - cam.x) * s);
     const dy = last === null ? 0 : Math.round((last.cam.y - cam.y) * s);
@@ -127,11 +162,18 @@ export class BasePainter {
     this.invalidated = true;
     const regions: Rect[] = [];
     let blit = false;
+    // The canvas this paint draws into: the shown one, or the hidden one after a blit into it.
+    let target = front;
     if (full || last === null) {
       regions.push({ x: 0, y: 0, w: width, h: height });
     } else {
       if (dx !== 0 || dy !== 0) {
-        ctx.drawImage(ctx.canvas, dx, dy);
+        if (this.back !== null) {
+          // The blit covers all of the target except the exposed strips, which are repainted below.
+          target = this.back;
+          target.setTransform(1, 0, 0, 1, 0, 0);
+        }
+        target.drawImage(front.canvas, dx, dy);
         blit = true;
         if (dx > 0) regions.push({ x: 0, y: 0, w: dx, h: height });
         if (dx < 0) regions.push({ x: width + dx, y: 0, w: -dx, h: height });
@@ -146,8 +188,13 @@ export class BasePainter {
 
     const pass: Pass = { cam, s, dpr: input.dpr, width, frames: input.frames, zoom: input.zoom, smoothing: input.smoothing };
     const counts: Counts = { tilesDrawn: 0, missing: 0 };
-    for (const r of regions) this.paintRegion(r, pass, counts);
+    for (const r of regions) this.paintRegion(target, r, pass, counts);
 
+    if (target !== front) {
+      this.back = front;
+      this.front = target;
+      this.present?.(target);
+    }
     this.last = { cam, width, height, dpr: input.dpr, frames: input.frames, zoom: input.zoom, smoothing: input.smoothing };
     this.invalidated = false;
     this.dirty = [];
@@ -160,8 +207,7 @@ export class BasePainter {
     };
   }
 
-  private paintRegion(r: Rect, pass: Pass, counts: Counts): void {
-    const { ctx } = this;
+  private paintRegion(ctx: CanvasRenderingContext2D, r: Rect, pass: Pass, counts: Counts): void {
     const { cam, s, dpr, width, frames, zoom } = pass;
     ctx.save();
     // restore() runs even when a tile lookup or draw throws, so the region clip
