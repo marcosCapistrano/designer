@@ -17,6 +17,9 @@ importers:
         specifier: ^10.29.8
         version: 10.29.8
     devDependencies:
+      '@hub/design-model':
+        specifier: workspace:*
+        version: link:../../packages/design-model
       '@preact/preset-vite':
         specifier: ^2.10.6
         version: 2.10.6(@babel/core@7.29.7)(preact@10.29.8)(rollup@4.64.6)(vite@7.3.7(@types/node@22.20.5)(lightningcss@1.33.0))
