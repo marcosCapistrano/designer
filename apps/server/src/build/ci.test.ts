@@ -232,6 +232,37 @@ describe('mergeTask', () => {
     expect(s.store.task(task.id)?.headSha).toBe('h2');
   });
 
+  it('merges the current head when the stored head is stale', async () => {
+    const s = setup();
+    const task = await reviewTask(s); // stored head is h1
+    s.github.movePrHead(1, 'h2');
+    s.github.setChecks('h2', GREEN);
+
+    const merged = await mergeTask(s.deps, 'demo', task.id, false);
+
+    expect(s.github.merges).toEqual([{ number: 1, sha: 'h2' }]);
+    expect(merged).toMatchObject({ status: 'merged' });
+  });
+
+  it('refuses when a push lands between the CI read and the merge', async () => {
+    const s = setup();
+    const task = await reviewTask(s);
+    s.github.setChecks('h1', GREEN);
+    const realCheckStatus = s.github.checkStatus.bind(s.github);
+    vi.spyOn(s.github, 'checkStatus').mockImplementationOnce(async (r, sha) => {
+      const status = await realCheckStatus(r, sha);
+      s.github.movePrHead(1, 'h2'); // a push lands after CI was read for h1
+      return status;
+    });
+
+    const err = await caught(mergeTask(s.deps, 'demo', task.id, false));
+
+    expect(err.status).toBe(409);
+    expect(err.message).toContain('GitHub refused the merge');
+    expect(s.github.merges).toEqual([]);
+    expect(s.store.task(task.id)?.status).toBe('review');
+  });
+
   it('refuses while Claude is running', async () => {
     const s = setup();
     const task = await reviewTask(s);
@@ -314,6 +345,53 @@ describe('mergeTask', () => {
 
     expect(err.status).toBe(409);
     expect(err.message).toBe('GITHUB_TOKEN is not set.');
+  });
+});
+
+describe('a merge is recorded once', () => {
+  it('fires onMerged once for a PR already recorded merged', async () => {
+    const s = setup();
+    const task = await reviewTask(s);
+    s.github.markMerged(1);
+
+    await refreshCi(s.deps, task.id);
+    await mergeTask(s.deps, 'demo', task.id, false);
+    await refreshCi(s.deps, task.id);
+
+    expect(s.onMerged).toHaveBeenCalledTimes(1);
+  });
+
+  it('fires onMerged once when a poll records the merge while the merge is in flight', async () => {
+    const s = setup();
+    const task = await reviewTask(s);
+    s.github.setChecks('h1', GREEN);
+    const realMerge = s.github.merge.bind(s.github);
+    vi.spyOn(s.github, 'merge').mockImplementationOnce(async (r, n, sha) => {
+      const out = await realMerge(r, n, sha);
+      await refreshCi(s.deps, task.id); // a poll reads the merge from GitHub first
+      return out;
+    });
+
+    const merged = await mergeTask(s.deps, 'demo', task.id, false);
+
+    expect(merged).toMatchObject({ status: 'merged', mergeSha: 'merged-1' });
+    expect(s.onMerged).toHaveBeenCalledTimes(1);
+  });
+
+  it('fires onMerged once when a merge lands while a poll reads GitHub', async () => {
+    const s = setup();
+    const task = await reviewTask(s);
+    s.github.setChecks('h1', GREEN);
+    const realGetPr = s.github.getPr.bind(s.github);
+    vi.spyOn(s.github, 'getPr').mockImplementationOnce(async (r, n) => {
+      await mergeTask(s.deps, 'demo', task.id, false); // the merge lands during the poll's read
+      return realGetPr(r, n);
+    });
+
+    await refreshCi(s.deps, task.id);
+
+    expect(s.store.task(task.id)).toMatchObject({ status: 'merged', mergeSha: 'merged-1' });
+    expect(s.onMerged).toHaveBeenCalledTimes(1);
   });
 });
 
