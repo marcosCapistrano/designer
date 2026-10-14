@@ -23,10 +23,19 @@ describe('cssForDevice', () => {
   });
 });
 
+const CSP_META =
+  '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; img-src data:; style-src \'unsafe-inline\'; font-src data:; frame-src \'none\'">';
+
 describe('buildDocument', () => {
+  it('puts the Content-Security-Policy meta first in head', () => {
+    for (const device of ['base', 'tablet', 'mobile'] as const) {
+      expect(buildDocument('<p>x</p>', 'p{}', device).startsWith('<!doctype html><html><head>' + CSP_META)).toBe(true);
+    }
+  });
+
   it('sets width and wraps the body', () => {
     const out = buildDocument('<p>x</p>', 'p{}', 'tablet');
-    expect(out.startsWith('<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=834">')).toBe(true);
+    expect(out.startsWith('<!doctype html><html><head>' + CSP_META + '<meta charset="utf-8"><meta name="viewport" content="width=834">')).toBe(true);
     expect(out).toContain(BASE_CSS);
     expect(out.endsWith('<style>p{}</style></head><body><p>x</p></body></html>')).toBe(true);
   });
