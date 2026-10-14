@@ -283,6 +283,34 @@ describe('inline fallback for components that cannot be shared yet (Ruling F)', 
     expect(out.ok && out.value.html).toContain('title="calm"');
   });
 
+  it.each([
+    ['passes a literal', `<Box tone="static"><b>{label}</b></Box>`, { title: 'static' }, 'children'],
+    ['omits a prop', `<Box><b>{label}</b></Box>`, {}, 'optional-prop'],
+  ])('binds an inlined child inside a shared definition to what its parent %s, not to parent props', (_name, call, attrs, reason) => {
+    const project = { files: {
+      'Box.tsx': `export default function Box({ tone, children }) { return <div title={tone}>{children}</div>; }`,
+      'Panel.tsx': `import Box from './Box'; export default function Panel({ label }) { return <section>${call}</section>; }`,
+      'page.tsx': `import Panel from './Panel'; export default () => <main><Panel label="A" /><Panel label="B" /></main>`,
+    } };
+    const route = [{ route: '/', file: 'page.tsx' }];
+    const expected = [{ route: '/', component: 'Box', file: 'Box.tsx', reason }];
+    const extracted = extractPages(project, route, { sharedComponents: true });
+    expect(extracted).toMatchObject({ ok: true, inlined: expected });
+    if (!extracted.ok) return;
+    const panel = Object.values(extracted.doc.components);
+    expect(panel).toHaveLength(1);
+    expect(panel[0]!.props).toEqual({ label: { default: '' } });
+    expect(panel[0]!.root.children[0]).toMatchObject({ name: 'Box', tag: 'div', attrs, children: [{ tag: 'b', children: [{ text: '{{label}}' }] }] });
+    expect(Object.values(extracted.inlining)[0]).toEqual({ encountered: ['Box.tsx:default', 'Panel.tsx:default'], input: [], inline: [{ key: 'Box.tsx:default', component: 'Box', file: 'Box.tsx' }], reasons: { 'Box.tsx:default': reason } });
+    const fresh = synchronizePages({ project, entries: route, commit: 'c1' });
+    if (!fresh.ok) throw new Error(JSON.stringify(fresh));
+    expect(fresh.inlined).toEqual(expected);
+    expect(fresh.state.doc.components).toEqual(extracted.doc.components);
+    const cached = synchronizePages({ project, entries: route, commit: 'c2', previous: fresh.state });
+    expect(cached).toMatchObject({ ok: true, reused: ['/'], rebuilt: [], inlined: expected });
+    if (cached.ok) { expect(cached.state.doc).toEqual(fresh.state.doc); expect(cached.state.baseline.pages['/']!.inlining).toEqual(fresh.state.baseline.pages['/']!.inlining); }
+  });
+
   it('still shares a component with no slot and no prop-driven CSS', () => {
     const synced = synchronizePages({ project: { files }, entries, commit: 'c1' });
     expect(synced).toMatchObject({ ok: true, inlined: [] });

@@ -410,15 +410,19 @@ function extractOnce(project: SourceProject, entries: RouteEntry[], options: Ext
           return key === 'children' || /^on[A-Z]/.test(key) || Object.hasOwn(props, key) ? [] : [key];
         });
       }
-      /** `isEntry` marks a page/layout entry component, whose props the importer does not supply come from choices. */
-      function renderComponent(file: string, name: string, props: Record<string, Value>, path: string, isEntry = false): DesignNode[] {
+      /**
+       * `isEntry` marks a page/layout entry component, whose props the importer does not supply come from choices.
+       * `asDefinition` marks the root of a shared definition: only its own destructured props become declared props.
+       * A component expanded inside a definition binds the values passed to it, which may forward the definition's props.
+       */
+      function renderComponent(file: string, name: string, props: Record<string, Value>, path: string, isEntry = false, asDefinition = false): DesignNode[] {
         const mod = module(file);
         const key = `${file}:${name}`;
         if (stack.includes(key) || stack.length > 40) throw new Error(`Recursive component ${key}`);
         stack.push(key);
         try {
           const { fn, redirect } = componentFunction(mod, name);
-          if (redirect !== undefined) return renderComponent(file, redirect, props, path, isEntry);
+          if (redirect !== undefined) return renderComponent(file, redirect, props, path, isEntry, asDefinition);
           if (!fn?.body) throw new Error(`Cannot resolve component export ${name} in ${file}`);
           const env: Env = {};
           const parameter = fn.parameters[0];
@@ -428,7 +432,7 @@ function extractOnce(project: SourceProject, entries: RouteEntry[], options: Ext
               if (!ts.isIdentifier(binding.name) || binding.dotDotDotToken) throw new Error('Unsupported component props');
               const key = binding.propertyName?.getText(mod.source) ?? binding.name.text;
               if(/^on[A-Z]/.test(key))continue; // callback-only props do not affect a static preview unless read elsewhere
-              if (declarations && key !== 'children') {
+              if (asDefinition && declarations && key !== 'children') {
                 if (!Object.hasOwn(props, key) && !binding.initializer) throw new OmittedProp(`Missing preview prop ${key} for ${name}`);
                 if (binding.initializer) requiredProps?.delete(key);
                 else requiredProps?.add(key);
@@ -600,7 +604,7 @@ function extractOnce(project: SourceProject, entries: RouteEntry[], options: Ext
         idNamespace = component;
         declarations = Object.fromEntries(keys.map((key) => [key, { default: '' }]));
         requiredProps = new Set(keys);
-        try { renderComponent(file, exportName, { ...Object.fromEntries(keys.map((key) => [key, new PropValue(key)])), children: [] }, 'definition'); return false; }
+        try { renderComponent(file, exportName, { ...Object.fromEntries(keys.map((key) => [key, new PropValue(key)])), children: [] }, 'definition', false, true); return false; }
         catch (error) { if (error instanceof Inline) throw error; return error instanceof PropDrivenCss; }
         finally {
           idNamespace = oldNamespace; declarations = oldDeclarations; requiredProps = oldRequired;
@@ -678,7 +682,7 @@ function extractOnce(project: SourceProject, entries: RouteEntry[], options: Ext
               try {
                 const symbolic = Object.fromEntries(Object.keys(passed).map((key) => [key, new PropValue(key)]));
                 let rendered: DesignNode[];
-                try { rendered = renderComponent(file, exportName, { ...symbolic, children: [] }, 'definition'); }
+                try { rendered = renderComponent(file, exportName, { ...symbolic, children: [] }, 'definition', false, true); }
                 catch (error) {
                   if (error instanceof PropDrivenCss) throw new Inline(key, 'prop-css');
                   if (error instanceof OmittedProp) throw new Inline(key, 'optional-prop');

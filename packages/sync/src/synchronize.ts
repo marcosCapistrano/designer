@@ -7,7 +7,7 @@ import { choicesProblem } from './choices.js';
 import { ADAPTERS_FILE, adaptersIssue } from './adapters.js';
 
 /** Bump whenever extraction semantics change, so cached baselines are rebuilt. */
-export const SYNC_VERSION = 6;
+export const SYNC_VERSION = 7;
 export interface PageBaseline {
   entry: RouteEntry;
   commit: string;
