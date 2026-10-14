@@ -56,3 +56,9 @@ Validation: all 30 sync fixture tests pass (11 new incremental/replay cases); fu
 - Preserve lower-level `extractPages` expanded mode for compatibility; explicit `sharedComponents` enables definitions. Incremental sync always enables it and advances the extractor version to invalidate old caches. Existing edits targeting nodes that no longer exist after this representation upgrade are reported as replay conflicts, never silently migrated or discarded.
 - Ruling: a shared definition must have one element root and identical source-derived props/CSS across routes. Unsupported children slots, prop-driven styles/classes, non-string props, missing required preview props and literal model-placeholder syntax fail explicitly. Do not invent values or reinterpret source literals.
 - Validation: shared-component fixtures cover cross-page links, source defaults, nested instances, global edit propagation, component-source replay, snapshot roundtrip and explicit unsupported cases; full workspace typecheck passes.
+
+## Import read-safety review
+
+- Reviewing the deferred deployment preflight exposed a subtlety: `git status` may run checkout-configured filesystem-monitor or clean-filter commands, violating source import's no-execution guarantee. Replace it with immutable tree/blob reads and direct comparison of tracked source and index entries, with optional locks, object replacement, hooks and fsmonitor disabled.
+- Source additions/modifications staged in the index or present in the working tree are rejected. Unrelated non-source dirty files are ignored by import. New untracked files remain outside the selected source commit and are never imported implicitly.
+- Added regression cases proving configured fsmonitor/clean-filter scripts do not run, and staged source additions/modifications are refused. This read-only path is still superseded by the deployment plan's privilege-separated mirror access before live deploy credentials are enabled.
