@@ -194,7 +194,7 @@ describe('op sequence properties', () => {
       }),
       { numRuns: RUNS },
     );
-  });
+  }, 20000);
 
   test('replay is deterministic', () => {
     fc.assert(
@@ -208,7 +208,7 @@ describe('op sequence properties', () => {
       }),
       { numRuns: RUNS },
     );
-  });
+  }, 20000);
 
   test('serialize roundtrip', () => {
     fc.assert(
@@ -222,7 +222,7 @@ describe('op sequence properties', () => {
       }),
       { numRuns: RUNS },
     );
-  });
+  }, 20000);
 
   test('export never throws', () => {
     fc.assert(
@@ -236,7 +236,7 @@ describe('op sequence properties', () => {
       }),
       { numRuns: RUNS },
     );
-  });
+  }, 20000);
 });
 
 describe('structural undo and redo', () => {

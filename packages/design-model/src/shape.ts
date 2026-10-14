@@ -3,7 +3,7 @@ import { DEVICES, type Op } from './types.js';
 // Checks the shape of ops and of the node payloads they carry. Shape only: whether an op can
 // run against a doc is decided by its handler.
 
-const MAX_DEPTH = 64;
+export const MAX_DEPTH = 64;
 // Ids and names become object keys, so these would collide with Object.prototype.
 export const RESERVED_KEYS: ReadonlySet<string> = new Set(['__proto__', 'constructor', 'prototype']);
 
