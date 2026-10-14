@@ -5,7 +5,7 @@ import {
   validateTag,
   VOID_TAGS,
 } from '../rules.js';
-import { allIds, isDescendant, type Container, type Located } from '../tree.js';
+import { allIds, depthOf, heightOf, isDescendant, type Container, type Located } from '../tree.js';
 import {
   DEVICES,
   type DesignDoc,
@@ -17,6 +17,7 @@ import {
 import type { HandlerMap } from './handler.js';
 import {
   cycleError,
+  depthError,
   lookupNode,
   ownValue,
   requireElement,
@@ -119,7 +120,11 @@ export const structureHandlers: HandlerMap = {
       if (!indexInRange(op.index, found.hit.node.children.length)) {
         return `Index ${op.index} is out of range`;
       }
-      return validateSubtree(doc, op.node) ?? cycleError(doc, found.hit.container, [op.node]);
+      return (
+        validateSubtree(doc, op.node) ??
+        cycleError(doc, found.hit.container, [op.node]) ??
+        depthError(depthOf(doc, op.parent) + 1, heightOf(op.node))
+      );
     },
     mutate(draft, op) {
       requireElement(draft, op.parent).children.splice(op.index, 0, structuredClone(op.node));
@@ -157,6 +162,9 @@ export const structureHandlers: HandlerMap = {
       }
       const cycle = cycleError(doc, target.hit.container, [moved.hit.node]);
       if (cycle !== null) return cycle;
+      // Detaching the node does not change the target's level, since the target is not inside it.
+      const tooDeep = depthError(depthOf(doc, op.parent) + 1, heightOf(moved.hit.node));
+      if (tooDeep !== null) return tooDeep;
 
       // The index counts the target's children after the node is detached from them.
       const detached = moved.hit.parent.id === op.parent ? 1 : 0;
@@ -193,7 +201,11 @@ export const structureHandlers: HandlerMap = {
         return 'wrapper must be an element with no children';
       }
       if (VOID_TAGS.has(op.wrapper.tag)) return voidError(op.wrapper.tag);
-      return validateSubtree(doc, op.wrapper);
+      const wrapperProblem = validateSubtree(doc, op.wrapper);
+      if (wrapperProblem !== null) return wrapperProblem;
+      // The wrapper takes the first node's level, so the wrapped nodes each move down one level.
+      const tallest = hits.reduce((height, hit) => Math.max(height, heightOf(hit.node)), 0);
+      return depthError(depthOf(doc, first.node.id) + 1, tallest);
     },
     mutate(draft, op) {
       const [firstId] = op.nodes;

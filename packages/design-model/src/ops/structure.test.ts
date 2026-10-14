@@ -4,7 +4,10 @@ import { canonicalStringify } from '../canonical.js';
 import { sampleDoc } from '../fixtures.js';
 import { allocIds, findNode } from '../tree.js';
 import type { DesignDoc, DesignNode, ElementNode, Op } from '../types.js';
+import { nodeProblem } from '../shape.js';
 import { validateSubtree } from './structure.js';
+
+const TOO_DEEP = 'Node tree deeper than 64 levels';
 
 function applied(doc: DesignDoc, op: Op): DesignDoc {
   const result = applyOp(doc, op);
@@ -52,6 +55,21 @@ function element(id: string, children: DesignNode[] = [], tag = 'section'): Elem
 
 function text(id: string, value = 'x'): DesignNode {
   return { id, kind: 'text', text: value };
+}
+
+// A chain of `height` levels: element nodes down to one text leaf. Ids are `${prefix}1` to `${prefix}${height}`.
+function chain(height: number, prefix: string): DesignNode {
+  let node: DesignNode = text(`${prefix}${height}`);
+  for (let level = height - 1; level >= 1; level--) {
+    node = element(`${prefix}${level}`, [node]);
+  }
+  return node;
+}
+
+function homeRoot(doc: DesignDoc): ElementNode {
+  const page = doc.pages['home'];
+  if (!page) throw new Error('fixture is missing the home page');
+  return page.root;
 }
 
 describe('insertNode', () => {
@@ -138,13 +156,12 @@ describe('insertNode', () => {
     })).toBe(`Invalid node id "${id}"`);
   });
 
-  test('accepts the id n999999999999999, and allocIds after it returns distinct safe ids', () => {
+  test('accepts the id n999999999999999, and allocIds then has no id left to give', () => {
     const next = applied(sampleDoc(), {
       op: 'insertNode', parent: 'n2', index: 0, node: text('n999999999999999'),
     });
-    const ids = allocIds(next, 2);
-    expect(new Set(ids).size).toBe(2);
-    for (const id of ids) expect(Number.isSafeInteger(Number(id.slice(1)))).toBe(true);
+    expect(allocIds(next, 0)).toEqual([]);
+    expect(() => allocIds(next, 1)).toThrow('allocIds would exceed the largest node id n999999999999999');
   });
 
   test.each(['script', 'style', 'iframe'])('rejects the denied tag %s', (tag) => {
@@ -367,6 +384,71 @@ function shellDoc(): DesignDoc {
   doc.components.Shell = { name: 'Shell', props: {}, root: element('n20', [instance('n21', 'Card')]) };
   return doc;
 }
+
+describe('whole-tree depth', () => {
+  test('insertNode applies a payload that ends at level 64 under a level-2 parent', () => {
+    const next = applied(sampleDoc(), { op: 'insertNode', parent: 'n2', index: 1, node: chain(62, 'd') });
+    expect(nodeProblem(homeRoot(next))).toBeNull();
+  });
+
+  test('insertNode rejects a payload that would end at level 65 under a level-2 parent', () => {
+    expect(rejected(sampleDoc(), {
+      op: 'insertNode', parent: 'n2', index: 1, node: chain(63, 'd'),
+    })).toBe(TOO_DEEP);
+  });
+
+  test('insertNode applies a 63-level payload under the page root', () => {
+    const next = applied(sampleDoc(), { op: 'insertNode', parent: 'n1', index: 0, node: chain(63, 'd') });
+    expect(nodeProblem(homeRoot(next))).toBeNull();
+  });
+
+  test('insertNode rejects a 64-level payload under the page root', () => {
+    expect(rejected(sampleDoc(), {
+      op: 'insertNode', parent: 'n1', index: 0, node: chain(64, 'd'),
+    })).toBe(TOO_DEEP);
+  });
+
+  // n2 holds the chain t1 to t40, so t_i is level i + 2 and t28 is level 30.
+  function docWithMovable(height: number): DesignDoc {
+    const withTargets = applied(sampleDoc(), {
+      op: 'insertNode', parent: 'n2', index: 1, node: chain(40, 't'),
+    });
+    return applied(withTargets, { op: 'insertNode', parent: 'n1', index: 2, node: chain(height, 'm') });
+  }
+
+  test('moveNode applies a subtree that ends at level 64 under a level-30 parent', () => {
+    const next = applied(docWithMovable(34), { op: 'moveNode', node: 'm1', parent: 't28', index: 0 });
+    expect(nodeProblem(homeRoot(next))).toBeNull();
+  });
+
+  test('moveNode rejects a subtree that would end at level 65 under a level-30 parent', () => {
+    expect(rejected(docWithMovable(35), {
+      op: 'moveNode', node: 'm1', parent: 't28', index: 0,
+    })).toBe(TOO_DEEP);
+  });
+
+  // n2 holds n3 and the chain d1 to d_height, so wrapping d1 puts it one level lower.
+  function docWithWrapTarget(height: number): DesignDoc {
+    return applied(sampleDoc(), { op: 'insertNode', parent: 'n2', index: 1, node: chain(height, 'd') });
+  }
+
+  test('wrapNodes applies a wrap that ends at level 64 under a level-2 parent', () => {
+    const next = applied(docWithWrapTarget(61), { op: 'wrapNodes', nodes: ['d1'], wrapper: element('w1') });
+    expect(nodeProblem(homeRoot(next))).toBeNull();
+  });
+
+  test('wrapNodes rejects a wrap that would end at level 65 under a level-2 parent', () => {
+    expect(rejected(docWithWrapTarget(62), {
+      op: 'wrapNodes', nodes: ['d1'], wrapper: element('w1'),
+    })).toBe(TOO_DEEP);
+  });
+
+  test('wrapNodes measures the tallest wrapped node, not the first', () => {
+    expect(rejected(docWithWrapTarget(62), {
+      op: 'wrapNodes', nodes: ['n3', 'd1'], wrapper: element('w1'),
+    })).toBe(TOO_DEEP);
+  });
+});
 
 describe('component cycles', () => {
   test('rejects an instance of Card inserted into Card', () => {

@@ -2,8 +2,11 @@ import { describe, expect, test } from 'vitest';
 import { applyOp, applyOpInternal } from '../apply.js';
 import { canonicalStringify } from '../canonical.js';
 import { sampleDoc } from '../fixtures.js';
+import { nodeProblem } from '../shape.js';
 import { findNode } from '../tree.js';
 import type { DesignDoc, DesignNode, ElementNode, Op } from '../types.js';
+
+const TOO_DEEP = 'Node tree deeper than 64 levels';
 
 function applied(doc: DesignDoc, op: Op): DesignDoc {
   const result = applyOp(doc, op);
@@ -47,6 +50,28 @@ function element(id: string, children: DesignNode[] = [], tag = 'section'): Elem
 
 function instance(id: string, component: string, props: Record<string, string> = {}): DesignNode {
   return { id, kind: 'instance', component, props, style: { base: {} } };
+}
+
+// A chain of `height` levels: element nodes down to one text leaf. Ids are `${prefix}1` to `${prefix}${height}`.
+function chain(height: number, prefix: string): DesignNode {
+  let node: DesignNode = text(`${prefix}${height}`);
+  for (let level = height - 1; level >= 1; level--) {
+    node = element(`${prefix}${level}`, [node]);
+  }
+  return node;
+}
+
+function text(id: string, value = 'x'): DesignNode {
+  return { id, kind: 'text', text: value };
+}
+
+function idsOf(node: DesignNode): string[] {
+  return node.kind === 'element' ? [node.id, ...node.children.flatMap(idsOf)] : [node.id];
+}
+
+// Maps every id under `node` to a fresh one: q0, q1, and so on.
+function freshIdMap(node: DesignNode): Record<string, string> {
+  return Object.fromEntries(idsOf(node).map((id, i) => [id, `q${i}`]));
 }
 
 describe('extractComponent', () => {
@@ -117,6 +142,59 @@ describe('extractComponent', () => {
     });
     if (!result.ok) throw new Error(result.error);
     expect(content(undoneBy(result.value.doc, result.value.inverse))).toEqual(content(doc));
+  });
+});
+
+// n2 sits at level 2. The ops would refuse to add a chain below it, so the chain is added directly.
+function docWithDeepHeader(height: number): DesignDoc {
+  const doc = sampleDoc();
+  const header = nodeOf(doc, 'n2');
+  if (header.kind !== 'element') throw new Error('n2 is not an element');
+  header.children.push(chain(height, 'd'));
+  return doc;
+}
+
+// The Card body gains a chain under its root, so the body is height + 1 levels tall.
+function docWithDeepCard(height: number): DesignDoc {
+  const doc = sampleDoc();
+  doc.components.Card?.root.children.push(chain(height, 'c'));
+  return doc;
+}
+
+describe('whole-tree depth', () => {
+  // A header of 64 levels is too deep for the page, but extraction moves its body into a component.
+  // The check looks at the body alone, so a body of exactly 64 levels is accepted.
+  test('extractComponent applies a body of exactly 64 levels', () => {
+    const next = applied(docWithDeepHeader(63), {
+      op: 'extractComponent', node: 'n2', component: 'SiteHeader', instanceId: 'n9',
+    });
+    expect(nodeProblem(nodeOf(next, 'n2'))).toBeNull();
+  });
+
+  test('extractComponent rejects a body of 65 levels', () => {
+    expect(rejected(docWithDeepHeader(64), {
+      op: 'extractComponent', node: 'n2', component: 'SiteHeader', instanceId: 'n9',
+    })).toBe(TOO_DEEP);
+  });
+
+  test('detachInstance applies a body that ends at level 64 under a level-2 instance', () => {
+    const doc = docWithDeepCard(62);
+    const next = applied(doc, { op: 'detachInstance', node: 'n5', idMap: freshIdMap(nodeOf(doc, 'n6')) });
+    expect(nodeProblem(nodeOf(next, 'n1'))).toBeNull();
+  });
+
+  test('detachInstance rejects a body that would end at level 65 under a level-2 instance', () => {
+    const doc = docWithDeepCard(63);
+    expect(rejected(doc, { op: 'detachInstance', node: 'n5', idMap: freshIdMap(nodeOf(doc, 'n6')) })).toBe(TOO_DEEP);
+  });
+
+  test('detachInstance counts from the instance level, so one level deeper is rejected', () => {
+    const withDeeper = applied(docWithDeepCard(62), {
+      op: 'insertNode', parent: 'n2', index: 1, node: instance('n9', 'Card'),
+    });
+    expect(rejected(withDeeper, {
+      op: 'detachInstance', node: 'n9', idMap: freshIdMap(nodeOf(withDeeper, 'n6')),
+    })).toBe(TOO_DEEP);
   });
 });
 

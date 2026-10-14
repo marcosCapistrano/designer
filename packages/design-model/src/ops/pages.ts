@@ -1,8 +1,9 @@
 import { validatePageId } from '../rules.js';
+import { heightOf } from '../tree.js';
 import type { DesignDoc, DesignNode, ElementNode, Page } from '../types.js';
 import type { HandlerMap } from './handler.js';
 import { validateSubtree } from './structure.js';
-import { ownValue } from './util.js';
+import { depthError, ownValue } from './util.js';
 
 // Returns the reason a new page id or route cannot be used in doc, or null.
 function pageHeaderProblem(doc: DesignDoc, id: string, route: string): string | null {
@@ -73,7 +74,9 @@ export const pageHandlers: HandlerMap = {
       for (const key of Object.keys(op.idMap)) {
         if (!ids.has(key)) return `idMap has an entry for ${key} that is not in the page`;
       }
-      return validateSubtree(doc, remapCopy(source.root, op.idMap));
+      const copy = remapCopy(source.root, op.idMap);
+      // The copy is a page root, so it is level 1.
+      return validateSubtree(doc, copy) ?? depthError(1, heightOf(copy));
     },
     mutate(draft, op) {
       const source = requirePage(draft, op.source);
