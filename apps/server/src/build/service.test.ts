@@ -82,6 +82,8 @@ interface SetupOptions {
   runCommand?: RunCommand;
   openRepo?: (dir: string) => GitRepo;
   onMerged?: BuildDeps['onMerged'];
+  /** More app names the registry knows; all share the demo checkout, which is enough for CI reads. */
+  extraApps?: string[];
 }
 
 function setup(opts: SetupOptions = {}) {
@@ -110,7 +112,8 @@ function setup(opts: SetupOptions = {}) {
         const held = hold.next;
         hold.next = null;
         if (held !== null) await held;
-        return n === 'demo' ? entry : null;
+        if (n === 'demo') return entry;
+        return opts.extraApps?.includes(n) ? { ...entry, name: n } : null;
       },
     },
     openRepo: opts.openRepo ?? ((dir) => openRepo(dir, { identity: TEST_IDENTITY })),
@@ -442,7 +445,7 @@ describe('BuildService stop and failures', () => {
     expect(lastTaskMsg(s).running).toBe(false);
   });
 
-  it('stop after the checks pass but before the push fails the task without pushing', async () => {
+  it('a stop issued during the last check fails the task without pushing', async () => {
     const s: Setup = setup({
       runCommand: async (cmd) => {
         if (cmd === 'pnpm test') s.svc.stop('demo');
@@ -452,6 +455,34 @@ describe('BuildService stop and failures', () => {
 
     const task = await run(s);
 
+    expect(task).toMatchObject({ status: 'failed', error: 'Stopped by you.' });
+    expect(git(s.origin, 'branch', '--list', 'build/*')).toBe('');
+    expect(s.github.prs.size).toBe(0);
+    expect(s.github.calls).not.toContain('createPr');
+    expect(s.svc.isRunning('demo')).toBe(false);
+  });
+
+  it('a stop issued during the branch check before the push fails the task without pushing', async () => {
+    let armed = false;
+    let stopReturned: boolean | null = null;
+    const s: Setup = setup({
+      runCommand: async () => {
+        armed = true;
+        return OK;
+      },
+      openRepo: repoWith((real) => ({
+        currentBranch: async () => {
+          const branch = await real.currentBranch();
+          // The first branch read after the last check is the one made just before the push.
+          if (armed && stopReturned === null) stopReturned = s.svc.stop('demo');
+          return branch;
+        },
+      })),
+    });
+
+    const task = await run(s);
+
+    expect(stopReturned).toBe(true);
     expect(task).toMatchObject({ status: 'failed', error: 'Stopped by you.' });
     expect(git(s.origin, 'branch', '--list', 'build/*')).toBe('');
     expect(s.github.prs.size).toBe(0);
@@ -958,6 +989,12 @@ function gatePrReads(s: Setup, gate: Deferred) {
   });
 }
 
+/** A review task of another app with a pending PR 2 whose GitHub read can be held. */
+function otherAppReview(s: Setup): BuildTask {
+  const other = s.store.createTask({ app: 'other', title: 'other', branch: 'build/other-1', base: 'main' });
+  return s.store.updateTask(other.id, { status: 'review', prNumber: 2, headSha: 'head-2', ci: 'pending' });
+}
+
 describe('BuildService CI refresh', () => {
   it('announces a green PR once for concurrent state() calls and a poll', async () => {
     const s = setup();
@@ -970,7 +1007,27 @@ describe('BuildService CI refresh', () => {
     expect(s.store.task(task.id)?.ci).toBe('success');
   });
 
-  it('shares one GitHub read between concurrent state() calls, then lets a poll run after it', async () => {
+  it('reads GitHub once for two state() calls on one task and announces once', async () => {
+    const s = setup();
+    const task = await run(s);
+    s.github.setChecks('head-1', GREEN);
+    const gate = deferred();
+    const reads = gatePrReads(s, gate);
+
+    const first = s.svc.state('demo');
+    const second = s.svc.state('demo');
+    await vi.waitFor(() => expect(reads).toHaveBeenCalledTimes(1));
+    gate.resolve();
+    const [a, b] = await Promise.all([first, second]);
+
+    expect(a.task?.ci).toBe('success');
+    expect(b.task?.ci).toBe('success');
+    expect(reads).toHaveBeenCalledTimes(1);
+    expect(passes(s)).toBe(1);
+    expect(s.store.task(task.id)?.ci).toBe('success');
+  });
+
+  it('shares one GitHub read between two state() calls and a poll that starts during it', async () => {
     const s = setup();
     const task = await run(s);
     s.github.setChecks('head-1', GREEN);
@@ -987,12 +1044,11 @@ describe('BuildService CI refresh', () => {
     expect(a.task?.ci).toBe('success');
     expect(b.task?.ci).toBe('success');
     expect(passes(s)).toBe(1);
-    // One read shared by both state() calls, one by the poll that waited for it.
-    expect(reads).toHaveBeenCalledTimes(2);
+    expect(reads).toHaveBeenCalledTimes(1);
     expect(s.store.task(task.id)?.ci).toBe('success');
   });
 
-  it('makes a state() call that arrives during a poll wait for it instead of reading again', async () => {
+  it('shares the poll\'s read with a state() call that arrives while it is in flight', async () => {
     const s = setup();
     await run(s);
     s.github.setChecks('head-1', GREEN);
@@ -1010,7 +1066,93 @@ describe('BuildService CI refresh', () => {
     expect(passes(s)).toBe(1);
   });
 
-  it('shares a refresh between a send and state()', async () => {
+  it('a second poll pass joins the one in flight', async () => {
+    const s = setup();
+    await run(s);
+    s.github.setChecks('head-1', GREEN);
+    const gate = deferred();
+    const reads = gatePrReads(s, gate);
+
+    const first = s.svc.pollCi();
+    await vi.waitFor(() => expect(reads).toHaveBeenCalledTimes(1));
+    const second = s.svc.pollCi();
+    gate.resolve();
+    await Promise.all([first, second]);
+
+    expect(second).toBe(first);
+    expect(reads).toHaveBeenCalledTimes(1);
+    expect(passes(s)).toBe(1);
+    // The pass is over, so the next one starts fresh.
+    await s.svc.pollCi();
+    expect(reads).toHaveBeenCalledTimes(2);
+  });
+
+  it('a send on one app is not held up by a hung GitHub read for another app', async () => {
+    const s = setup({
+      scripts: [[write('a.txt'), done('s1')], [write('b.txt'), done('s1')]],
+      extraApps: ['other'],
+    });
+    await run(s);
+    otherAppReview(s);
+    const hang = deferred();
+    const getPr = s.github.getPr.bind(s.github);
+    const reads = vi.spyOn(s.github, 'getPr').mockImplementation(async (r, n) => {
+      if (n === 2) {
+        await hang.promise;
+        throw new Error('released');
+      }
+      return getPr(r, n);
+    });
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    const poll = s.svc.pollCi();
+    await vi.waitFor(() => expect(reads).toHaveBeenCalledWith(expect.anything(), 2));
+    const sent = await Promise.race([
+      s.svc.send('demo', 'More work').then(() => 'sent'),
+      new Promise<string>((resolve) => setTimeout(() => resolve('waiting for the poll'), 1500)),
+    ]);
+    const snapshot = await s.svc.state('demo');
+
+    expect(sent).toBe('sent');
+    expect(snapshot.running).toBe(true);
+    hang.resolve();
+    await poll;
+    await s.svc.idle('demo');
+    expect(latest(s)).toMatchObject({ app: 'demo', status: 'review' });
+  });
+
+  it('a state() call on one app is not held up by a hung GitHub read for another app', async () => {
+    const s = setup({ extraApps: ['other'] });
+    const task = await run(s);
+    s.github.setChecks('head-1', [{ name: 'ci', status: 'in_progress', conclusion: null }]);
+    otherAppReview(s);
+    const hang = deferred();
+    const getPr = s.github.getPr.bind(s.github);
+    const reads = vi.spyOn(s.github, 'getPr').mockImplementation(async (r, n) => {
+      if (n === 2) {
+        await hang.promise;
+        throw new Error('released');
+      }
+      return getPr(r, n);
+    });
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    // The poll refreshes demo first, then hangs on the other app.
+    const poll = s.svc.pollCi();
+    await vi.waitFor(() => expect(reads).toHaveBeenCalledWith(expect.anything(), 2));
+    const snapshot = await Promise.race([
+      s.svc.state('demo'),
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), 1500)),
+    ]);
+
+    // CI is still pending, so state() reads GitHub itself while the poll is stuck on the other app.
+    expect(snapshot?.task).toMatchObject({ id: task.id, status: 'review', ci: 'pending' });
+    expect(reads.mock.calls.filter(([, n]) => n === 1).length).toBeGreaterThanOrEqual(2);
+    hang.resolve();
+    await poll;
+  });
+
+  it('a send that refreshes the task keeps state() from reading GitHub, and reads once', async () => {
     const s = setup({ scripts: [[write('a.txt'), done('s1')], [write('b.txt'), done('s1')]] });
     await run(s);
     s.github.setChecks('head-1', GREEN);
@@ -1019,11 +1161,14 @@ describe('BuildService CI refresh', () => {
 
     const sending = s.svc.send('demo', 'More work');
     await vi.waitFor(() => expect(reads).toHaveBeenCalledTimes(1));
-    const state = s.svc.state('demo');
+    // The send holds the app, so state() answers from the store without a read of its own.
+    const snapshot = await s.svc.state('demo');
+    expect(snapshot.running).toBe(true);
     gate.resolve();
-    await Promise.all([sending, state]);
+    await sending;
     await s.svc.idle('demo');
 
+    expect(reads).toHaveBeenCalledTimes(1);
     expect(passes(s)).toBe(1);
   });
 });

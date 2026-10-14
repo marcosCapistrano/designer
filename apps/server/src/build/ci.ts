@@ -129,9 +129,14 @@ export async function refreshCi(deps: BuildDeps, taskId: number): Promise<BuildT
 
 /**
  * Refreshes every review task whose app is not running. A task whose CI stays pending on one head
- * is checked at most CI_POLL_LIMIT times; a new head starts a new count.
+ * is checked at most CI_POLL_LIMIT times; a new head starts a new count. `refresh` reads one task's
+ * CI (default: refreshCi); a caller that shares refreshes between callers passes its own.
  */
-export async function pollCi(deps: BuildDeps, isRunning: (app: string) => boolean): Promise<void> {
+export async function pollCi(
+  deps: BuildDeps,
+  isRunning: (app: string) => boolean,
+  refresh: (taskId: number) => Promise<BuildTask | null> = (taskId) => refreshCi(deps, taskId),
+): Promise<void> {
   const watches = watchesFor(deps.store);
   const reviews = deps.store.tasksWithStatus(['review']);
   const inReview = new Set(reviews.map((task) => task.id));
@@ -144,7 +149,7 @@ export async function pollCi(deps: BuildDeps, isRunning: (app: string) => boolea
     const watch = watches.get(task.id);
     if (watch !== undefined && watch.polls >= CI_POLL_LIMIT && watch.headSha === task.headSha) continue;
 
-    const next = await refreshCi(deps, task.id);
+    const next = await refresh(task.id);
     if (next?.ci !== 'pending') {
       watches.delete(task.id);
       continue;
