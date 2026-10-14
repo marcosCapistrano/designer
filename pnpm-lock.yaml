@@ -27,6 +27,15 @@ importers:
         specifier: ^5.0.4
         version: 5.0.4(vite@8.3.4)
 
+  packages/protocol:
+    devDependencies:
+      typescript:
+        specifier: ^7.0.2
+        version: 7.0.2
+      vitest:
+        specifier: ^5.0.4
+        version: 5.0.4(vite@8.3.4)
+
 packages:
 
   '@jridgewell/resolve-uri@3.1.2':
