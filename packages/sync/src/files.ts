@@ -42,6 +42,7 @@ export function parseSyncState(files: Record<string, string>): Result<SyncState>
     const base = metadata['baseline'];
     if (!Number.isSafeInteger(base['version']) || (base['version'] as number) < 1 || typeof base['sourcePathsHash'] !== 'string' || !SHA.test(base['sourcePathsHash']) || !object(base['pages'])) return fail('Invalid baseline metadata');
     if (base['choicesHash'] !== undefined && (typeof base['choicesHash'] !== 'string' || !SHA.test(base['choicesHash']) || base['choicesHash'] !== createHash('sha256').update(canonicalStringify(metadata['choices'] ?? {})).digest('hex'))) return fail('Preview choices do not match the cached baseline');
+    if (base['adaptersHash'] !== undefined && (typeof base['adaptersHash'] !== 'string' || !SHA.test(base['adaptersHash']))) return fail('Invalid adapters hash');
     const clean: DesignDoc = { meta: { version: 1, seq: 0 }, pages: {}, components: {}, tokens: {} };
     for (const [route, value] of Object.entries(base['pages'])) {
       if (!route.startsWith('/') || !object(value) || !object(value['entry']) || !object(value['page']) || !object(value['hashes'])) return fail(`Invalid baseline for ${route}`);

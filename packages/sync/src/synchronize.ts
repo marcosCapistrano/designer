@@ -3,6 +3,7 @@ import { applyOp, canonicalStringify, validateDoc, type ComponentDef, type Desig
 import { extractPages } from './extract.js';
 import type { PreviewChoices, RouteEntry, SourceDiagnostic, SourceProject } from './types.js';
 import { choicesProblem } from './choices.js';
+import { ADAPTERS_FILE, adaptersIssue } from './adapters.js';
 
 /** Bump whenever extraction semantics change, so cached baselines are rebuilt. */
 export const SYNC_VERSION = 3;
@@ -19,6 +20,8 @@ export interface SyncBaseline {
   sourcePathsHash: string;
   pages: Record<string, PageBaseline>;
   choicesHash?: string;
+  /** Adapters change extraction output, so their canonical hash is part of the page reuse key. */
+  adaptersHash?: string;
 }
 export interface SyncState {
   baseline: SyncBaseline;
@@ -35,6 +38,7 @@ export type SyncResult =
   | { ok: false; kind: 'replay'; conflicts: SyncConflict[]; blocked: number[] };
 
 function hash(text: string): string { return createHash('sha256').update(text).digest('hex'); }
+const EMPTY_ADAPTERS_HASH = hash(canonicalStringify({ modules: {} }));
 
 /** Pure preparation: callers commit a successful state atomically. Failure never mutates previous. */
 export function synchronizePages(input: {
@@ -51,9 +55,13 @@ export function synchronizePages(input: {
   const choiceError = choicesProblem(choices);
   if (choiceError) return sourceFailure(choiceError);
   const choicesHash = hash(canonicalStringify(choices));
+  const adapterError = project.adapters !== undefined ? adaptersIssue(project.adapters) : null;
+  if (adapterError) return { ok: false, kind: 'source', diagnostics: [{ file: ADAPTERS_FILE, message: adapterError }] };
+  // No adapters hashes like an empty adapters file, so baselines written before adapters existed stay reusable.
+  const adaptersHash = hash(canonicalStringify(project.adapters ?? { modules: {} }));
   if (new Set(entries.map((entry) => entry.route)).size !== entries.length) return sourceFailure('Duplicate routes');
   const sourcePathsHash = hash(canonicalStringify(Object.keys(project.files).sort()));
-  const baseline: SyncBaseline = { version: SYNC_VERSION, sourcePathsHash, choicesHash, pages: {} };
+  const baseline: SyncBaseline = { version: SYNC_VERSION, sourcePathsHash, choicesHash, adaptersHash, pages: {} };
   const doc: DesignDoc = { meta: { version: 1, seq: 0 }, pages: {}, components: {}, tokens: {} };
   const rebuilt: string[] = [], reused: string[] = [];
   const diagnostics: SourceDiagnostic[] = [];
@@ -69,6 +77,7 @@ export function synchronizePages(input: {
     const unchanged = saved && previous.baseline.version === SYNC_VERSION
       && previous.baseline.sourcePathsHash === sourcePathsHash
       && previous.baseline.choicesHash === choicesHash
+      && (previous.baseline.adaptersHash ?? EMPTY_ADAPTERS_HASH) === adaptersHash
       && canonicalStringify(saved.entry) === canonicalStringify(entry)
       && Object.entries(saved.hashes).every(([file, digest]) => Object.hasOwn(project.files, file) && hash(project.files[file]!) === digest);
     if (unchanged) {

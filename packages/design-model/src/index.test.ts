@@ -21,6 +21,7 @@ const PUBLIC_EXPORTS = [
   'validateDoc',
   'validateOp',
   'validateStyle',
+  'validateTag',
   'walkDoc',
 ];
 

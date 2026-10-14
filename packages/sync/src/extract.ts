@@ -3,6 +3,7 @@ import { canonicalStringify, validateDoc, type ComponentDef, type DesignDoc, typ
 import { applyStyles, CssError, parseStyles, type Rule } from './css.js';
 import type { ExtractOptions, ExtractResult, PreviewNode, RouteEntry, SourceDiagnostic, SourceProject } from './types.js';
 import { choiceKey, choicesProblem, PreviewRequired } from './choices.js';
+import { ADAPTERS_FILE, adaptersIssue, findAdapter, ignoresStyle, type Adapter } from './adapters.js';
 
 // No ambient clock, filesystem or execution: extraction is a pure function of source text.
 function stableId(key: string): string {
@@ -73,6 +74,8 @@ export function extractPages(project: SourceProject, entries: RouteEntry[], opti
   const diagnostics: SourceDiagnostic[] = [];
   const choiceError = options.choices ? choicesProblem(options.choices) : null;
   if (choiceError) return { ok: false, diagnostics: [{ file: '', message: choiceError }] };
+  const adapterError = project.adapters !== undefined ? adaptersIssue(project.adapters) : null;
+  if (adapterError) return { ok: false, diagnostics: [{ file: ADAPTERS_FILE, message: adapterError }] };
   const sampleArrays = new WeakSet<unknown[]>();
   function markSamples(value: unknown): void { if (Array.isArray(value)) { sampleArrays.add(value); value.forEach(markSamples); } else if (value && typeof value === 'object') Object.values(value).forEach(markSamples); }
   for (const choice of Object.values(options.choices ?? {})) if (choice.kind === 'value') markSamples(choice.value);
@@ -125,7 +128,13 @@ export function extractPages(project: SourceProject, entries: RouteEntry[], opti
           if (ts.isImportDeclaration(statement) && ts.isStringLiteral(statement.moduleSpecifier)) {
             const specifier = statement.moduleSpecifier.text;
             if (specifier.endsWith('.css')) {
-              const cssFile = resolveFile(project, file, specifier); files.add(cssFile);
+              const cssFile = resolveFile(project, file, specifier);
+              if (ignoresStyle(project.adapters, cssFile)) {
+                // Ruling A: an ignored stylesheet is neither parsed nor a dependency, so it cannot bind class names.
+                if (statement.importClause) throw new Error(`Ignored stylesheet ${cssFile} cannot be imported with bindings`);
+                continue;
+              }
+              files.add(cssFile);
               const scope = cssFile.endsWith('.module.css') ? `c${stableId(cssFile)}` : null;
               if (!loadedStyles.has(cssFile)) {
                 currentFile = cssFile;
@@ -134,6 +143,7 @@ export function extractPages(project: SourceProject, entries: RouteEntry[], opti
                 rules.push(...parseStyles(project.files[cssFile]!, scope, { file: cssFile, layers, resolveImport(spec, from) {
                   const imported = resolveFile(project, from, spec);
                   if (!imported.endsWith('.css') || imported.endsWith('.module.css')) throw new Error(`Unsupported CSS @import ${spec}`);
+                  if (ignoresStyle(project.adapters, imported)) return { file: imported, text: '' };
                   files.add(imported);
                   if (loadedStyles.has(imported)) return { file: imported, text: '' };
                   loadedStyles.add(imported); return { file: imported, text: project.files[imported]! };
@@ -373,16 +383,32 @@ export function extractPages(project: SourceProject, entries: RouteEntry[], opti
         }
         return output;
       }
+      /** The adapter for a tag bound to an external import, or null for source and host tags. Unmapped imports fail. */
+      function adapterFor(tag: string, mod: Module): Adapter | null {
+        const [head, ...members] = tag.split('.');
+        const imported = mod.imports.get(head!);
+        if (!imported || isSource(project, imported.file)) return null;
+        if (members.length > 1 || (members.length === 1 && imported.name !== '*')) throw new Error(`Unsupported JSX member tag ${tag} from ${imported.file}; only <Namespace.Export> of a namespace import is supported`);
+        if (!members.length && imported.name === '*') throw new Error(`Namespace import ${tag} from ${imported.file} cannot be a JSX tag`);
+        const adapter = findAdapter(project.adapters, imported.file, members[0] ?? imported.name);
+        if (!adapter) throw new Error(`External import ${imported.file} needs a preview adapter`);
+        return adapter;
+      }
       function renderJsx(jsx: ts.JsxElement | ts.JsxSelfClosingElement, mod: Module, env: Record<string, Value>, path: string): DesignNode[] {
         const opening = ts.isJsxElement(jsx) ? jsx.openingElement : jsx;
-        const tag = opening.tagName.getText(mod.source);
+        let tag = opening.tagName.getText(mod.source);
         if (SHELL_TAGS.has(tag) && (declarations || mod.source.fileName !== entry.layouts?.[0])) throw new Error(`<${tag}> is only supported as the root layout's document shell`);
-        const props: Record<string, Value> = {};
+        const adapter = /^[A-Z]/.test(tag) ? adapterFor(tag, mod) : null;
+        if (adapter?.kind === 'omit') return [];
+        // An adapter reads only className/class and its mapped props. Every other prop is ignored and never evaluated.
+        const mapped = adapter?.kind === 'element' ? adapter.attrs ?? {} : null;
+        const reads = (name: string) => !adapter || (mapped !== null && (name === 'className' || name === 'class' || Object.hasOwn(mapped, name)));
+        let props: Record<string, Value> = {};
         for (const attribute of opening.attributes.properties) {
-          if (!ts.isJsxAttribute(attribute)) throw new Error('JSX spreads need a preview choice');
+          if (!ts.isJsxAttribute(attribute)) { if (adapter?.kind === 'children') continue; throw new Error('JSX spreads need a preview choice'); }
           const name = attribute.name.getText(mod.source);
           if (['__proto__', 'constructor', 'prototype'].includes(name)) throw new Error('Reserved JSX attribute');
-          if (/^on[A-Z]/.test(name) || name === 'key' || name === 'ref') continue;
+          if (/^on[A-Z]/.test(name) || name === 'key' || name === 'ref' || !reads(name)) continue;
           if (!attribute.initializer) props[name] = true;
           else if (ts.isStringLiteral(attribute.initializer)) props[name] = jsxText(attribute.initializer.text);
           else if (ts.isJsxExpression(attribute.initializer) && attribute.initializer.expression) props[name] = value(attribute.initializer.expression, mod, env);
@@ -390,6 +416,14 @@ export function extractPages(project: SourceProject, entries: RouteEntry[], opti
           if (declarations && typeof props[name] === 'string' && /\{\{[A-Za-z_][A-Za-z0-9_]*\}\}/.test(props[name])) throw new Error('Literal placeholder syntax in shared components needs an adapter');
         }
         const nodes = ts.isJsxElement(jsx) ? children(jsx.children, mod, env, `${path}/children`) : [];
+        if (adapter?.kind === 'children') return nodes;
+        if (adapter?.kind === 'element') {
+          // A plain host element, never a shared component: class compiles as on any host tag, mapped props become attributes.
+          const host: Record<string, Value> = {};
+          for (const [name, item] of Object.entries(props)) host[name === 'className' || name === 'class' ? name : mapped![name]!] = item;
+          tag = adapter.tag;
+          props = host;
+        }
         if (/^[A-Z]/.test(tag)) {
           props['children'] = nodes;
           const imported = mod.imports.get(tag);

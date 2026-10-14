@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@hub/design-model": "workspace:*",
+    "@hub/protocol": "workspace:*",
     "@typescript/typescript6": "^6.0.0",
     "css-tree": "^3.2.1"
   },
