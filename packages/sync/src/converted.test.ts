@@ -91,8 +91,8 @@ describe('converted CSS Modules output', () => {
   });
 
   it('persists tokens in the sync baseline and reuses them unchanged', () => {
-    // Sync shares components, and a shared Chip with prop-driven classes needs an adapter; this test is about tokens.
-    const project = { files: { ...files, 'app/page.tsx': files['app/page.tsx']!.replace(/<Chip[^]*?<\/Chip>/, '') } };
+    // Sync shares components; the Chip, given className and children by its caller, is inlined (Ruling F).
+    const project = { files };
     const first = synchronizePages({ project, entries: [route], commit: 'c1' });
     if (!first.ok) throw new Error(JSON.stringify(first));
     expect(first.state.doc.tokens['space']).toEqual({ '0_5': '0.125rem', '2': '0.5rem', '3': '0.75rem', '4': '1rem' });

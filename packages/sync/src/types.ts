@@ -15,7 +15,17 @@ export type PreviewChoice = ({ kind: 'value'; value: string | number | boolean |
 export type PreviewChoices = Record<string, PreviewChoice>;
 /** A resolved `:root` token `--group-name` and the stylesheet whose declaration won the cascade. */
 export interface TokenSource { group: string; name: string; value: string; file: string }
-export interface ExtractOptions { sharedComponents?: boolean; choices?: PreviewChoices }
+/** Ruling F: why a source component is expanded in place instead of becoming a shared definition. */
+export type InlineReason = 'children' | 'prop-css';
+/** One per route per inlined component, never per occurrence. */
+export interface InlinedComponent { route: string; component: string; file: string; reason: InlineReason }
+/**
+ * A route's component keys (`<file>:<export>`): every one it rendered, those that arrived already inlined in
+ * `ExtractOptions.inline`, and every one it inlined. Incremental sync uses it to keep inlining consistent across routes.
+ */
+export interface RouteInlining { encountered: string[]; input: string[]; inline: { key: string; component: string; file: string; reason: InlineReason }[] }
+/** `inline` forces components, by key, to be inlined from the start; extraction adds every one it finds a reason for. */
+export interface ExtractOptions { sharedComponents?: boolean; choices?: PreviewChoices; inline?: Record<string, InlineReason> }
 export type ExtractResult =
-  | { ok: true; doc: DesignDoc; dependencies: Record<string, string[]>; tokens: Record<string, TokenSource[]> }
+  | { ok: true; doc: DesignDoc; dependencies: Record<string, string[]>; tokens: Record<string, TokenSource[]>; inlined: InlinedComponent[]; inlining: Record<string, RouteInlining> }
   | { ok: false; diagnostics: SourceDiagnostic[] };

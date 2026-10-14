@@ -1,6 +1,6 @@
 import { applyOp, canonicalStringify, decodeOpLog, encodeOpLog, parseDoc, serializeDoc, type DesignDoc, type Result, type Tokens } from '@hub/design-model';
 import { mergeTokens } from './tokens.js';
-import type { TokenSource } from './types.js';
+import type { RouteInlining, TokenSource } from './types.js';
 import type { SyncBaseline, SyncState } from './synchronize.js';
 import { choicesProblem } from './choices.js';
 import { createHash } from 'node:crypto';
@@ -10,6 +10,9 @@ const object = (value: unknown): value is Record<string, unknown> => value !== n
 const path = (value: unknown): value is string => typeof value === 'string' && !value.includes('\\') && !value.includes('\0') && value.split('/').every((part) => part !== '' && part !== '.' && part !== '..');
 function fail(error: string): Result<SyncState> { return { ok: false, error }; }
 const tokenSources = (value: unknown): value is TokenSource[] => Array.isArray(value) && value.every((token) => object(token) && Object.keys(token).length === 4 && ['group', 'name', 'value', 'file'].every((key) => typeof token[key] === 'string') && path(token['file']));
+const strings = (value: unknown): value is string[] => Array.isArray(value) && value.every((item) => typeof item === 'string');
+const routeInlining = (value: unknown): value is RouteInlining => object(value) && Object.keys(value).length === 3 && strings(value['encountered']) && strings(value['input'])
+  && Array.isArray(value['inline']) && value['inline'].every((item) => object(item) && Object.keys(item).length === 4 && ['key', 'component', 'file'].every((key) => typeof item[key] === 'string') && path(item['file']) && (item['reason'] === 'children' || item['reason'] === 'prop-css'));
 
 /** The document tokens a stored baseline defines, merged over its routes. */
 export function baselineTokens(baseline: SyncBaseline): Tokens {
@@ -82,6 +85,7 @@ export function parseSyncState(files: Record<string, string>): Result<SyncState>
         const conflict = mergeTokens(clean.tokens, tokenOrigins, value['tokens']);
         if (conflict) return fail(`Baseline ${route}: ${conflict.message}`);
       }
+      if (value['inlining'] !== undefined && !routeInlining(value['inlining'])) return fail(`Invalid baseline inlining for ${route}`);
       const parsed = parseDoc({ 'meta.json': canonicalStringify(clean.meta), 'tokens.json': '{}', [`pages/${page['id']}.json`]: canonicalStringify(page), ...componentFiles });
       if (!parsed.ok) return fail(`Baseline ${route}: ${parsed.error}`);
       Object.assign(clean.pages, parsed.value.pages);

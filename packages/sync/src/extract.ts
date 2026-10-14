@@ -2,7 +2,7 @@ import ts from '@typescript/typescript6';
 import { canonicalStringify, validateDoc, type ComponentDef, type DesignDoc, type DesignNode, type ElementNode, type InstanceNode, type NodeStyle, type StyleMap } from '@hub/design-model';
 import { applyStyles, CssError, parseStyles, winningTokens, type Rule, type Token } from './css.js';
 import { mergeTokens } from './tokens.js';
-import type { ExtractOptions, ExtractResult, PreviewNode, RouteEntry, SourceDiagnostic, SourceProject, TokenSource } from './types.js';
+import type { ExtractOptions, ExtractResult, InlinedComponent, InlineReason, PreviewNode, RouteEntry, RouteInlining, SourceDiagnostic, SourceProject, TokenSource } from './types.js';
 import { choiceKey, choicesProblem, PreviewRequired } from './choices.js';
 import { ADAPTERS_FILE, adaptersIssue, findAdapter, ignoresStyle, type Adapter } from './adapters.js';
 
@@ -82,13 +82,18 @@ class Lazy {
 type Env = Record<string, Value | Lazy>;
 const RESERVED_KEYS = ['__proto__', 'constructor', 'prototype'];
 
+/** CSS that depends on a shared definition's prop. Ruling F: the definition being rendered is inlined instead. */
+class PropDrivenCss extends Error { constructor() { super('Prop-driven CSS needs a saved preview adapter'); } }
+/** A component found to need inlining (Ruling F); the route is rendered again with it inlined. */
+class Inline extends Error { constructor(readonly key: string, readonly reason: InlineReason) { super(`Inline ${key} (${reason})`); } }
+
 /** Decision 1: `clsx` from the module "clsx" is the only built-in function, with the library's semantics. */
 function classList(item: unknown): string {
-  if (item instanceof PropValue) throw new Error('Prop-driven CSS needs a saved preview adapter');
+  if (item instanceof PropValue) throw new PropDrivenCss();
   if (typeof item === 'string' || typeof item === 'number') return String(item);
   if (Array.isArray(item)) return item.filter(Boolean).map(classList).filter(Boolean).join(' ');
   if (item && typeof item === 'object') return Object.entries(item).filter(([, on]) => {
-    if (on instanceof PropValue) throw new Error('Prop-driven CSS needs a saved preview adapter');
+    if (on instanceof PropValue) throw new PropDrivenCss();
     return Boolean(on);
   }).map(([name]) => name).join(' ');
   return '';
@@ -96,7 +101,37 @@ function classList(item: unknown): string {
 interface Module { source: ts.SourceFile; imports: Map<string, { file: string; name: string }>; styles: Map<string, string>; constants: Map<string, ts.Expression> }
 interface Occurrence { instance: InstanceNode; component: string; label: string }
 
+/** The name a source component is known by: its export name, or a default export's declared name, else its file. */
+function componentName(project: SourceProject, file: string, exportName: string): string {
+  if (exportName !== 'default') return exportName;
+  const source = ts.createSourceFile(file, project.files[file] ?? '', ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  for (const statement of source.statements) {
+    if (ts.isFunctionDeclaration(statement) && statement.name && statement.modifiers?.some((m) => m.kind === ts.SyntaxKind.DefaultKeyword)) return statement.name.text;
+    if (ts.isExportAssignment(statement) && ts.isIdentifier(statement.expression)) return statement.expression.text;
+  }
+  const parts = file.split('/');
+  const base = parts.at(-1)!.replace(/\.[jt]sx?$/, '');
+  return base === 'index' && parts.length > 1 ? parts.at(-2)! : base;
+}
+
+/**
+ * Ruling F: in shared mode, a component whose occurrences pass children or className/style, or whose definition has
+ * prop-driven CSS, is expanded in place at every occurrence. Inlining one component can expose another, so extraction
+ * repeats until no route rendered a component that became inlined after that route was extracted.
+ */
 export function extractPages(project: SourceProject, entries: RouteEntry[], options: ExtractOptions = {}): ExtractResult {
+  const inlineSet = new Map<string, InlineReason>();
+  for (const [key, reason] of Object.entries(options.inline ?? {})) {
+    if (!/^[^:]+:[^:]+$/.test(key) || (reason !== 'children' && reason !== 'prop-css')) return { ok: false, diagnostics: [{ file: '', message: `Invalid inline component ${key}` }] };
+    inlineSet.set(key, reason);
+  }
+  for (;;) {
+    const run = extractOnce(project, entries, options, inlineSet);
+    if (run) return run;
+  }
+}
+
+function extractOnce(project: SourceProject, entries: RouteEntry[], options: ExtractOptions, inlineSet: Map<string, InlineReason>): ExtractResult | null {
   const doc: DesignDoc = { meta: { version: 1, seq: 0 }, pages: {}, components: {}, tokens: {} };
   const dependencies: Record<string, string[]> = {};
   const routeTokens: Record<string, TokenSource[]> = {};
@@ -109,14 +144,23 @@ export function extractPages(project: SourceProject, entries: RouteEntry[], opti
   const sampleArrays = new WeakSet<unknown[]>();
   function markSamples(value: unknown): void { if (Array.isArray(value)) { sampleArrays.add(value); value.forEach(markSamples); } else if (value && typeof value === 'object') Object.values(value).forEach(markSamples); }
   for (const choice of Object.values(options.choices ?? {})) if (choice.kind === 'value') markSamples(choice.value);
-  const seenRoutes = new Set<string>();
+  const names = new Map<string, string>();
+  const nameOf = (key: string): string => {
+    let name = names.get(key);
+    if (name === undefined) { const at = key.lastIndexOf(':'); name = componentName(project, key.slice(0, at), key.slice(at + 1)); names.set(key, name); }
+    return name;
+  };
+  // What each route rendered, and which components were already inlined when it last rendered.
+  const rendered: { entry: RouteEntry; id: string; encountered: Set<string>; known: Set<string> }[] = [];
   // Styles each shared definition computed at its first occurrence, with the rules responsible, across routes.
   const adopted = new Map<string, Map<string, { style: NodeStyle; rules: Rule[] }>>();
-  for (const entry of [...entries].sort((a, b) => a.route < b.route ? -1 : a.route > b.route ? 1 : 0)) {
+  const sorted = [...entries].sort((a, b) => a.route < b.route ? -1 : a.route > b.route ? 1 : 0);
+  for (let index = 0; index < sorted.length; index++) {
+    const entry = sorted[index]!;
+    const encountered = new Set<string>(), known = new Set(inlineSet.keys());
     let currentFile = entry.file;
     try {
-      if (!entry.route.startsWith('/') || seenRoutes.has(entry.route)) throw new Error(`Invalid or duplicate route ${entry.route}`);
-      seenRoutes.add(entry.route);
+      if (!entry.route.startsWith('/') || (index > 0 && sorted[index - 1]!.route === entry.route)) throw new Error(`Invalid or duplicate route ${entry.route}`);
       if ([entry.file, ...(entry.layouts ?? [])].some((file) => file.startsWith('/') || file.split('/').some((part) => part === '..' || part === '.' || part === ''))) throw new Error('Source paths must be relative POSIX paths');
       const files = new Set<string>();
       const loadedStyles = new Set<string>();
@@ -550,9 +594,21 @@ export function extractPages(project: SourceProject, entries: RouteEntry[], opti
           props['children'] = nodes;
           const imported = mod.imports.get(tag);
           if (options.sharedComponents) {
-            if (nodes.length) throw new Error('Shared component children slots need a saved preview adapter');
             const file = imported ? resolveFile(project, mod.source.fileName, imported.file) : mod.source.fileName;
             const exportName = imported?.name ?? tag;
+            const key = `${file}:${exportName}`;
+            encountered.add(key);
+            if (!inlineSet.has(key)) {
+              // Ruling F: the model's instances have no slots or caller CSS yet, so such a component is expanded in place.
+              if (Object.hasOwn(props, 'className') || Object.hasOwn(props, 'style')) throw new Inline(key, 'prop-css');
+              if (nodes.length) throw new Inline(key, 'children');
+            }
+            if (inlineSet.has(key)) {
+              const expanded = renderComponent(file, exportName, props, `${path}/${tag}`);
+              const root = expanded[0];
+              if (expanded.length === 1 && root?.kind === 'element' && root.name === undefined) root.name = nameOf(key);
+              return expanded;
+            }
             const component = `C${stableId(`${file}:${exportName}`)}`;
             const passed: Record<string, string> = {};
             for (const [key, item] of Object.entries(props)) {
@@ -569,7 +625,9 @@ export function extractPages(project: SourceProject, entries: RouteEntry[], opti
               requiredProps = required;
               try {
                 const symbolic = Object.fromEntries(Object.keys(passed).map((key) => [key, new PropValue(key)]));
-                const rendered = renderComponent(file, exportName, { ...symbolic, children: [] }, 'definition');
+                let rendered: DesignNode[];
+                try { rendered = renderComponent(file, exportName, { ...symbolic, children: [] }, 'definition'); }
+                catch (error) { if (error instanceof PropDrivenCss) throw new Inline(key, 'prop-css'); throw error; }
                 if (rendered.length !== 1 || rendered[0]?.kind !== 'element') throw new Error('Shared components require one element root');
                 definitions[component] = { name: component, props: declared, root: rendered[0] };
                 requirements.set(component, required);
@@ -592,7 +650,7 @@ export function extractPages(project: SourceProject, entries: RouteEntry[], opti
         const id = nodeId(mod.source.fileName, path);
         for (const [name, literal] of Object.entries(props)) {
           if (literal instanceof PropValue) {
-            if (name === 'style' || name === 'className') throw new Error('Prop-driven CSS needs a saved preview adapter');
+            if (name === 'style' || name === 'className') throw new PropDrivenCss();
             attrs[name === 'htmlFor' ? 'for' : name] = `{{${literal.name}}}`;
             continue;
           }
@@ -600,6 +658,7 @@ export function extractPages(project: SourceProject, entries: RouteEntry[], opti
             if (!literal || typeof literal !== 'object' || Array.isArray(literal)) throw new Error('Inline style must be an object');
             const style: StyleMap = {};
             for (const [property, val] of Object.entries(literal)) {
+              if (val instanceof PropValue) throw new PropDrivenCss();
               if (typeof val !== 'string') throw new Error('Inline styles require explicit CSS string values');
               style[property.startsWith('--') ? property : property.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`)] = val;
             }
@@ -698,9 +757,26 @@ export function extractPages(project: SourceProject, entries: RouteEntry[], opti
       doc.pages[id] = { id, name: entry.route, route: entry.route, root };
       dependencies[id] = [...files].sort();
       routeTokens[id] = resolved;
-    } catch (error) { diagnostics.push({ file: error instanceof PreviewRequired ? error.gap.file : error instanceof CssError ? error.file : currentFile, message: error instanceof Error ? error.message : 'Extraction failed', ...(error instanceof PreviewRequired ? { gap: error.gap } : {}) }); }
+    } catch (error) {
+      // Render the route again with the component inlined; nothing route-wide was written yet.
+      if (error instanceof Inline && !inlineSet.has(error.key)) { inlineSet.set(error.key, error.reason); index--; continue; }
+      diagnostics.push({ file: error instanceof PreviewRequired ? error.gap.file : error instanceof CssError ? error.file : currentFile, message: error instanceof Error ? error.message : 'Extraction failed', ...(error instanceof PreviewRequired ? { gap: error.gap } : {}) });
+    }
+    rendered.push({ entry, id: `page-${stableId(entry.route)}`, encountered, known });
   }
+  // A route that rendered a component before it became inlined elsewhere must not keep it shared: start over.
+  if (rendered.some(({ encountered, known }) => [...encountered].some((key) => inlineSet.has(key) && !known.has(key)))) return null;
   if (diagnostics.length) return { ok: false, diagnostics };
   const invalid = validateDoc(doc);
-  return invalid ? { ok: false, diagnostics: [{ file: '', message: invalid }] } : { ok: true, doc, dependencies, tokens: routeTokens };
+  if (invalid) return { ok: false, diagnostics: [{ file: '', message: invalid }] };
+  const inlined: InlinedComponent[] = [];
+  const inlining: Record<string, RouteInlining> = {};
+  for (const { entry, id, encountered } of rendered) {
+    const keys = [...encountered].sort();
+    const routeInline = keys.filter((key) => inlineSet.has(key)).map((key) => ({ key, component: nameOf(key), file: key.slice(0, key.lastIndexOf(':')), reason: inlineSet.get(key)! }));
+    for (const { component, file, reason } of routeInline) inlined.push({ route: entry.route, component, file, reason });
+    inlining[id] = { encountered: keys, input: keys.filter((key) => Object.hasOwn(options.inline ?? {}, key)), inline: routeInline };
+  }
+  inlined.sort((a, b) => a.route !== b.route ? (a.route < b.route ? -1 : 1) : a.component !== b.component ? (a.component < b.component ? -1 : 1) : a.file < b.file ? -1 : a.file > b.file ? 1 : 0);
+  return { ok: true, doc, dependencies, tokens: routeTokens, inlined, inlining };
 }
