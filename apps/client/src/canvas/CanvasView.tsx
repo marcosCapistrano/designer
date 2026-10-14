@@ -197,7 +197,7 @@ export function CanvasView({ source, cache, onSelect, debug = false }: CanvasVie
   }, []);
 
   return (
-    <div ref={rootRef} data-testid="canvas" style="position:fixed;inset:0;touch-action:none;user-select:none">
+    <div ref={rootRef} data-testid="canvas" style="position:absolute;inset:0;touch-action:none;user-select:none">
       <canvas ref={baseRef} style="position:absolute;inset:0;width:100%;height:100%" />
       <canvas ref={overlayRef} style="position:absolute;inset:0;width:100%;height:100%;pointer-events:none" />
       {error !== null && (
