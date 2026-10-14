@@ -102,19 +102,29 @@ function expandElement(
 }
 
 // The expanded root takes the instance's id prefix, and its style is the component root's
-// style with the instance's style layered over it.
+// style with the instance's style layered over it. The instance's prop values are written in
+// the enclosing component's terms, so placeholders in them are resolved against scope.props first.
 function expandInstance(node: InstanceNode, scope: Scope): Result<ElementOut> {
   const def = ownValue(scope.doc.components, node.component);
   if (def === undefined) return { ok: false, error: `Component ${node.component} not found` };
   if (scope.components.includes(node.component)) {
     return { ok: false, error: `Component cycle at ${node.component}` };
   }
+  const passed: InstanceNode = {
+    ...node,
+    props: Object.fromEntries(
+      Object.entries(node.props).map(([name, value]): [string, string] => [
+        name,
+        substituteProps(value, scope.props),
+      ]),
+    ),
+  };
   return expandElement(
     def.root,
     {
       doc: scope.doc,
       prefix: `${scope.prefix}${node.id}/`,
-      props: resolveProps(def, node),
+      props: resolveProps(def, passed),
       components: [...scope.components, node.component],
     },
     layerStyles(node.style, def.root.style),

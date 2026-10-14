@@ -165,6 +165,16 @@ describe('setToken', () => {
     const error = rejected(sampleDoc(), { op: 'setToken', group, name, value: '1px' });
     expect(error).toContain('Invalid token name');
   });
+
+  test('rejects a token value that would break out of the CSS block', () => {
+    const error = rejected(sampleDoc(), { op: 'setToken', group: 'color', name: 'primary', value: 'red;}' });
+    expect(error).toContain('forbidden character');
+  });
+
+  test('rejects an empty token value', () => {
+    const error = rejected(sampleDoc(), { op: 'setToken', group: 'color', name: 'primary', value: '' });
+    expect(error).toContain('Invalid value');
+  });
 });
 
 describe('validation', () => {

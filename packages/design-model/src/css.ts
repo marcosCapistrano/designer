@@ -2,11 +2,17 @@ import * as csstree from 'css-tree';
 
 const KEBAB_CASE = /^-?-?[a-z][a-z0-9-]*$/;
 const VAR_CALL = /var\(/i;
+// Characters that could end a declaration or rule, or the <style> element that holds the CSS.
+const FORBIDDEN_VALUE_CHAR = /[{};<>\\\n\r\f]/;
 
 // Returns null when the declaration is valid, otherwise a reason naming the property.
 export function validateStyle(prop: string, value: string): string | null {
   if (!KEBAB_CASE.test(prop)) {
     return `Property "${prop}" must be kebab-case`;
+  }
+
+  if (FORBIDDEN_VALUE_CHAR.test(value)) {
+    return `Value for ${prop} contains a forbidden character`;
   }
 
   if (prop.startsWith('--')) {

@@ -190,6 +190,26 @@ describe('exportPage', () => {
     );
   });
 
+  test('an instance prop value takes placeholders from the enclosing component', () => {
+    // Page -> Layout -> Card: Card's title is written in Layout's terms, so {{pageTitle}} is Layout's prop.
+    const layout = comp(
+      'Layout',
+      el('l1', 'section', [inst('l2', 'Card', { title: '{{pageTitle}}' })]),
+      { pageTitle: 'Untitled' },
+    );
+    const card = comp('Card', el('c1', 'div', [txt('c2', '{{title}}')]), { title: 'Title' });
+    const doc = docWith(
+      el('p1', 'main', [inst('p9', 'Layout', { pageTitle: 'Home' }), inst('p10', 'Layout')]),
+      [layout, card],
+    );
+    expect(exportOk(doc).html).toBe(
+      '<main data-d-id="p1">' +
+        '<section data-d-id="p9/l1"><div data-d-id="p9/l2/c1">Home</div></section>' +
+        '<section data-d-id="p10/l1"><div data-d-id="p10/l2/c1">Untitled</div></section>' +
+        '</main>',
+    );
+  });
+
   test('the same component can be used twice side by side', () => {
     const doc = sample();
     find<ElementNode>(doc, 'n1').children.push(inst('n9', 'Card', { title: 'Second' }));
