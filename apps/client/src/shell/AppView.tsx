@@ -35,7 +35,8 @@ const DEPLOY_STYLE = 'margin:0;padding:16px;font-size:15px;color:#5f6368';
 
 export function AppView({ app, area, api, ws }: AppViewProps): JSX.Element {
   // Hooks run here, at the top level, so switching areas never changes their order.
-  const source = useMemo(() => new ServerTileSource(app, ws), [app]);
+  // `api` and `ws` are created once in App and never change, so the memos below depend on the app alone.
+  const source = useMemo(() => new ServerTileSource(app, ws, { onUnauthorized: () => api.reportUnauthorized() }), [app]);
   const cache = useMemo(() => createIdbCache(`hub-tiles-${app}`), [app]);
 
   return (
