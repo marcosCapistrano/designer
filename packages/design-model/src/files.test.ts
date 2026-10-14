@@ -243,4 +243,41 @@ describe('encodeOpLog and decodeOpLog', () => {
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.error).toContain('line 2');
   });
+
+  test('rejects a restore line, which is internal, and names its line', () => {
+    expect(decodeOpLog('{"op":"removeNode","node":"n2"}\n{"op":"restore","seq":9,"entries":[]}\n')).toEqual({
+      ok: false,
+      error: 'changes.jsonl line 2: restore ops are internal',
+    });
+  });
+
+  test('rejects a malformed line and names its line', () => {
+    expect(decodeOpLog('{"op":"setText","node":"n4","text":null}\n')).toEqual({
+      ok: false,
+      error: 'changes.jsonl line 1: Malformed op: setText.text must be a string',
+    });
+  });
+
+  test('a line that is not JSON is reported ahead of a malformed line before it', () => {
+    expect(decodeOpLog('{"op":"setText","node":"n4","text":null}\nnot json\n')).toEqual({
+      ok: false,
+      error: 'changes.jsonl line 2: not valid JSON',
+    });
+  });
 });
+
+describe('parseDoc depth', () => {
+  test('rejects a page tree deeper than 64 levels', () => {
+    const files = filesWithHomeRoot(chain(65));
+    expect(parseDoc(files)).toEqual({ ok: false, error: 'pages/home.json: Node tree deeper than 64 levels' });
+  });
+});
+
+// An element chain with `levels` nodes from the root down.
+function chain(levels: number): unknown {
+  let node: unknown = { id: `n${levels}`, kind: 'element', tag: 'p', attrs: {}, style: { base: {} }, children: [] };
+  for (let level = levels - 1; level >= 1; level--) {
+    node = { id: `n${level}`, kind: 'element', tag: 'p', attrs: {}, style: { base: {} }, children: [node] };
+  }
+  return node;
+}

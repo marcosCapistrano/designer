@@ -4,6 +4,7 @@ import type { AnyOpHandler, HandlerMap } from './ops/handler.js';
 import { pageHandlers } from './ops/pages.js';
 import { structureHandlers } from './ops/structure.js';
 import { ownValue } from './ops/util.js';
+import { opProblem } from './shape.js';
 import { nextSeq } from './tree.js';
 import type { DesignDoc, Op, Result, RestoreEntry } from './types.js';
 
@@ -20,14 +21,28 @@ function unknownOp(op: Op): string {
   return `Unknown op "${op.op}"`;
 }
 
+// Shape is checked first, so no handler sees a malformed op or a restore op.
 export function validateOp(doc: DesignDoc, op: Op): string | null {
-  const handler = handlerFor(op);
-  return handler === null ? unknownOp(op) : handler.validate(doc, op);
+  return opProblem(op) ?? validateOpInternal(doc, op);
 }
 
 // Pure: the input doc is never changed. The inverse is a restore op that puts back every
 // page, component and token group the op changed, and the seq the doc had before the op.
+// Restore ops are refused: only undo applies them, through applyOpInternal.
 export function applyOp(doc: DesignDoc, op: Op): Result<{ doc: DesignDoc; inverse: RestoreOp }> {
+  const problem = opProblem(op);
+  if (problem !== null) return { ok: false, error: problem };
+  return applyOpInternal(doc, op);
+}
+
+// The validator and applier without the shape check. session.ts checks its ops first, and undo and redo
+// use these to run restore ops.
+export function validateOpInternal(doc: DesignDoc, op: Op): string | null {
+  const handler = handlerFor(op);
+  return handler === null ? unknownOp(op) : handler.validate(doc, op);
+}
+
+export function applyOpInternal(doc: DesignDoc, op: Op): Result<{ doc: DesignDoc; inverse: RestoreOp }> {
   const handler = handlerFor(op);
   if (handler === null) return { ok: false, error: unknownOp(op) };
 

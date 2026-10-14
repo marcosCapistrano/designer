@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'vitest';
+import { applyOpInternal } from './apply.js';
 import { canonicalStringify } from './canonical.js';
 import { sampleDoc } from './fixtures.js';
 import { findNode } from './tree.js';
@@ -20,6 +21,17 @@ function canon(doc: DesignDoc): string {
 function okDoc(result: BatchResult): DesignDoc {
   if (!result.ok) throw new Error(`expected ok, got op ${result.index}: ${result.error}`);
   return result.doc;
+}
+
+// Applies a batch's inverse, which is made of restore ops, through the internal path that undo uses.
+function undoneBy(doc: DesignDoc, inverse: Op[]): DesignDoc {
+  let current = doc;
+  for (const op of inverse) {
+    const result = applyOpInternal(current, op);
+    if (!result.ok) throw new Error(result.error);
+    current = result.value.doc;
+  }
+  return current;
 }
 
 // Applies ops to a doc with the batch function, for building the starting state of a test.
@@ -47,24 +59,30 @@ describe('applyBatch', () => {
     const doc = sampleDoc();
     const result = applyBatch(doc, [PAD_N3, TEXT_N4, NAME_N2]);
     if (!result.ok) throw new Error(result.error);
-    const undone = applyBatch(result.value.doc, result.value.inverse);
-    if (!undone.ok) throw new Error(undone.error);
-    expect(canon(undone.value.doc)).toBe(canon(doc));
+    expect(canon(undoneBy(result.value.doc, result.value.inverse))).toBe(canon(doc));
   });
 
   test('inverse is in undo order when two ops touch the same page', () => {
     const doc = sampleDoc();
     const result = applyBatch(doc, [PAD_N3, PAD_N3_AGAIN]);
     if (!result.ok) throw new Error(result.error);
-    const undone = applyBatch(result.value.doc, result.value.inverse);
-    if (!undone.ok) throw new Error(undone.error);
-    expect(canon(undone.value.doc)).toBe(canon(doc));
+    expect(canon(undoneBy(result.value.doc, result.value.inverse))).toBe(canon(doc));
   });
 
-  test('accepts restore ops, which undo relies on', () => {
+  test('refuses restore ops, which only undo may apply', () => {
     const restore: Op = { op: 'restore', seq: 9, entries: [] };
-    const result = applyBatch(sampleDoc(), [restore]);
-    expect(result.ok).toBe(true);
+    expect(applyBatch(sampleDoc(), [restore])).toEqual({
+      ok: false,
+      error: 'op 0: restore ops are internal',
+    });
+  });
+
+  test('refuses a malformed op and names its index', () => {
+    const badText = { op: 'setText', node: 'n4', text: 5 } as unknown as Op;
+    expect(applyBatch(sampleDoc(), [PAD_N3, badText])).toEqual({
+      ok: false,
+      error: 'op 1: Malformed op: setText.text must be a string',
+    });
   });
 
   test('an empty batch returns an equal doc and no inverse', () => {
@@ -260,5 +278,35 @@ describe('DesignSession', () => {
     });
     expect(canon(session.doc)).toBe(canon(sampleDoc()));
     expect(session.changelist()).toEqual([]);
+  });
+
+  test('undo and redo work for a token group named like an Object.prototype member', () => {
+    const session = new DesignSession(sampleDoc());
+    const op: Op = { op: 'setToken', group: 'constructor', name: 'x', value: '1' };
+    okDoc(session.apply([op]));
+    const after = canon(session.doc);
+    expect(session.undo()).toBe(true);
+    expect(canon(session.doc)).toBe(canon(sampleDoc()));
+    expect(session.redo()).toBe(true);
+    expect(canon(session.doc)).toBe(after);
+  });
+
+  test.each(['apply', 'preview'] as const)('%s rejects a malformed op and changes nothing', (method) => {
+    const session = new DesignSession(sampleDoc());
+    const badNode = { op: 'insertNode', parent: 'n2', index: 0, node: { id: 'n9', kind: 'banana' } } as unknown as Op;
+    expect(session[method]([PAD_N3, badNode])).toEqual({
+      ok: false,
+      index: 1,
+      error: 'Malformed op: insertNode.node: node n9: kind must be element, text or instance',
+    });
+    expect(canon(session.doc)).toBe(canon(sampleDoc()));
+    expect(session.changelist()).toEqual([]);
+  });
+
+});
+
+describe('classifyBatch with a malformed op', () => {
+  test('a null op needs preview and does not throw', () => {
+    expect(classifyBatch(sampleDoc(), [null as unknown as Op])).toBe('preview');
   });
 });

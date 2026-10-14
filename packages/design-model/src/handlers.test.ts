@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest';
-import { validateOp } from './apply.js';
+import { validateOp, validateOpInternal } from './apply.js';
 import { sampleDoc } from './fixtures.js';
 import type { Op } from './types.js';
 
@@ -44,6 +44,11 @@ const SAMPLES: { [K in HandledKind]: Extract<Op, { op: K }> } = {
 describe('handler coverage', () => {
   test.each(Object.keys(SAMPLES) as HandledKind[])('%s has a handler', (kind) => {
     // An op with no handler is reported as Unknown op. A handled kind's sample is valid.
-    expect(validateOp(sampleDoc(), SAMPLES[kind])).toBeNull();
+    // restore is internal, so its sample goes through the internal validator.
+    const sample = SAMPLES[kind];
+    const problem = sample.op === 'restore'
+      ? validateOpInternal(sampleDoc(), sample)
+      : validateOp(sampleDoc(), sample);
+    expect(problem).toBeNull();
   });
 });

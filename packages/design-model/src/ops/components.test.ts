@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest';
-import { applyOp } from '../apply.js';
+import { applyOp, applyOpInternal } from '../apply.js';
 import { canonicalStringify } from '../canonical.js';
 import { sampleDoc } from '../fixtures.js';
 import { findNode } from '../tree.js';
@@ -7,6 +7,13 @@ import type { DesignDoc, DesignNode, ElementNode, Op } from '../types.js';
 
 function applied(doc: DesignDoc, op: Op): DesignDoc {
   const result = applyOp(doc, op);
+  if (!result.ok) throw new Error(`expected ok, got: ${result.error}`);
+  return result.value.doc;
+}
+
+// Undo applies a restore op, which only the internal path accepts.
+function undoneBy(doc: DesignDoc, inverse: Op): DesignDoc {
+  const result = applyOpInternal(doc, inverse);
   if (!result.ok) throw new Error(`expected ok, got: ${result.error}`);
   return result.value.doc;
 }
@@ -109,7 +116,7 @@ describe('extractComponent', () => {
       op: 'extractComponent', node: 'n2', component: 'SiteHeader', instanceId: 'n9',
     });
     if (!result.ok) throw new Error(result.error);
-    expect(content(applied(result.value.doc, result.value.inverse))).toEqual(content(doc));
+    expect(content(undoneBy(result.value.doc, result.value.inverse))).toEqual(content(doc));
   });
 });
 
@@ -248,7 +255,7 @@ describe('detachInstance', () => {
     const doc = sampleDoc();
     const result = applyOp(doc, { op: 'detachInstance', node: 'n5', idMap: cardIds });
     if (!result.ok) throw new Error(result.error);
-    expect(content(applied(result.value.doc, result.value.inverse))).toEqual(content(doc));
+    expect(content(undoneBy(result.value.doc, result.value.inverse))).toEqual(content(doc));
   });
 });
 

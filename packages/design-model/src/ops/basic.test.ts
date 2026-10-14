@@ -38,7 +38,7 @@ describe('setAttr values', () => {
 
   test('rejects a value that is not a string, as decoded from an op log', () => {
     expect(rejected(sampleDoc(), { op: 'setAttr', node: 'n3', name: 'title', value: 5 as unknown as string }))
-      .toBe('Attribute title must have a string value');
+      .toBe('Malformed op: setAttr.value must be a string or null');
   });
 
   test('rejects srcdoc', () => {
