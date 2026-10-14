@@ -57,4 +57,9 @@ describe('validateStyle', () => {
   ])('rejects a forbidden character in %s: %j', (prop, value) => {
     expect(validateStyle(prop, value)).toContain('forbidden character');
   });
+
+  test('rejects CSS comment markers in a value', () => {
+    expect(validateStyle('padding', '1px /*')).toContain('forbidden character');
+    expect(validateStyle('--x', 'a */ b')).toContain('forbidden character');
+  });
 });
