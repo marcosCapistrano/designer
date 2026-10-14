@@ -2,7 +2,7 @@ import { describe, expect, test } from 'vitest';
 import { applyOp } from '../apply.js';
 import { canonicalStringify } from '../canonical.js';
 import { sampleDoc } from '../fixtures.js';
-import { findNode } from '../tree.js';
+import { allocIds, findNode } from '../tree.js';
 import type { DesignDoc, DesignNode, ElementNode, Op } from '../types.js';
 import { validateSubtree } from './structure.js';
 
@@ -118,6 +118,60 @@ describe('insertNode', () => {
       node: { id: 'n9', kind: 'instance', component: 'Missing', props: {}, style: { base: {} } },
     })).toBe('Component Missing not found');
   });
+
+  test.each(['', 'a b', 'x"y', 'n5/n6', 'n9007199254740993'])('rejects the node id %j', (id) => {
+    expect(rejected(sampleDoc(), {
+      op: 'insertNode', parent: 'n2', index: 0, node: text(id),
+    })).toBe(`Invalid node id "${id}"`);
+  });
+
+  test('accepts the id n999999999999999, and allocIds after it returns distinct safe ids', () => {
+    const next = applied(sampleDoc(), {
+      op: 'insertNode', parent: 'n2', index: 0, node: text('n999999999999999'),
+    });
+    const ids = allocIds(next, 2);
+    expect(new Set(ids).size).toBe(2);
+    for (const id of ids) expect(Number.isSafeInteger(Number(id.slice(1)))).toBe(true);
+  });
+
+  test.each(['script', 'style', 'iframe'])('rejects the denied tag %s', (tag) => {
+    expect(rejected(sampleDoc(), {
+      op: 'insertNode', parent: 'n2', index: 0, node: element('n9', [], tag),
+    })).toBe(`Tag "${tag}" is not allowed`);
+  });
+
+  test('rejects an unsafe URL attribute in the subtree', () => {
+    const node: ElementNode = { ...element('n9'), attrs: { href: 'javascript:alert(1)' } };
+    expect(rejected(sampleDoc(), { op: 'insertNode', parent: 'n2', index: 0, node }))
+      .toBe('Unsafe URL in attribute href');
+  });
+
+  test('rejects a srcdoc attribute in the subtree', () => {
+    const node: ElementNode = { ...element('n9'), attrs: { srcdoc: '<p>x</p>' } };
+    expect(rejected(sampleDoc(), { op: 'insertNode', parent: 'n2', index: 0, node }))
+      .toBe('Attribute srcdoc is not allowed');
+  });
+
+  test('rejects an insert into an img', () => {
+    const withImg = applied(sampleDoc(), {
+      op: 'insertNode', parent: 'n2', index: 0, node: element('n9', [], 'img'),
+    });
+    expect(rejected(withImg, { op: 'insertNode', parent: 'n9', index: 0, node: text('n10') }))
+      .toBe('Void element img cannot have children');
+  });
+
+  test('rejects an inserted img that has children', () => {
+    expect(rejected(sampleDoc(), {
+      op: 'insertNode', parent: 'n2', index: 0, node: element('n9', [text('n10')], 'img'),
+    })).toBe('Void element img cannot have children');
+  });
+
+  test('rejects an instance prop the component does not declare', () => {
+    expect(rejected(sampleDoc(), {
+      op: 'insertNode', parent: 'n1', index: 0,
+      node: { id: 'n9', kind: 'instance', component: 'Card', props: { subtitle: 'x' }, style: { base: {} } },
+    })).toBe('Component Card has no prop "subtitle"');
+  });
 });
 
 describe('removeNode', () => {
@@ -162,6 +216,14 @@ describe('moveNode', () => {
     expect(rejected(sampleDoc(), {
       op: 'moveNode', node: 'n2', parent: 'n3', index: 0,
     })).toContain('descendant');
+  });
+
+  test('rejects a move into an img', () => {
+    const withImg = applied(sampleDoc(), {
+      op: 'insertNode', parent: 'n2', index: 0, node: element('n9', [], 'img'),
+    });
+    expect(rejected(withImg, { op: 'moveNode', node: 'n5', parent: 'n9', index: 0 }))
+      .toBe('Void element img cannot have children');
   });
 
   test('rejects a move into itself', () => {
@@ -243,6 +305,12 @@ describe('wrapNodes', () => {
     expect(rejected(sampleDoc(), {
       op: 'wrapNodes', nodes: ['n5'], wrapper: element('n9', [text('n10')]),
     })).toBe('wrapper must be an element with no children');
+  });
+
+  test('rejects a void wrapper', () => {
+    expect(rejected(sampleDoc(), {
+      op: 'wrapNodes', nodes: ['n5'], wrapper: element('n9', [], 'img'),
+    })).toBe('Void element img cannot have children');
   });
 
   test('rejects a wrapper id that is already in use', () => {

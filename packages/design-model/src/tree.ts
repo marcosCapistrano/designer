@@ -93,8 +93,13 @@ export function nextSeq(doc: DesignDoc): number {
   return next;
 }
 
+const MAX_ALLOC = 1000;
+
 // Does not change doc. The caller stores the new seq when it applies the op.
 export function allocIds(doc: DesignDoc, count: number): string[] {
+  if (!Number.isInteger(count) || count < 0 || count > MAX_ALLOC) {
+    throw new RangeError(`allocIds count must be an integer from 0 to ${MAX_ALLOC}`);
+  }
   const start = nextSeq(doc);
   return Array.from({ length: count }, (_, i) => `n${start + i}`);
 }
