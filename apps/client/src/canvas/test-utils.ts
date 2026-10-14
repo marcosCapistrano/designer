@@ -24,9 +24,17 @@ const METHODS = [
   'drawImage',
 ] as const;
 
-/** A recording stand-in for CanvasRenderingContext2D, for painter unit tests. */
-export function fakeCtx(width = 800, height = 600): { ctx: CanvasRenderingContext2D; calls: Call[] } {
+/**
+ * A recording stand-in for CanvasRenderingContext2D, for painter unit tests.
+ * `saveDepth()` is the number of save() calls not yet matched by restore();
+ * a restore() at depth 0 is ignored, as on a real canvas.
+ */
+export function fakeCtx(
+  width = 800,
+  height = 600,
+): { ctx: CanvasRenderingContext2D; calls: Call[]; saveDepth: () => number } {
   const calls: Call[] = [];
+  let depth = 0;
   const ctx = {
     canvas: { width, height },
     fillStyle: '#000000' as string,
@@ -47,9 +55,15 @@ export function fakeCtx(width = 800, height = 600): { ctx: CanvasRenderingContex
         lw: ctx.lineWidth,
         smooth: ctx.imageSmoothingEnabled,
       });
+      if (m === 'save') depth++;
+      if (m === 'restore') depth = Math.max(0, depth - 1);
     };
   }
-  return { ctx: Object.assign(ctx, methods) as unknown as CanvasRenderingContext2D, calls };
+  return {
+    ctx: Object.assign(ctx, methods) as unknown as CanvasRenderingContext2D,
+    calls,
+    saveDepth: () => depth,
+  };
 }
 
 /** A tile image whose identity is its `id`, so draw calls can be asserted by name. */

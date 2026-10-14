@@ -164,53 +164,58 @@ export class BasePainter {
     const { ctx } = this;
     const { cam, s, dpr, width, frames, zoom } = pass;
     ctx.save();
-    ctx.beginPath();
-    ctx.rect(r.x, r.y, r.w, r.h);
-    ctx.clip();
-    ctx.imageSmoothingEnabled = pass.smoothing;
-    ctx.fillStyle = COLORS.bg;
-    ctx.fillRect(r.x, r.y, r.w, r.h);
+    // restore() runs even when a tile lookup or draw throws, so the region clip
+    // never outlives this paint on the canvas state stack.
+    try {
+      ctx.beginPath();
+      ctx.rect(r.x, r.y, r.w, r.h);
+      ctx.clip();
+      ctx.imageSmoothingEnabled = pass.smoothing;
+      ctx.fillStyle = COLORS.bg;
+      ctx.fillRect(r.x, r.y, r.w, r.h);
 
-    const area: Rect = { x: cam.x + r.x / s, y: cam.y + r.y / s, w: r.w / s, h: r.h / s };
-    for (const frame of frames) {
-      const fr = worldToDevice(frame, cam, dpr);
-      if (rectsIntersect(fr, r)) {
-        ctx.fillStyle = COLORS.frame;
-        ctx.fillRect(fr.x, fr.y, fr.w, fr.h);
-        for (const ref of frameTiles(frame, zoom, area)) {
-          const d = worldToDevice(ref.world, cam, dpr);
-          const image = this.tiles.get(ref.key, ref.x, ref.y);
-          if (image !== undefined) {
-            ctx.drawImage(image, d.x, d.y, d.w, d.h);
-            counts.tilesDrawn++;
-            continue;
-          }
-          counts.missing++;
-          for (const z of ZOOMS_COARSE_FIRST) {
-            const fb = fallbackFor(frame, ref, z);
-            if (fb === null) continue;
-            const coarse = this.tiles.get(fb.ref.key, fb.ref.x, fb.ref.y);
-            if (coarse !== undefined) {
-              ctx.drawImage(coarse, fb.sx, fb.sy, fb.sw, fb.sh, d.x, d.y, d.w, d.h);
-              break;
+      const area: Rect = { x: cam.x + r.x / s, y: cam.y + r.y / s, w: r.w / s, h: r.h / s };
+      for (const frame of frames) {
+        const fr = worldToDevice(frame, cam, dpr);
+        if (rectsIntersect(fr, r)) {
+          ctx.fillStyle = COLORS.frame;
+          ctx.fillRect(fr.x, fr.y, fr.w, fr.h);
+          for (const ref of frameTiles(frame, zoom, area)) {
+            const d = worldToDevice(ref.world, cam, dpr);
+            const image = this.tiles.get(ref.key, ref.x, ref.y);
+            if (image !== undefined) {
+              ctx.drawImage(image, d.x, d.y, d.w, d.h);
+              counts.tilesDrawn++;
+              continue;
+            }
+            counts.missing++;
+            for (const z of ZOOMS_COARSE_FIRST) {
+              const fb = fallbackFor(frame, ref, z);
+              if (fb === null) continue;
+              const coarse = this.tiles.get(fb.ref.key, fb.ref.x, fb.ref.y);
+              if (coarse !== undefined) {
+                ctx.drawImage(coarse, fb.sx, fb.sy, fb.sw, fb.sh, d.x, d.y, d.w, d.h);
+                break;
+              }
             }
           }
+          if (frame.render?.error) {
+            ctx.fillStyle = COLORS.badge;
+            ctx.fillRect(fr.x + fr.w - 24 * dpr, fr.y + 8 * dpr, 16 * dpr, 16 * dpr);
+          }
         }
-        if (frame.render?.error) {
-          ctx.fillStyle = COLORS.badge;
-          ctx.fillRect(fr.x + fr.w - 24 * dpr, fr.y + 8 * dpr, 16 * dpr, 16 * dpr);
+        // The label text may run past the frame's right edge, so its cull band
+        // extends to the canvas edge rather than the frame width.
+        const labelBand: Rect = { x: fr.x, y: fr.y - 20 * dpr, w: Math.max(0, width - fr.x), h: 20 * dpr };
+        if (cam.scale >= LABEL_MIN_SCALE && rectsIntersect(labelBand, r)) {
+          ctx.fillStyle = COLORS.label;
+          ctx.font = `${12 * dpr}px system-ui, sans-serif`;
+          ctx.textBaseline = 'bottom';
+          ctx.fillText(`${frame.name} · ${DEVICE_LABEL[frame.device]}`, fr.x, fr.y - 6 * dpr);
         }
       }
-      // The label text may run past the frame's right edge, so its cull band
-      // extends to the canvas edge rather than the frame width.
-      const labelBand: Rect = { x: fr.x, y: fr.y - 20 * dpr, w: Math.max(0, width - fr.x), h: 20 * dpr };
-      if (cam.scale >= LABEL_MIN_SCALE && rectsIntersect(labelBand, r)) {
-        ctx.fillStyle = COLORS.label;
-        ctx.font = `${12 * dpr}px system-ui, sans-serif`;
-        ctx.textBaseline = 'bottom';
-        ctx.fillText(`${frame.name} · ${DEVICE_LABEL[frame.device]}`, fr.x, fr.y - 6 * dpr);
-      }
+    } finally {
+      ctx.restore();
     }
-    ctx.restore();
   }
 }
