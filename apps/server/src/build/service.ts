@@ -1,5 +1,6 @@
 import { type BuildState, type BuildTask, type BuildTaskStatus, isOpenTask } from '@hub/protocol';
 import type { AppEntry } from '../apps/registry.js';
+import { errorText } from '../errors.js';
 import type { GitRepo } from '../git/git.js';
 import { BuildError, mergeTask, pollCi, refreshCi } from './ci.js';
 import { addBuildMessage, type BuildDeps, publishTask } from './deps.js';
@@ -15,10 +16,6 @@ const RETRY_FALLBACK_PROMPT = 'Continue where you left off.';
 
 /** Statuses a task holds only while a run is working on it. */
 const IN_FLIGHT: readonly BuildTaskStatus[] = ['working', 'verifying', 'pushing'];
-
-function errorText(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
-}
 
 /** One app's active run: its abort handle and a promise that settles once the run has ended. */
 interface Run {

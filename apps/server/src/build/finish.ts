@@ -1,5 +1,6 @@
 import type { BuildMessageKind, BuildTask } from '@hub/protocol';
 import type { AppManifest } from '@hub/protocol/manifest';
+import { errorText } from '../errors.js';
 import type { PrInfo } from '../github/github.js';
 import { type BuildCommand, type CommandResult, resolveBuildCommands } from './commands.js';
 import { addBuildMessage, type BuildDeps, publishTask, repoRefFor } from './deps.js';
@@ -20,10 +21,6 @@ export interface FinishInput {
   dir: string;
   manifest: AppManifest | null;
   signal: AbortSignal;
-}
-
-function errorText(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
 }
 
 /** A branch name as the guard compares it: no refs/heads/ or heads/ prefix, and case ignored. */

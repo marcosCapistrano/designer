@@ -15,7 +15,8 @@ import { openDb } from './db.js';
 import { openRepo } from './git/git.js';
 import { makeTestRepo, TEST_IDENTITY } from './git/test-repo.js';
 import { FakeGitHub } from './github/fake.js';
-import { type HubOptions, type RunningHub, startHub } from './server.js';
+import type { CiStatus, RepoRef } from './github/github.js';
+import { type HubOptions, hubUrl, type RunningHub, startHub } from './server.js';
 
 const PASS = 'correct horse battery staple';
 const HASH = hashPassphrase(PASS, Buffer.alloc(16, 1));
@@ -264,6 +265,78 @@ describe('startHub', () => {
 
   it('a bind address it cannot use fails startup', async () => {
     await expect(start({ config: configFor({ bind: '203.0.113.250' }) })).rejects.toBeInstanceOf(Error);
+  });
+});
+
+describe('hubUrl', () => {
+  it('brackets an IPv6 address and leaves a name or IPv4 address alone', () => {
+    expect(hubUrl('127.0.0.1', 8080)).toBe('http://127.0.0.1:8080');
+    expect(hubUrl('localhost', 8080)).toBe('http://localhost:8080');
+    expect(hubUrl('::1', 8080)).toBe('http://[::1]:8080');
+    expect(hubUrl('[::1]', 8080)).toBe('http://[::1]:8080');
+  });
+});
+
+describe('startHub teardown', () => {
+  it('a failure after listening takes the port down again', async () => {
+    const port = await freePort();
+    const log = (line: string): void => {
+      if (line.startsWith('Hub listening')) throw new Error('log sink broke');
+    };
+
+    await expect(start({ config: configFor({ port }), log })).rejects.toThrow('log sink broke');
+
+    await expect(fetch(`http://127.0.0.1:${port}/api/health`)).rejects.toThrow();
+  });
+
+  it('close waits for a CI poll that is mid-way, so its write lands before the database closes', async () => {
+    let entered = false;
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let armed = false;
+    class GatedGitHub extends FakeGitHub {
+      override async checkStatus(r: RepoRef, sha: string): Promise<CiStatus> {
+        if (armed) {
+          entered = true;
+          await gate;
+          this.setChecks(sha, [{ name: 'ci', status: 'completed', conclusion: 'success' }]);
+        }
+        return super.checkStatus(r, sha);
+      }
+    }
+    const hub = await start({
+      github: new GatedGitHub({ autoGreenAfter: 1 }),
+      ciPollMs: 30,
+      runner: new FakeClaudeRunner([
+        [
+          (o) => {
+            writeFileSync(join(o.cwd, 'NOTES.md'), 'notes\n');
+          },
+          { type: 'done', sessionId: 's', ok: true },
+        ],
+      ]),
+    });
+    const cookie = await login(hub.url);
+    const seen = collect(await opened(connect(hub.url, { cookie })));
+    expect((await sendMessage(hub.url, cookie, 'Write notes')).status).toBe(202);
+    await expect
+      .poll(() => seen.some((m) => m.type === 'build.task' && m.task.status === 'review'), { timeout: 20_000 })
+      .toBe(true);
+    armed = true;
+    await expect.poll(() => entered, { timeout: 20_000 }).toBe(true);
+
+    const closing = hub.close();
+    setTimeout(release, 150);
+    await closing;
+
+    const db = openDb(join(dataDir, 'hub.sqlite'));
+    try {
+      expect(new BuildStore(db, () => START_MS).latestTask('demo')?.ci).toBe('success');
+    } finally {
+      db.close();
+    }
   });
 });
 

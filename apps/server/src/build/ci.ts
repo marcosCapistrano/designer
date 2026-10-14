@@ -1,4 +1,5 @@
 import type { BuildTask, CiState } from '@hub/protocol';
+import { errorText } from '../errors.js';
 import {
   type CiStatus,
   FAILED_CONCLUSIONS,
@@ -102,10 +103,6 @@ function recordClosed(deps: BuildDeps, task: BuildTask, n: number): BuildTask {
   addBuildMessage(deps, task.app, task.id, 'status', `Pull request #${n} was closed.`);
   publishTask(deps, closed, false);
   return closed;
-}
-
-function errorText(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
 }
 
 /**

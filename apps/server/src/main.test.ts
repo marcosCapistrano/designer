@@ -14,10 +14,15 @@ const HASH = hashPassphrase('correct horse battery staple', Buffer.alloc(16, 1))
 const WAIT_MS = 20_000;
 const POLL_MS = 25;
 
-/** Throws from a SIGUSR2 handler and rejects from a SIGHUP handler, so a test can trigger either crash. */
+/**
+ * Throws from a SIGUSR2 handler and rejects from a SIGHUP handler, so a test can trigger either crash.
+ * SIGWINCH throws a value that String() cannot print; SIGCONT throws a plain object that carries a message.
+ */
 const CRASH_HOOKS = `data:text/javascript,${encodeURIComponent(`
 process.on('SIGUSR2', () => { throw new Error('boom token=abc\\nsecond line'); });
 process.on('SIGHUP', () => { Promise.reject(new Error('refused ghp_secret')); });
+process.on('SIGWINCH', () => { throw Object.create(null); });
+process.on('SIGCONT', () => { throw { message: 'plain object message' }; });
 `)}`;
 
 interface Launched {
@@ -147,6 +152,36 @@ describe('main', () => {
     expect(await hub.exited).toBe(1);
     expect(hub.output()).toContain('Uncaught exception: "boom token=abc\\nsecond line"');
     expect(hub.output()).not.toMatch(/\n\s+at /);
+  });
+
+  it('a thrown value that cannot be printed still gets its one log line and exit 1', async () => {
+    const hub = launch(await validEnv(), [CRASH_HOOKS]);
+    await hub.waitFor(/Hub listening on/);
+
+    hub.child.kill('SIGWINCH');
+
+    expect(await hub.exited).toBe(1);
+    expect(hub.output()).toContain('Uncaught exception: "Unprintable error"');
+    expect(hub.output()).not.toMatch(/\n\s+at /);
+  });
+
+  it('a thrown plain object is logged by its message', async () => {
+    const hub = launch(await validEnv(), [CRASH_HOOKS]);
+    await hub.waitFor(/Hub listening on/);
+
+    hub.child.kill('SIGCONT');
+
+    expect(await hub.exited).toBe(1);
+    expect(hub.output()).toContain('Uncaught exception: "plain object message"');
+  });
+
+  it('refuses the other spellings of an all-interface bind too', async () => {
+    for (const bind of ['0', '::0']) {
+      const hub = launch({ ...(await validEnv()), HUB_BIND: bind });
+
+      expect(await hub.exited, bind).toBe(1);
+      expect(hub.output(), bind).toContain('HUB_BIND must be one specific address');
+    }
   });
 
   it('an unhandled rejection is logged as one line and exits 1', async () => {
