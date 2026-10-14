@@ -37,6 +37,7 @@ interface Prepared {
 export class BuildService {
   private readonly deps: BuildDeps;
   private readonly runs = new Map<string, Run>();
+  private readonly checkoutUses = new Map<string, Promise<void>>();
   /** CI refreshes in flight, by task id, so concurrent callers (state, send, poll) share one read. */
   private readonly refreshes = new Map<number, Promise<BuildTask | null>>();
   /** The poll pass in flight; a second pass joins it instead of overlapping. */
@@ -48,6 +49,18 @@ export class BuildService {
 
   isRunning(app: string): boolean {
     return this.runs.has(app);
+  }
+
+  private isBusy(app: string): boolean { return this.isRunning(app) || this.checkoutUses.has(app); }
+
+  /** Reserves the checkout synchronously against Build and queued retries before any await. */
+  async withCheckout<T>(app: string, action: () => Promise<T>): Promise<T> {
+    if (this.isBusy(app)) throw new BuildError('This app is busy. Wait for its current work to finish.', 409);
+    let release!: () => void;
+    const ended = new Promise<void>((resolve) => { release = resolve; });
+    this.checkoutUses.set(app, ended);
+    try { return await action(); }
+    finally { this.checkoutUses.delete(app); release(); }
   }
 
   latestStatus(app: string): BuildTaskStatus | null {
@@ -77,6 +90,7 @@ export class BuildService {
     }
     const entry = await this.deps.registry.get(app);
     if (entry === null) throw new BuildError('Unknown app', 404);
+    if (this.checkoutUses.has(app)) throw new BuildError('This app is importing or rendering. Wait for it to finish.', 409);
     if (this.isRunning(app)) {
       throw new BuildError('Claude is already working on this app. Wait or tap Stop.', 409);
     }
@@ -112,6 +126,7 @@ export class BuildService {
   async close(app: string, taskId: number): Promise<BuildTask> {
     const task = this.deps.store.task(taskId);
     if (task === null || task.app !== app) throw new BuildError('Task not found', 404);
+    if (this.checkoutUses.has(app)) throw new BuildError('This app is busy.', 409);
     if (this.isRunning(app)) throw new BuildError('Claude is still working on this app.', 409);
     if (task.status === 'merged' || task.status === 'closed') return task;
     const closed = this.deps.store.updateTask(task.id, { status: 'closed', error: null });
@@ -126,6 +141,7 @@ export class BuildService {
   }
 
   merge(app: string, taskId: number): Promise<BuildTask> {
+    if (this.checkoutUses.has(app)) throw new BuildError('This app is busy.', 409);
     return mergeTask(this.deps, app, taskId, this.isRunning(app));
   }
 
@@ -141,6 +157,7 @@ export class BuildService {
     const runs = [...this.runs.values()];
     for (const run of runs) run.controller.abort();
     await Promise.all(runs.map((run) => run.ended));
+    await Promise.all([...this.checkoutUses.values()]);
   }
 
   /** Fails the tasks a restart interrupted. Returns how many. Tasks of a running app are left alone. */
@@ -159,7 +176,7 @@ export class BuildService {
     let started = 0;
     for (const queued of this.deps.store.tasksWithStatus(['queued'])) {
       if (queued.retryAt === null || queued.retryAt > this.deps.now()) continue;
-      if (this.isRunning(queued.app)) continue;
+      if (this.isBusy(queued.app)) continue;
       try {
         if (await this.retry(queued)) started += 1;
       } catch (err) {
@@ -360,7 +377,7 @@ export class BuildService {
     if (entry === null) return false;
     // Read again: the task may have been closed, or the app started, while the registry answered.
     const task = this.deps.store.task(queued.id);
-    if (task?.status !== 'queued' || this.isRunning(task.app)) return false;
+    if (task?.status !== 'queued' || this.isBusy(task.app)) return false;
 
     const run = this.reserve(task.app);
     let launched = false;

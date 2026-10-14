@@ -1,0 +1,64 @@
+import { useEffect, useState } from 'preact/hooks';
+import type { JSX } from 'preact';
+import type { ImportResponse } from '@hub/protocol';
+import type { ApiClient } from '../../net/api.js';
+import type { WsClient } from '../../net/ws.js';
+import type { BlobCache } from '../../canvas/cache.js';
+import type { TileSource } from '../../canvas/source.js';
+import { CanvasView } from '../../canvas/index.js';
+import './design.css';
+
+export interface DesignAreaProps { app: string; api: ApiClient; ws: WsClient; source: TileSource; cache: BlobCache }
+export function DesignArea({ app, api, ws, source, cache }: DesignAreaProps): JSX.Element {
+  const [mode, setMode] = useState<'next' | 'react'>('next');
+  const [file, setFile] = useState('src/App.tsx');
+  const [route, setRoute] = useState('/');
+  const [appDir, setAppDir] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [building, setBuilding] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [result, setResult] = useState<ImportResponse | null>(null);
+  const [note, setNote] = useState<string | null>(null);
+  const [previewVersion, setPreviewVersion] = useState(0);
+  useEffect(() => {
+    let active = true;
+    const off = ws.on((message) => { if (message.type === 'build.task' && message.app === app) setBuilding(message.running); });
+    void api.buildState(app).then((state) => { if (active) setBuilding(state.running); }).catch(() => {});
+    return () => { active = false; off(); };
+  }, [app, api, ws]);
+  const importPages = async () => {
+    setBusy(true); setError(null); setNote(null);
+    try {
+      const out = await api.importPages(app, mode === 'next' ? { mode, ...(appDir.trim() ? { appDir: appDir.trim() } : {}) } : { mode, entries: [{ route: route.trim(), file: file.trim() }] });
+      setResult(out);
+      if (out.ok) { setNote(`Imported ${out.rebuilt.length} pages; reused ${out.reused.length}.${out.removed.length ? ` Removed ${out.removed.length} source routes.` : ''}`); setPreviewVersion((value) => value + 1); }
+    } catch (error) { setError(error instanceof Error ? error.message : 'Import failed.'); }
+    finally { setBusy(false); }
+  };
+  const retry = async () => {
+    setBusy(true); setError(null);
+    try { const out = await api.retryPreview(app); setNote(out.warnings.join(' ') || 'Preview updated.'); setPreviewVersion((value) => value + 1); }
+    catch (error) { setError(error instanceof Error ? error.message : 'Preview failed.'); }
+    finally { setBusy(false); }
+  };
+  return <div class="design-area">
+    <form class="design-import" onSubmit={(event) => { event.preventDefault(); void importPages(); }}>
+      <label>Source <select value={mode} disabled={busy} onChange={(event) => setMode(event.currentTarget.value as 'next' | 'react')}><option value="next">Next App Router</option><option value="react">React page</option></select></label>
+      {mode === 'next' ? <label>App directory <input placeholder="Auto: app or src/app" value={appDir} disabled={busy} onInput={(event) => setAppDir(event.currentTarget.value)} /></label> : <>
+        <label>Entry file <input value={file} required disabled={busy} onInput={(event) => setFile(event.currentTarget.value)} /></label>
+        <label>Route <input value={route} required disabled={busy} onInput={(event) => setRoute(event.currentTarget.value)} /></label>
+      </>}
+      <button class="shell-button" type="submit" disabled={busy || building}>{busy ? 'Working…' : 'Import pages'}</button>
+      <button class="shell-button" type="button" disabled={busy || building} onClick={() => void retry()}>Retry preview</button>
+    </form>
+    {building && <p class="design-status">Wait for Build to finish before importing.</p>}
+    {note && <p class="design-status" role="status">{note}</p>}
+    {error && <p class="design-status" role="alert">{error}</p>}
+    {result && !result.ok && <div class="design-status" role="alert">
+      <p>Import was not applied. Your previous design and edits are preserved.</p>
+      {result.kind === 'source' ? <ul>{result.diagnostics.map((diagnostic, index) => <li key={index}>{diagnostic.file && `${diagnostic.file}: `}{diagnostic.message}</li>)}</ul> : <ul>{result.conflicts.map((conflict) => <li key={conflict.index}>Edit {conflict.index + 1}: {conflict.message}</li>)}<li>{result.blocked.length} later edits are blocked.</li></ul>}
+    </div>}
+    {result?.ok && result.warnings.length > 0 && <p class="design-status" role="alert">{result.warnings.join(' ')}</p>}
+    <div class="design-canvas"><CanvasView key={previewVersion} source={source} cache={cache} /></div>
+  </div>;
+}

@@ -7,8 +7,8 @@ import preact from '@preact/preset-vite';
 import { serveRenders } from './dev/serve-renders.js';
 
 const hubProxy = {
-  '/api': { target: 'http://127.0.0.1:8787' },
-  '/ws': { target: 'http://127.0.0.1:8787', ws: true },
+  '/api': { target: process.env.HUB_DEV_URL ?? 'http://127.0.0.1:8787' },
+  '/ws': { target: process.env.HUB_DEV_URL ?? 'http://127.0.0.1:8787', ws: true },
 };
 
 /**

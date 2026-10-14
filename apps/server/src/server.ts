@@ -10,6 +10,7 @@ import type { BuildDeps } from './build/deps.js';
 import { type RunCommand, runCommand as defaultRunCommand } from './build/commands.js';
 import { BuildService } from './build/service.js';
 import { BuildStore } from './build/store.js';
+import { SyncService } from './sync/service.js';
 import type { ClaudeRunner } from './claude/runner.js';
 import type { HubConfig } from './config.js';
 import { openDb } from './db.js';
@@ -87,6 +88,7 @@ export async function startHub(opts: HubOptions): Promise<RunningHub> {
       onMerged: opts.onMerged,
     });
     const interrupted = build.recover();
+    const sync = new SyncService({ registry, build, hub, dataDir: config.dataDir });
     if (interrupted > 0) log(`Marked ${interrupted} interrupted build task(s) as failed`);
 
     // Assigned once the WebSocket server exists; the app is built first because the server needs its fetch.
@@ -97,6 +99,7 @@ export async function startHub(opts: HubOptions): Promise<RunningHub> {
       passphraseHash: config.passphraseHash,
       registry,
       build,
+      sync,
       dataDir: config.dataDir,
       clientDir: opts.clientDir,
       now,
@@ -150,6 +153,7 @@ export async function startHub(opts: HubOptions): Promise<RunningHub> {
           // after stopAll has looked. So the ticks finish first.
           await drainTicks();
           await build.stopAll();
+          await sync.close();
         } finally {
           sockets?.close();
           server.closeAllConnections();

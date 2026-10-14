@@ -62,9 +62,18 @@ importers:
       '@hono/node-server':
         specifier: ^2.1.5
         version: 2.1.5(hono@4.13.13)
+      '@hub/design-model':
+        specifier: workspace:*
+        version: link:../../packages/design-model
       '@hub/protocol':
         specifier: workspace:*
         version: link:../../packages/protocol
+      '@hub/renderer':
+        specifier: workspace:*
+        version: link:../../packages/renderer
+      '@hub/sync':
+        specifier: workspace:*
+        version: link:../../packages/sync
       '@octokit/rest':
         specifier: ^22.0.1
         version: 22.0.1

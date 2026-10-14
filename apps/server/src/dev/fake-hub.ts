@@ -27,7 +27,7 @@ async function main(): Promise<void> {
   const root = mkdtempSync(join(tmpdir(), 'hub-fake-'));
   const repo = makeTestRepo({
     workDir: join(root, 'apps', 'demo'),
-    files: { '.hub/app.json': JSON.stringify(DEMO_MANIFEST) },
+    files: { '.hub/app.json': JSON.stringify(DEMO_MANIFEST), 'app/page.tsx': 'export default () => <main style={{ padding: "32px", color: "#124" }}><h1>Imported demo</h1><button>Start</button></main>' },
   });
   const scratch = [root, dirname(repo.origin)];
   const removeScratch = (): void => {

@@ -6,7 +6,8 @@ import type { JSX } from 'preact';
 import type { ApiClient } from '../net/api.js';
 import type { WsClient } from '../net/ws.js';
 import { ServerTileSource } from '../net/tile-source.js';
-import { CanvasView, createIdbCache } from '../canvas/index.js';
+import { createIdbCache } from '../canvas/index.js';
+import { DesignArea } from '../areas/design/DesignArea.js';
 import { BuildArea } from '../areas/build/BuildArea.js';
 import { AREAS, AREA_LABEL, formatRoute } from './route.js';
 import type { Area } from './route.js';
@@ -47,7 +48,7 @@ export function AppView({ app, area, api, ws }: AppViewProps): JSX.Element {
         ))}
       </nav>
       <div class="app-view-body">
-        {area === 'design' && <CanvasView key={app} source={source} cache={cache} />}
+        {area === 'design' && <DesignArea key={app} app={app} api={api} ws={ws} source={source} cache={cache} />}
         {area === 'build' && <BuildArea key={app} app={app} api={api} ws={ws} />}
         {area === 'deploy' && (
           <p data-testid="deploy-placeholder" class="app-view-deploy">

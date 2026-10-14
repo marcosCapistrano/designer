@@ -1,0 +1,7 @@
+.design-area { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+.design-import { display: flex; flex-wrap: wrap; align-items: end; gap: 12px; padding: 12px; border-bottom: 1px solid #ddd; }
+.design-import label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
+.design-import input, .design-import select { box-sizing: border-box; min-height: 44px; padding: 8px; border: 1px solid #aaa; border-radius: 6px; font: inherit; max-width: 240px; }
+.design-import button { min-height: 44px; }
+.design-status { padding: 8px 16px; margin: 0; max-height: 180px; overflow: auto; }
+.design-canvas { flex: 1; min-height: 240px; position: relative; }
