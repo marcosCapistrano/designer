@@ -214,6 +214,12 @@ describe('detachInstance', () => {
     })).toBe('idMap must cover every component node');
   });
 
+  test('rejects an idMap key that is not a node of the component', () => {
+    expect(rejected(sampleDoc(), {
+      op: 'detachInstance', node: 'n5', idMap: { ...cardIds, n2: 'n12' },
+    })).toBe('idMap has unknown key n2');
+  });
+
   test('rejects a new id that is already in the doc', () => {
     expect(rejected(sampleDoc(), {
       op: 'detachInstance', node: 'n5', idMap: { n6: 'n2', n7: 'n10', n8: 'n11' },

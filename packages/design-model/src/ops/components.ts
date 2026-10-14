@@ -147,9 +147,13 @@ export const componentHandlers: HandlerMap = {
       if (node.kind !== 'instance') return `Node ${op.node} is not an instance`;
       const def = ownValue(doc.components, node.component);
       if (def === undefined) return `Component ${node.component} not found`;
-      if (treeIds(def.root).some((id) => ownValue(op.idMap, id) === undefined)) {
+      const ids = treeIds(def.root);
+      if (ids.some((id) => ownValue(op.idMap, id) === undefined)) {
         return 'idMap must cover every component node';
       }
+      const known = new Set(ids);
+      const unknown = Object.keys(op.idMap).find((key) => !known.has(key));
+      if (unknown !== undefined) return `idMap has unknown key ${unknown}`;
       const copy = expand(def, node, op.idMap);
       return validateSubtree(doc, copy) ?? cycleError(doc, container, [copy]);
     },
