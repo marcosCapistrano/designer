@@ -26,11 +26,13 @@ import { GestureTracker, wheelAction } from './gestures.js';
 import type { GestureAction, PointerIn, Tool, WheelIn } from './gestures.js';
 import { paintOverlay } from './overlay.js';
 import { BasePainter } from './painter.js';
-import type { PaintStats } from './painter.js';
+import type { BackBuffer, PaintStats } from './painter.js';
 import { pickZoom, visibleTiles } from './tiles.js';
 
 export interface ControllerDeps {
   base: CanvasRenderingContext2D;
+  /** A second base canvas for ping-pong blits (see BasePainter); without it a pan blits the canvas onto itself. */
+  baseBack?: BackBuffer;
   overlay: CanvasRenderingContext2D;
   tiles: { get(key: string, x: number, y: number): TileImage | undefined; request(wants: readonly TileWant[]): void };
   hitMaps: { get(hash: string): readonly HitBox[] | undefined; load(hash: string): Promise<readonly HitBox[]> };
@@ -125,7 +127,7 @@ export class CanvasController {
 
   constructor(deps: ControllerDeps) {
     this.deps = deps;
-    this.painter = new BasePainter(deps.base, deps.tiles);
+    this.painter = new BasePainter(deps.base, deps.tiles, deps.baseBack);
     this.gestures = new GestureTracker(() => this.toolValue);
   }
 
@@ -160,8 +162,10 @@ export class CanvasController {
   }
 
   resize(w: number, h: number, dpr: number): void {
-    // Both layers share the device-pixel size so the overlay lines up with the base.
-    for (const ctx of [this.deps.base, this.deps.overlay]) {
+    // Every layer shares the device-pixel size so the overlay lines up with the base.
+    const layers = [this.deps.base, this.deps.overlay];
+    if (this.deps.baseBack) layers.push(this.deps.baseBack.ctx);
+    for (const ctx of layers) {
       ctx.canvas.width = Math.round(w * dpr);
       ctx.canvas.height = Math.round(h * dpr);
     }

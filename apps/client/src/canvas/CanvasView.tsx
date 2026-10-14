@@ -65,6 +65,7 @@ function errorMessage(e: unknown): string {
 export function CanvasView({ source, cache, onSelect, debug = false }: CanvasViewProps): JSX.Element {
   const rootRef = useRef<HTMLDivElement>(null);
   const baseRef = useRef<HTMLCanvasElement>(null);
+  const spareRef = useRef<HTMLCanvasElement>(null);
   const overlayRef = useRef<HTMLCanvasElement>(null);
   const controllerRef = useRef<CanvasController | null>(null);
   const [visible, setVisible] = useState<Set<Device>>(() => new Set(DEVICES));
@@ -87,11 +88,13 @@ export function CanvasView({ source, cache, onSelect, debug = false }: CanvasVie
   useEffect(() => {
     const root = rootRef.current;
     const baseCanvas = baseRef.current;
+    const spareCanvas = spareRef.current;
     const overlayCanvas = overlayRef.current;
-    if (!root || !baseCanvas || !overlayCanvas) return;
+    if (!root || !baseCanvas || !spareCanvas || !overlayCanvas) return;
     const base = baseCanvas.getContext('2d', { alpha: false });
+    const spare = spareCanvas.getContext('2d', { alpha: false });
     const overlay = overlayCanvas.getContext('2d');
-    if (!base || !overlay) return;
+    if (!base || !spare || !overlay) return;
 
     let disposed = false;
     const loader = new TileLoader({
@@ -102,6 +105,15 @@ export function CanvasView({ source, cache, onSelect, debug = false }: CanvasVie
     const hitMaps = new HitMapStore(source, cache);
     const controller = new CanvasController({
       base,
+      baseBack: {
+        ctx: spare,
+        // Only the shown canvas is composited; the hidden one costs the page nothing.
+        present: (shown) => {
+          const hidden = shown === base ? spareCanvas : baseCanvas;
+          shown.canvas.style.visibility = 'visible';
+          hidden.style.visibility = 'hidden';
+        },
+      },
       overlay,
       tiles: loader,
       hitMaps,
@@ -198,7 +210,12 @@ export function CanvasView({ source, cache, onSelect, debug = false }: CanvasVie
 
   return (
     <div ref={rootRef} data-testid="canvas" style="position:fixed;inset:0;touch-action:none;user-select:none">
-      <canvas ref={baseRef} style="position:absolute;inset:0;width:100%;height:100%" />
+      <canvas ref={baseRef} data-testid="canvas-base" style="position:absolute;inset:0;width:100%;height:100%" />
+      <canvas
+        ref={spareRef}
+        data-testid="canvas-base"
+        style="position:absolute;inset:0;width:100%;height:100%;visibility:hidden"
+      />
       <canvas ref={overlayRef} style="position:absolute;inset:0;width:100%;height:100%;pointer-events:none" />
       {error !== null && (
         <div data-testid="canvas-error" style={ERROR_STYLE}>
