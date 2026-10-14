@@ -50,15 +50,22 @@ export class SocketHub implements WsHub {
     if (this.sockets.has(s)) this.sockets.set(s, true);
   }
 
-  /** Terminates and removes sockets that stayed silent since the last sweep, pings the rest, and marks every survivor not alive. */
+  /**
+   * Terminates and removes sockets that stayed silent since the last sweep, pings the rest, and marks every survivor not alive.
+   * A socket whose ping or terminate throws is skipped so the rest still get swept.
+   */
   sweep(): void {
     for (const [s, alive] of this.sockets) {
-      if (alive) {
-        s.ping();
-        this.sockets.set(s, false);
-      } else {
-        this.sockets.delete(s);
-        s.terminate();
+      try {
+        if (alive) {
+          this.sockets.set(s, false);
+          s.ping();
+        } else {
+          this.sockets.delete(s);
+          s.terminate();
+        }
+      } catch {
+        // Ignored. A socket whose ping threw stays not alive, so the next sweep terminates it unless it pongs.
       }
     }
   }
