@@ -9,6 +9,8 @@ export interface AuthDeps {
   limiter: LoginLimiter;
   passphraseHash: string;
   now?: () => number;
+  /** Called after a logout has revoked its session, so open sockets of that session can be closed. */
+  onLogout?: () => void;
 }
 
 const SESSION_MAX_AGE_S = 2_592_000;
@@ -67,6 +69,7 @@ export function authRoutes(deps: AuthDeps): Hono {
     const token = readCookie(c.req.header('cookie'), SESSION_COOKIE);
     if (token !== undefined) sessions.revoke(token);
     deleteCookie(c, SESSION_COOKIE, { path: '/' });
+    deps.onLogout?.();
     return c.body(null, 204);
   });
 
