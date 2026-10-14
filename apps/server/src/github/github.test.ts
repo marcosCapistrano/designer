@@ -37,6 +37,10 @@ describe('summarizeChecks', () => {
   it('is pending when a run is completed without a conclusion', () => {
     expect(summarizeChecks([{ name: 'a', status: 'completed', conclusion: null }])).toBe('pending');
   });
+
+  it('is pending when a completed run has a conclusion this code does not recognise', () => {
+    expect(summarizeChecks([{ name: 'a', status: 'completed', conclusion: 'weird_new_value' }])).toBe('pending');
+  });
 });
 
 describe('parseGitHubRemote', () => {
@@ -90,6 +94,19 @@ describe('FakeGitHub', () => {
     const outcome = await gh.merge(repo, 1, 'h1');
     expect(outcome.merged).toBe(false);
     expect(gh.merges).toEqual([]);
+  });
+
+  it('merges an open PR at its pinned head and closes it', async () => {
+    const gh = new FakeGitHub();
+    await gh.createPr(repo, { head: 'build/x-1', base: 'main', title: 'T', body: 'B' });
+
+    const outcome = await gh.merge(repo, 1, 'head-1');
+
+    expect(outcome).toEqual({ merged: true, sha: 'merged-1', message: 'Merged' });
+    expect(gh.merges).toEqual([{ number: 1, sha: 'head-1' }]);
+    const pr = await gh.getPr(repo, 1);
+    expect(pr).toMatchObject({ state: 'closed', merged: true, mergeSha: 'merged-1' });
+    expect(await gh.findOpenPr(repo, 'build/x-1')).toBeNull();
   });
 
   it('reports one in-progress run and then success when autoGreenAfter is 1', async () => {

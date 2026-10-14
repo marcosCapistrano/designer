@@ -88,7 +88,10 @@ export class OctokitGitHub implements GitHub {
       status: run.status,
       conclusion: run.conclusion,
     }));
-    return { state: summarizeChecks(checks), checks };
+    // Only one page is read. If GitHub has more runs than were read, the unread runs are unknown,
+    // so the state fails closed to 'pending' rather than summarizing the partial list.
+    const unread = data.total_count > data.check_runs.length;
+    return { state: unread ? 'pending' : summarizeChecks(checks), checks };
   }
 
   async merge(r: RepoRef, n: number, sha: string): Promise<MergeOutcome> {
