@@ -23,6 +23,24 @@ test('authenticated import renders pages, reuses baseline and preserves design o
   expect((await (await page.request.get('/api/apps/demo/design')).json()).pages).toHaveLength(1);
 });
 
+test('dynamic source samples require review and are reused on the next import',async({page})=>{
+  await page.goto('/');
+  await page.getByTestId('passphrase').fill('hub-dev-passphrase');await page.getByTestId('login-submit').click();
+  await page.getByTestId('app-samples').click();await page.getByTestId('tab-design').click();
+  await page.getByRole('button',{name:'Import pages',exact:true}).click();
+  await expect(page.getByRole('alert')).toContainText('saved preview choice');
+  expect((await(await page.request.get('/api/apps/samples/design')).json()).imported).toBe(false);
+  await page.getByLabel('Preview state or sample data').fill('Use Alice as the sample user');
+  await page.getByRole('button',{name:'Generate sample preview',exact:true}).click();
+  await expect(page.getByRole('region',{name:'Source sample preview'})).toBeVisible();
+  expect((await(await page.request.get('/api/apps/samples/design')).json()).imported).toBe(false);
+  await page.getByRole('button',{name:'Apply samples and import',exact:true}).click();
+  await expect(page.getByRole('region',{name:'Source sample preview'})).toHaveCount(0);
+  await expect(page.getByRole('status')).toContainText('Imported 1 pages');
+  await page.getByRole('button',{name:'Import pages',exact:true}).click();
+  await expect(page.getByRole('status')).toContainText('Imported 0 pages; reused 1.');
+});
+
 test('Design chat streams a proposal, persists messages and waits for Apply', async ({ page }) => {
   await page.goto('/');
   await page.getByTestId('passphrase').fill('hub-dev-passphrase');

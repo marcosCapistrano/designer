@@ -26,7 +26,15 @@ export class SyncService {
   constructor(private readonly deps: SyncDeps) {}
   async close(): Promise<void> { await this.pool.close(); }
   async load(app: string) { await this.entry(app); return this.store(app).load(); }
-  async save(app: string, state: import('@hub/sync').SyncState, revision: string) { await this.entry(app); return this.store(app).save(state, revision); }
+  async save(app: string, state: import('@hub/sync').SyncState, revision: string | null) { await this.entry(app); return this.store(app).save(state, revision); }
+  async source(app: string, request: ImportRequest) {
+    const entry = await this.entry(app);
+    const source = await (this.deps.readSource ?? readSourceProject)(entry.dir);
+    const appDir = request.mode === 'next' ? request.appDir ?? (Object.keys(source.project.files).some((file) => file.startsWith('src/app/')) ? 'src/app' : 'app') : '';
+    const entries = request.mode === 'react' ? request.entries : discoverNextRoutes(source.project, appDir);
+    if (!entries.length) throw new Error('No page routes found. Choose a React entry file or the Next app directory.');
+    return { ...source, entries };
+  }
   private store(app: string): SyncStore {
     let store = this.stores.get(app);
     if (!store) { store = this.deps.store?.(app) ?? new FsSyncStore(join(this.deps.dataDir, 'design', app)); this.stores.set(app, store); }
@@ -44,17 +52,13 @@ export class SyncService {
   }
   async import(app: string, request: ImportRequest): Promise<ImportResponse> {
     return this.deps.build.withCheckout(app, async () => {
-      const entry = await this.entry(app);
+      await this.entry(app);
       const previous = await this.store(app).load();
-      let source: Awaited<ReturnType<typeof readSourceProject>>;
-      let entries;
+      let source: Awaited<ReturnType<SyncService['source']>>;
       try {
-        source = await (this.deps.readSource ?? readSourceProject)(entry.dir);
-        const appDir = request.mode === 'next' ? request.appDir ?? (Object.keys(source.project.files).some((file) => file.startsWith('src/app/')) ? 'src/app' : 'app') : '';
-        entries = request.mode === 'react' ? request.entries : discoverNextRoutes(source.project, appDir);
-        if (!entries.length) throw new Error('No page routes found. Choose a React entry file or the Next app directory.');
+        source = await this.source(app,request);
       } catch (error) { return { ok: false, kind: 'source', diagnostics: [{ file: '', message: error instanceof Error ? error.message : 'Source could not be read' }] }; }
-      const prepared = synchronizePages({ ...source, entries, previous: previous?.state });
+      const prepared = synchronizePages({ ...source, previous: previous?.state });
       if (!prepared.ok) return prepared;
       const revision = await this.store(app).save(prepared.state, previous?.revision ?? null);
       const preview = await this.preview(app, prepared.state.doc);

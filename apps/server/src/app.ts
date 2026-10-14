@@ -21,6 +21,8 @@ import type { DesignEditing } from './design/editing.js';
 import { designRoutes } from './design/routes.js';
 import type { DesignChat } from './design/chat.js';
 import { designChatRoutes } from './design/chat-routes.js';
+import { previewRoutes } from './sync/preview-routes.js';
+import type { SourcePreview } from './sync/preview.js';
 
 export interface AppDeps {
   sessions: SessionStore;
@@ -31,6 +33,7 @@ export interface AppDeps {
   sync?: SyncService;
   editing?: DesignEditing;
   designChat?: DesignChat;
+  sourcePreview?: SourcePreview;
   dataDir: string;
   /** The built client. When unset the hub serves only /api. */
   clientDir?: string | null;
@@ -160,6 +163,7 @@ export function createApp(deps: AppDeps): Hono {
   if (deps.sync) app.route('/api/apps', syncRoutes(deps.sync));
   if (deps.editing) app.route('/api/apps', designRoutes(deps.editing));
   if (deps.designChat) app.route('/api/apps', designChatRoutes(deps.designChat));
+  if (deps.sourcePreview) app.route('/api/apps', previewRoutes(deps.sourcePreview));
   app.all('/api/*', (c) => c.json({ error: 'Not found' }, 404));
 
   if (clientDir) app.use('/*', clientFiles(clientDir));

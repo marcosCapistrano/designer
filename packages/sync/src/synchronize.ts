@@ -1,10 +1,11 @@
 import { createHash } from 'node:crypto';
 import { applyOp, canonicalStringify, validateDoc, type ComponentDef, type DesignDoc, type Op, type Page } from '@hub/design-model';
 import { extractPages } from './extract.js';
-import type { RouteEntry, SourceDiagnostic, SourceProject } from './types.js';
+import type { PreviewChoices, RouteEntry, SourceDiagnostic, SourceProject } from './types.js';
+import { choicesProblem } from './choices.js';
 
 /** Bump whenever extraction semantics change, so cached baselines are rebuilt. */
-export const SYNC_VERSION = 2;
+export const SYNC_VERSION = 3;
 export interface PageBaseline {
   entry: RouteEntry;
   commit: string;
@@ -17,6 +18,7 @@ export interface SyncBaseline {
   /** Import resolution also depends on which paths exist, not just file contents. */
   sourcePathsHash: string;
   pages: Record<string, PageBaseline>;
+  choicesHash?: string;
 }
 export interface SyncState {
   baseline: SyncBaseline;
@@ -24,6 +26,7 @@ export interface SyncState {
   pending: Op[];
   batchLengths?: number[];
   redo?: Op[][];
+  choices?: PreviewChoices;
 }
 export interface SyncConflict { index: number; op: Op; message: string }
 export type SyncResult =
@@ -39,13 +42,18 @@ export function synchronizePages(input: {
   entries: RouteEntry[];
   commit: string;
   previous?: SyncState;
+  choices?: PreviewChoices;
 }): SyncResult {
   const { project, entries, commit, previous } = input;
   const sourceFailure = (message: string): SyncResult => ({ ok: false, kind: 'source', diagnostics: [{ file: '', message }] });
   if (!commit.trim()) return sourceFailure('A source commit is required');
+  const choices = input.choices ?? previous?.choices ?? {};
+  const choiceError = choicesProblem(choices);
+  if (choiceError) return sourceFailure(choiceError);
+  const choicesHash = hash(canonicalStringify(choices));
   if (new Set(entries.map((entry) => entry.route)).size !== entries.length) return sourceFailure('Duplicate routes');
   const sourcePathsHash = hash(canonicalStringify(Object.keys(project.files).sort()));
-  const baseline: SyncBaseline = { version: SYNC_VERSION, sourcePathsHash, pages: {} };
+  const baseline: SyncBaseline = { version: SYNC_VERSION, sourcePathsHash, choicesHash, pages: {} };
   const doc: DesignDoc = { meta: { version: 1, seq: 0 }, pages: {}, components: {}, tokens: {} };
   const rebuilt: string[] = [], reused: string[] = [];
   const diagnostics: SourceDiagnostic[] = [];
@@ -60,6 +68,7 @@ export function synchronizePages(input: {
     const saved = previous?.baseline.pages[entry.route];
     const unchanged = saved && previous.baseline.version === SYNC_VERSION
       && previous.baseline.sourcePathsHash === sourcePathsHash
+      && previous.baseline.choicesHash === choicesHash
       && canonicalStringify(saved.entry) === canonicalStringify(entry)
       && Object.entries(saved.hashes).every(([file, digest]) => Object.hasOwn(project.files, file) && hash(project.files[file]!) === digest);
     if (unchanged) {
@@ -69,7 +78,7 @@ export function synchronizePages(input: {
       reused.push(entry.route);
       continue;
     }
-    const extracted = extractPages(project, [entry], { sharedComponents: true });
+    const extracted = extractPages(project, [entry], { sharedComponents: true, choices });
     if (!extracted.ok) { diagnostics.push(...extracted.diagnostics); continue; }
     const page = Object.values(extracted.doc.pages)[0]!;
     const hashes = Object.fromEntries(extracted.dependencies[page.id]!.map((file) => [file, hash(project.files[file]!)]));
@@ -97,5 +106,5 @@ export function synchronizePages(input: {
   if (previous && canonicalStringify(replayed) !== canonicalStringify(previous.doc)) replayed.meta.seq++;
   const replayInvalid = validateDoc(replayed);
   if (replayInvalid) return sourceFailure(replayInvalid);
-  return { ok: true, state: { baseline, doc: replayed, pending, ...(previous?.batchLengths ? { batchLengths: [...previous.batchLengths] } : {}), ...(previous?.redo ? { redo: [] } : {}) }, rebuilt, reused, removed };
+  return { ok: true, state: { baseline, doc: replayed, pending, ...(Object.keys(choices).length ? { choices: structuredClone(choices) } : {}), ...(previous?.batchLengths ? { batchLengths: [...previous.batchLengths] } : {}), ...(previous?.redo ? { redo: [] } : {}) }, rebuilt, reused, removed };
 }

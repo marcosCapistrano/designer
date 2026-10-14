@@ -1,5 +1,7 @@
 import { applyOp, canonicalStringify, decodeOpLog, encodeOpLog, parseDoc, serializeDoc, type DesignDoc, type Result } from '@hub/design-model';
 import type { SyncBaseline, SyncState } from './synchronize.js';
+import { choicesProblem } from './choices.js';
+import { createHash } from 'node:crypto';
 
 const SHA = /^[a-f0-9]{64}$/;
 const object = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -8,7 +10,7 @@ function fail(error: string): Result<SyncState> { return { ok: false, error }; }
 
 /** The canonical design files, with source baselines and the pending log stored alongside them. */
 export function serializeSyncState(state: SyncState): Record<string, string> {
-  const files = { ...serializeDoc(state.doc), 'sync.json': canonicalStringify({ version: 1, baseline: state.baseline, ...(state.batchLengths ? { batchLengths: state.batchLengths } : {}), ...(state.redo ? { redo: state.redo } : {}) }), 'changes.jsonl': encodeOpLog(state.pending) };
+  const files = { ...serializeDoc(state.doc), 'sync.json': canonicalStringify({ version: 1, baseline: state.baseline, ...(state.batchLengths ? { batchLengths: state.batchLengths } : {}), ...(state.redo ? { redo: state.redo } : {}), ...(state.choices ? { choices: state.choices } : {}) }), 'changes.jsonl': encodeOpLog(state.pending) };
   const checked = parseSyncState(files);
   if (!checked.ok) throw new Error(checked.error);
   return files;
@@ -28,6 +30,7 @@ export function parseSyncState(files: Record<string, string>): Result<SyncState>
     const batches = metadata['batchLengths'];
     if (batches !== undefined && (!Array.isArray(batches) || !batches.every((length) => Number.isSafeInteger(length) && length > 0) || batches.reduce((sum: number, length: number) => sum + length, 0) !== log.value.length)) return fail('Invalid edit batch boundaries');
     const redo = metadata['redo'];
+    if (metadata['choices'] !== undefined) { const problem = choicesProblem(metadata['choices']); if (problem) return fail(problem); }
     if (redo !== undefined) {
       if (!Array.isArray(redo)) return fail('Invalid redo history');
       for (const batch of redo) {
@@ -38,6 +41,7 @@ export function parseSyncState(files: Record<string, string>): Result<SyncState>
     }
     const base = metadata['baseline'];
     if (!Number.isSafeInteger(base['version']) || (base['version'] as number) < 1 || typeof base['sourcePathsHash'] !== 'string' || !SHA.test(base['sourcePathsHash']) || !object(base['pages'])) return fail('Invalid baseline metadata');
+    if (base['choicesHash'] !== undefined && (typeof base['choicesHash'] !== 'string' || !SHA.test(base['choicesHash']) || base['choicesHash'] !== createHash('sha256').update(canonicalStringify(metadata['choices'] ?? {})).digest('hex'))) return fail('Preview choices do not match the cached baseline');
     const clean: DesignDoc = { meta: { version: 1, seq: 0 }, pages: {}, components: {}, tokens: {} };
     for (const [route, value] of Object.entries(base['pages'])) {
       if (!route.startsWith('/') || !object(value) || !object(value['entry']) || !object(value['page']) || !object(value['hashes'])) return fail(`Invalid baseline for ${route}`);
@@ -75,6 +79,6 @@ export function parseSyncState(files: Record<string, string>): Result<SyncState>
     }
     replayed.meta.seq = document.value.meta.seq;
     if (canonicalStringify(replayed) !== canonicalStringify(document.value)) return fail('Document does not match baseline plus pending operations');
-    return { ok: true, value: { baseline: base as unknown as SyncBaseline, doc: document.value, pending: log.value, ...(batches ? { batchLengths: batches as number[] } : {}), ...(redo ? { redo: redo as SyncState['redo'] } : {}) } };
+    return { ok: true, value: { baseline: base as unknown as SyncBaseline, doc: document.value, pending: log.value, ...(batches ? { batchLengths: batches as number[] } : {}), ...(redo ? { redo: redo as SyncState['redo'] } : {}), ...(metadata['choices'] ? { choices: metadata['choices'] as SyncState['choices'] } : {}) } };
   } catch (error) { return fail(error instanceof Error ? error.message : 'Invalid sync snapshot'); }
 }

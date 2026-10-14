@@ -81,7 +81,7 @@ describe('fake hub', () => {
     const headers = { cookie, 'content-type': 'application/json' };
 
     const apps = (await (await fetch(`${base}/api/apps`, { headers })).json()) as { name: string; adopted: boolean }[];
-    expect(apps.map((a) => [a.name, a.adopted])).toEqual([['demo', true]]);
+    expect(apps.map((a) => [a.name, a.adopted])).toEqual([['demo', true], ['samples', false]]);
 
     const sent = await fetch(`${base}/api/apps/demo/build/messages`, {
       method: 'POST',

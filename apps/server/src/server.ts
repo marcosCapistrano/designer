@@ -14,6 +14,7 @@ import { SyncService } from './sync/service.js';
 import { DesignEditing } from './design/editing.js';
 import { DesignChat, type DesignMcpFactory } from './design/chat.js';
 import { DesignChatStore } from './design/chat-store.js';
+import { SourcePreview, type PreviewMcpFactory } from './sync/preview.js';
 import type { ClaudeRunner } from './claude/runner.js';
 import type { HubConfig } from './config.js';
 import { openDb } from './db.js';
@@ -28,6 +29,8 @@ export interface HubOptions {
   runner: ClaudeRunner;
   designRunner?: ClaudeRunner;
   designMcp?: DesignMcpFactory;
+  previewRunner?: ClaudeRunner;
+  previewMcp?: PreviewMcpFactory;
   github: GitHub | null;
   /** The built client. When null the hub serves only /api and /ws. */
   clientDir: string | null;
@@ -96,6 +99,7 @@ export async function startHub(opts: HubOptions): Promise<RunningHub> {
     const sync = new SyncService({ registry, build, hub, dataDir: config.dataDir });
     const editing = new DesignEditing(sync, build, now);
     const designChat = new DesignChat({ registry, build, sync, editing, runner: opts.designRunner ?? opts.runner, mcp: opts.designMcp, hub, dataDir: config.dataDir, store: new DesignChatStore(db, now) });
+    const sourcePreview = new SourcePreview(sync,build,opts.previewRunner ?? opts.runner,config.dataDir,opts.previewMcp,now);
     if (interrupted > 0) log(`Marked ${interrupted} interrupted build task(s) as failed`);
 
     // Assigned once the WebSocket server exists; the app is built first because the server needs its fetch.
@@ -109,6 +113,7 @@ export async function startHub(opts: HubOptions): Promise<RunningHub> {
       sync,
       editing,
       designChat,
+      sourcePreview,
       dataDir: config.dataDir,
       clientDir: opts.clientDir,
       now,
@@ -161,6 +166,7 @@ export async function startHub(opts: HubOptions): Promise<RunningHub> {
           // A tick that is mid-way would write to the database after it closed; a retry tick could start a run
           // after stopAll has looked. So the ticks finish first.
           await drainTicks();
+          await sourcePreview.close();
           await designChat.close();
           await build.stopAll();
           await sync.close();
