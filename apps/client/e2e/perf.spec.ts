@@ -5,7 +5,7 @@ import { ready } from './helpers.js';
 // Values are interpolated into the string as literals.
 
 test('pans 50 pages x 3 devices at >= 50 fps median with 4x CPU throttle', async ({ page }) => {
-  await page.goto('/?debug=1');
+  await page.goto('/harness.html?debug=1');
   await ready(page);
   expect(await page.evaluate<number>('window.__hubCanvas.frames().length')).toBe(150);
   const cdp = await page.context().newCDPSession(page);
