@@ -65,6 +65,7 @@ interface Harness {
   store: BuildStore;
   github: FakeGitHub;
   runner: FakeClaudeRunner;
+  hub: { sent: ServerMsg[] };
   commands: string[];
   origin: string;
   work: string;
@@ -76,6 +77,7 @@ function setup(
   opts: {
     scripts?: FakeStep[][];
     decide?: (cmd: string, call: number) => CommandResult;
+    command?: RunCommand;
     noGitHub?: boolean;
   } = {},
 ): Harness {
@@ -105,10 +107,10 @@ function setup(
     registry: { get: async () => null },
     openRepo: (dir) => openRepo(dir, { identity: TEST_IDENTITY }),
     github: opts.noGitHub ? null : github,
-    runCommand: commands.run,
+    runCommand: opts.command ?? commands.run,
     now: () => t,
   };
-  return { deps, store, github, runner, commands: commands.calls, origin, work, task };
+  return { deps, store, github, runner, hub, commands: commands.calls, origin, work, task };
 }
 
 function finish(h: Harness, task: BuildTask): Promise<BuildTask> {
@@ -123,8 +125,20 @@ function writeNotes(work: string): void {
   writeFileSync(join(work, 'notes.md'), 'notes\n');
 }
 
+function remoteHasBranch(origin: string, branch: string): boolean {
+  try {
+    git(origin, 'rev-parse', '--verify', '--quiet', `refs/heads/${branch}`);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** Wraps the checkout so a test can see every commit and push the finish step makes. */
-function recordGitWrites(deps: BuildDeps): { deps: BuildDeps; commits: string[]; pushes: string[] } {
+function recordGitWrites(
+  deps: BuildDeps,
+  opts: { rejectPush?: string } = {},
+): { deps: BuildDeps; commits: string[]; pushes: string[] } {
   const commits: string[] = [];
   const pushes: string[] = [];
   const wrapped: BuildDeps['openRepo'] = (dir) => {
@@ -137,11 +151,19 @@ function recordGitWrites(deps: BuildDeps): { deps: BuildDeps; commits: string[];
       },
       async push(branch) {
         pushes.push(branch);
+        if (opts.rejectPush !== undefined) throw new Error(opts.rejectPush);
         return repo.push(branch);
       },
     };
   };
   return { deps: { ...deps, openRepo: wrapped }, commits, pushes };
+}
+
+/** Finishes the checkout with git writes recorded. */
+async function finishRecorded(h: Harness, task: BuildTask, signal = new AbortController().signal) {
+  const { deps, commits, pushes } = recordGitWrites(h.deps);
+  const result = await finishTask(deps, { task, dir: h.work, manifest, signal });
+  return { result, commits, pushes };
 }
 
 describe('finishTask', () => {
@@ -204,7 +226,7 @@ describe('finishTask', () => {
     expect(h.runner.calls).toHaveLength(MAX_FIX_ATTEMPTS);
     expect(result).toMatchObject({ status: 'failed', error: 'test still fails after 2 fix attempts.' });
     expect(h.github.calls).toEqual([]);
-    expect(() => git(h.origin, 'rev-parse', '--verify', '--quiet', 'refs/heads/build/notes-1')).toThrow();
+    expect(remoteHasBranch(h.origin, 'build/notes-1')).toBe(false);
   });
 
   it('switching branches fails the task', async () => {
@@ -217,10 +239,40 @@ describe('finishTask', () => {
     expect(result.status).toBe('failed');
     expect(result.error).toContain('switched to branch main');
     expect(h.commands).toEqual([]);
-    expect(() => git(h.origin, 'rev-parse', '--verify', '--quiet', 'refs/heads/build/notes-1')).toThrow();
+    expect(remoteHasBranch(h.origin, 'build/notes-1')).toBe(false);
   });
 
-  it('a fix turn that switches branches fails the task instead of committing elsewhere', async () => {
+  it('a fix turn that switches to the default branch fails the task instead of committing there', async () => {
+    const h = setup({
+      decide: (cmd, call) => (cmd === 'pnpm test' && call === 1 ? failed() : OK),
+      scripts: [
+        [
+          (o) => {
+            git(o.cwd, 'checkout', 'main');
+            writeFileSync(join(o.cwd, 'fix.txt'), 'x');
+          },
+          { type: 'done', sessionId: 's', ok: true },
+        ],
+      ],
+    });
+    writeNotes(h.work);
+    git(h.work, 'add', '-A');
+    git(h.work, 'commit', '-m', 'notes');
+    const localMain = git(h.work, 'rev-parse', 'main');
+    const originMain = git(h.origin, 'rev-parse', 'refs/heads/main');
+
+    const { result, commits, pushes } = await finishRecorded(h, h.task);
+
+    expect(result.status).toBe('failed');
+    expect(result.error).toContain('switched to branch main');
+    expect(commits).toEqual([]);
+    expect(pushes).toEqual([]);
+    expect(h.runner.calls).toHaveLength(1);
+    expect(git(h.work, 'rev-parse', 'main')).toBe(localMain);
+    expect(git(h.origin, 'rev-parse', 'refs/heads/main')).toBe(originMain);
+  });
+
+  it('a fix turn that switches to another branch fails the task instead of committing elsewhere', async () => {
     const h = setup({
       decide: (cmd, call) => (cmd === 'pnpm test' && call === 1 ? failed() : OK),
       scripts: [
@@ -239,7 +291,80 @@ describe('finishTask', () => {
 
     expect(result.status).toBe('failed');
     expect(result.error).toContain('switched to branch elsewhere');
-    expect(() => git(h.origin, 'rev-parse', '--verify', '--quiet', 'refs/heads/build/notes-1')).toThrow();
+    expect(remoteHasBranch(h.origin, 'build/notes-1')).toBe(false);
+  });
+
+  it('a build command that switches branches fails before the push', async () => {
+    const h = setup({
+      command: async (cmd, opts) => {
+        if (cmd === 'pnpm test') git(opts.cwd, 'checkout', '-b', 'other');
+        return OK;
+      },
+    });
+    writeNotes(h.work);
+
+    const { result, pushes } = await finishRecorded(h, h.task);
+
+    expect(result.status).toBe('failed');
+    expect(result.error).toContain('switched to branch other');
+    expect(pushes).toEqual([]);
+    expect(remoteHasBranch(h.origin, 'build/notes-1')).toBe(false);
+  });
+
+  it('stops before the push when stopped after the last command', async () => {
+    const controller = new AbortController();
+    const h = setup({
+      command: async (cmd) => {
+        if (cmd === 'pnpm test') controller.abort();
+        return OK;
+      },
+    });
+    writeNotes(h.work);
+
+    const { result, pushes } = await finishRecorded(h, h.task, controller.signal);
+
+    expect(result).toMatchObject({ status: 'failed', error: 'Stopped by you.' });
+    expect(pushes).toEqual([]);
+    expect(h.github.calls).toEqual([]);
+    expect(remoteHasBranch(h.origin, 'build/notes-1')).toBe(false);
+  });
+
+  it('a rejected push fails the task and opens no pull request', async () => {
+    const h = setup();
+    writeNotes(h.work);
+    const { deps } = recordGitWrites(h.deps, { rejectPush: 'remote rejected' });
+
+    const result = await finishTask(deps, {
+      task: h.task,
+      dir: h.work,
+      manifest,
+      signal: new AbortController().signal,
+    });
+
+    expect(result).toMatchObject({ status: 'failed', error: 'git push failed: remote rejected' });
+    expect(h.github.calls).toEqual([]);
+    expect(h.github.prs.size).toBe(0);
+  });
+
+  it('publishes running only while the task is being worked on', async () => {
+    const h = setup({ decide: (cmd, call) => (cmd === 'pnpm test' && call === 1 ? failed() : OK) });
+    writeNotes(h.work);
+
+    const result = await finish(h, h.task);
+
+    const published = h.hub.sent.flatMap((m) =>
+      m.type === 'build.task' ? [{ status: m.task.status, running: m.running }] : [],
+    );
+    expect(result.status).toBe('review');
+    expect(published).toEqual(
+      expect.arrayContaining([
+        { status: 'working', running: true },
+        { status: 'verifying', running: true },
+        { status: 'pushing', running: true },
+      ]),
+    );
+    expect(published.filter((p) => p.status === 'review')).toEqual([{ status: 'review', running: false }]);
+    expect(published.at(-1)).toEqual({ status: 'review', running: false });
   });
 
   it('existing PR is updated, not duplicated', async () => {
@@ -319,6 +444,72 @@ describe('finishTask', () => {
     expect(git(h.work, 'status', '--porcelain')).toContain('notes.md');
     expect(h.commands).toEqual([]);
     expect(h.github.calls).toEqual([]);
+  });
+
+  it('refuses to commit or push a default branch that origin/HEAD does not name', async () => {
+    const h = setup();
+    git(h.work, 'checkout', '-b', 'trunk');
+    git(h.work, 'push', 'origin', 'trunk');
+    git(h.origin, 'symbolic-ref', 'HEAD', 'refs/heads/trunk');
+    git(h.work, 'remote', 'set-head', 'origin', '-d');
+    const task = h.store.createTask({ app: 'demo', title: 'Add notes', branch: 'trunk', base: 'trunk' });
+    writeNotes(h.work);
+    const trunkBefore = git(h.origin, 'rev-parse', 'refs/heads/trunk');
+
+    const { result, commits, pushes } = await finishRecorded(h, task);
+
+    expect(result.status).toBe('failed');
+    expect(commits).toEqual([]);
+    expect(pushes).toEqual([]);
+    expect(git(h.origin, 'rev-parse', 'refs/heads/trunk')).toBe(trunkBefore);
+    expect(git(h.work, 'status', '--porcelain')).toContain('notes.md');
+    expect(h.github.calls).toEqual([]);
+  });
+
+  it('refuses to commit or push a branch outside build/', async () => {
+    const h = setup();
+    git(h.work, 'checkout', '-b', 'feature/x');
+    const task = h.store.createTask({ app: 'demo', title: 'Add notes', branch: 'feature/x', base: 'main' });
+    writeNotes(h.work);
+
+    const { result, commits, pushes } = await finishRecorded(h, task);
+
+    expect(result.status).toBe('failed');
+    expect(result.error).toContain('build/ branches');
+    expect(commits).toEqual([]);
+    expect(pushes).toEqual([]);
+    expect(h.github.calls).toEqual([]);
+  });
+
+  it('refuses to commit or push a detached HEAD', async () => {
+    const h = setup();
+    git(h.work, 'checkout', '--detach');
+    writeNotes(h.work);
+
+    const { result, commits, pushes } = await finishRecorded(h, h.task);
+
+    expect(result.status).toBe('failed');
+    expect(result.error).toContain('not on a named branch');
+    expect(commits).toEqual([]);
+    expect(pushes).toEqual([]);
+  });
+
+  it('compares the base branch after stripping refs/heads/ and ignoring case', async () => {
+    const h = setup();
+    const task = h.store.createTask({
+      app: 'demo',
+      title: 'Add notes',
+      branch: 'build/notes-1',
+      base: 'refs/heads/Build/Notes-1',
+    });
+    writeNotes(h.work);
+
+    const { result, commits, pushes } = await finishRecorded(h, task);
+
+    expect(result.status).toBe('failed');
+    expect(result.error).toContain('base branch');
+    expect(commits).toEqual([]);
+    expect(pushes).toEqual([]);
   });
 
   it('refuses to commit or push an empty branch name', async () => {
