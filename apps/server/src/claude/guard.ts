@@ -194,6 +194,27 @@ const SHELL_NAMES: ReadonlySet<string> = new Set([
 /** NAME=value and NAME+=value. */
 const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*\+?=/;
 
+/**
+ * An assignment to PS4 (the xtrace prompt, whose value runs `$(...)` under `set -x`), or to
+ * BASH_ENV/ENV (a file a non-interactive shell sources). Dangerous only as an assignment, not when
+ * the same text is a plain argument (`echo "ENV=prod"`).
+ */
+const DANGEROUS_ENV_ASSIGN = /^(?:PS4|BASH_ENV|ENV)\+?=/;
+
+/** Builtins whose operands are NAME=value assignments, so an `ENV=`/`PS4=` operand is a real one. */
+const ASSIGNMENT_BUILTINS: ReadonlySet<string> = new Set(['export', 'declare', 'typeset', 'local', 'readonly']);
+
+/** git config subcommands that stand before the key (`git config set user.name x`). */
+const GIT_CONFIG_SUBCOMMANDS: ReadonlySet<string> = new Set([
+  'set',
+  'get',
+  'unset',
+  'list',
+  'get-regexp',
+  'rename-section',
+  'remove-section',
+]);
+
 const FIND_EXEC: ReadonlySet<string> = new Set(['-exec', '-execdir', '-ok', '-okdir']);
 
 /** `source /dev/stdin` and friends read commands from somewhere this guard cannot see. */
@@ -218,7 +239,13 @@ function normalizeUnixPath(p: string): string {
 /** A path that reads this process's stdin (so a shell or `source` would run commands from it). */
 function isStdinPath(text: string): boolean {
   const p = normalizeUnixPath(text);
-  return STDIN_PATHS.has(p) || p.startsWith('/dev/fd/') || p.startsWith('/proc/self/fd/');
+  return (
+    STDIN_PATHS.has(p) ||
+    p.startsWith('/dev/fd/') ||
+    p.startsWith('/proc/self/fd/') ||
+    p.startsWith('/proc/thread-self/fd/') ||
+    /^\/proc\/\d+\/fd\//.test(p)
+  );
 }
 
 const GIT_PUSH_SUBCOMMANDS: ReadonlySet<string> = new Set(['push', 'send-pack', 'http-push']);
@@ -655,6 +682,8 @@ function findProgram(input: readonly LexWord[], ctx: Ctx): Found {
     if (word === undefined) break;
     const { text, dynamic } = word;
     if (ASSIGNMENT.test(text)) {
+      // A prefix `PS4=`/`BASH_ENV=`/`ENV=` runs embedded code or sources a file this guard cannot see.
+      if (DANGEROUS_ENV_ASSIGN.test(text)) return { kind: 'reason', reason: UNCLEAR_REASON };
       // A single-quoted `$(` in an assignment value is a command bash runs when the value is used.
       if (hidesCommandSubstitution(word)) return { kind: 'reason', reason: UNCLEAR_REASON };
       i++;
@@ -723,7 +752,10 @@ function findProgram(input: readonly LexWord[], ctx: Ctx): Found {
       // env treats every leading word that contains '=' as an assignment, valid NAME or not
       // (env a-b=1, env 'a b=1', env =x). The first word with no '=' is the program.
       let j = skipped.next;
-      while (j < words.length && (words[j]?.text ?? '').includes('=')) j++;
+      while (j < words.length && (words[j]?.text ?? '').includes('=')) {
+        if (DANGEROUS_ENV_ASSIGN.test(words[j]?.text ?? '')) return { kind: 'reason', reason: UNCLEAR_REASON };
+        j++;
+      }
       i = j;
       continue;
     }
@@ -753,12 +785,28 @@ function deeper(ctx: Ctx): Ctx {
 
 function gitReason(args: readonly LexWord[], ctx: Ctx): string | null {
   if (args.some((w) => w.text.toLowerCase().includes('alias.'))) return ALIAS_REASON;
-  // A config key built at run time (`-c "$K=push"`, `--config-env=$X`) could define an alias.
+  // Only the global options, before the subcommand, carry `-c`/`--config-env`: after it, `-c` is the
+  // subcommand's own option (`git commit -c "$SHA"`). A config key built at run time could name an
+  // alias; a dynamic value after a literal key is fine.
   for (let i = 0; i < args.length; i++) {
     const w = args[i];
     if (w === undefined) continue;
-    if ((w.text === '-c' || w.text === '--config-env') && args[i + 1]?.dynamic === true) return UNCLEAR_REASON;
+    if (!w.text.startsWith('-')) break;
+    if (w.text === '-c') {
+      const op = args[i + 1];
+      if (op === undefined) return UNCLEAR_REASON;
+      const key = op.text.includes('=') ? op.text.slice(0, op.text.indexOf('=')) : op.text;
+      if (/[$`]/.test(key)) return UNCLEAR_REASON;
+      i++;
+      continue;
+    }
+    if (w.text === '--config-env') {
+      if (args[i + 1]?.dynamic === true) return UNCLEAR_REASON;
+      i++;
+      continue;
+    }
     if (w.text.startsWith('--config-env=') && w.dynamic) return UNCLEAR_REASON;
+    if (GIT_VALUE_FLAGS.has(w.text)) i++;
   }
   const operands = operandsAfterOptions(args, GIT_VALUE_FLAGS);
   const sub = operands[0];
@@ -773,9 +821,14 @@ function gitReason(args: readonly LexWord[], ctx: Ctx): string | null {
   const later = operands.slice(1);
   if (GIT_PUSH_SUBCOMMANDS.has(sub.text)) return GIT_PUSH_REASON;
   if (sub.text === 'config') {
-    // A dynamic config key could be an alias the Hub has not seen.
-    const key = later.find((w) => !w.text.startsWith('-'));
-    return key?.dynamic === true ? UNCLEAR_REASON : null;
+    // A dynamic config key could be an alias the Hub has not seen. Modern git takes a subcommand
+    // (set/get/...) before the key, so skip a literal one before reading the key.
+    const nonOptions = later.filter((w) => !w.text.startsWith('-'));
+    const afterSub =
+      nonOptions[0] !== undefined && !nonOptions[0].dynamic && GIT_CONFIG_SUBCOMMANDS.has(nonOptions[0].text)
+        ? nonOptions.slice(1)
+        : nonOptions;
+    return afterSub[0]?.dynamic === true ? UNCLEAR_REASON : null;
   }
   if (sub.text === 'checkout' || sub.text === 'switch') {
     // Under xargs the branch name may still arrive.
@@ -960,16 +1013,30 @@ function commandReason(words: readonly LexWord[], ctx: Ctx): string | null {
   const args = found.words.slice(found.index + 1);
   const here: Ctx = { ...ctx, open: found.open };
   if (FAIL_CLOSED_PROGRAMS.has(name)) return UNCLEAR_REASON;
-  // A dashed plumbing name (`git-push`, from /usr/lib/git-core) is read as `git push`.
+  // A `git-<x>` name (`git-push` from /usr/lib/git-core, `git-lfs`, `git-crypt`) is read as `git <x>`
+  // and run through the normal git rules, so `git-lfs push` keeps the push reason and `git-lfs
+  // status` is allowed. A non-git `./scripts/git-*.sh` basename simply reads as that subcommand.
   const dashedGit = /^git-(.+)$/.exec(name);
   if (dashedGit !== null) {
     const sub: LexWord = { text: dashedGit[1] ?? '', dynamic: false, expanded: false, bracketed: false };
-    return gitReason([sub, ...args], here) ?? UNCLEAR_REASON;
+    return gitReason([sub, ...args], here);
   }
   if (DATA_CODE_BUILTINS.has(name)) {
-    if (args.some((w) => hasCommandSubstitutionText(w.text))) return UNCLEAR_REASON;
-    if (CALLBACK_BUILTINS.has(name) && args.some((w) => /^-[CF]/.test(w.text))) return UNCLEAR_REASON;
+    // A quoted/escaped `$(` the lexer never scanned; a real one was already checked as a command.
+    if (args.some((w) => hidesCommandSubstitution(w))) return UNCLEAR_REASON;
+    // mapfile/readarray run the `-C` callback; compgen/complete run `-C` and `-F`, including when the
+    // letter is buried in a short-flag cluster such as `-tC` or `-fC`.
+    if (CALLBACK_BUILTINS.has(name)) {
+      const callback = name === 'compgen' || name === 'complete' ? /[CF]/ : /C/;
+      const inCluster = (w: LexWord): boolean =>
+        w.text.startsWith('-') && !w.text.startsWith('--') && callback.test(w.text.slice(1));
+      if (args.some(inCluster)) return UNCLEAR_REASON;
+    }
     if (name === 'let' && args.some((w) => isBareArithOperand(w.text))) return UNCLEAR_REASON;
+  }
+  // An assignment to PS4/BASH_ENV/ENV via a builtin runs embedded code or sources an unseen file.
+  if (ASSIGNMENT_BUILTINS.has(name) && args.some((w) => DANGEROUS_ENV_ASSIGN.test(w.text))) {
+    return UNCLEAR_REASON;
   }
   if (name === 'eval') {
     // eval expands its arguments and then reads the result as commands, so an expansion can add any command.
@@ -1011,9 +1078,8 @@ function check(command: string, depth: number): string | null {
   if (words.some((w) => w.dynamic && /^GIT_CONFIG_(?:KEY_\d+|PARAMETERS|COUNT)=/.test(w.text))) {
     return UNCLEAR_REASON;
   }
-  // PS4 (xtrace prompt), BASH_ENV/ENV (sourced by a shell) and the ${x@P} transform run embedded
-  // `$(...)`; an indirect `${!name}` re-reads a variable whose value could hold a subscript.
-  if (words.some((w) => /^(?:PS4|BASH_ENV|ENV)\+?=/.test(w.text))) return UNCLEAR_REASON;
+  // The `${x@P}` transform runs embedded `$(...)`; an indirect `${!name}` re-reads a variable whose
+  // value could hold a subscript. (PS4/BASH_ENV/ENV are judged where they are real assignments.)
   if (words.some((w) => /\$\{[^{}]*@P\}/.test(w.text))) return UNCLEAR_REASON;
   if (words.some((w) => /\$\{![A-Za-z_][A-Za-z0-9_]*\}/.test(w.text))) return UNCLEAR_REASON;
   for (const { words: commandWords, heredoc } of commands) {

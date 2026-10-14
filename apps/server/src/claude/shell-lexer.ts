@@ -28,6 +28,8 @@ export interface LexCommand {
   words: LexWord[];
   /** A heredoc (`<<` or `<<-`) is attached to this command's standard input. */
   heredoc: boolean;
+  /** A here-string (`<<<`) is attached to this command's standard input. */
+  herestring: boolean;
 }
 
 /** The lexer cannot tell what the shell would do with this input. */
@@ -174,6 +176,7 @@ class WordBuilder {
 class ListState {
   words: LexWord[] = [];
   heredoc = false;
+  herestring = false;
   redirect: Redirect = null;
   /** Every word so far is a keyword that can stand in front of a command. */
   private prefixOnly = true;
@@ -320,9 +323,12 @@ class ListState {
 
   endCommand(): void {
     this.endWord();
-    if (!this.inPattern() && this.words.length > 0) this.out.push({ words: this.words, heredoc: this.heredoc });
+    if (!this.inPattern() && this.words.length > 0) {
+      this.out.push({ words: this.words, heredoc: this.heredoc, herestring: this.herestring });
+    }
     this.words = [];
     this.heredoc = false;
+    this.herestring = false;
     this.redirect = null;
     this.prefixOnly = true;
     this.lastPushed = null;
@@ -481,6 +487,9 @@ class Lexer {
           this.pos++;
         }
       } else if (ch === '<' || ch === '>') {
+        // Inside [[ ]] a `<` is a string comparison, not a redirection: the `(a <<E )` form (N6
+        // sibling) would otherwise read a phantom heredoc. Fail closed rather than guess.
+        if (ch === '<' && st.inConditional()) throw new LexUnclear('< inside [[ ]]');
         this.redirectOperator(st, ch, next);
       } else if (ch === '(') {
         if (st.pendingExtglob()) throw new LexUnclear('extglob pattern');
@@ -534,8 +543,10 @@ class Lexer {
     let kind: Redirect = 'file';
     if (ch === '<') {
       if (next === '<' && third === '<') {
-        this.pos += 3; // here-string: like a heredoc, it feeds this command's stdin
-        st.heredoc = true;
+        // A here-string feeds this command's stdin as literal data, not as a script the guard
+        // cannot see; it is tracked apart from a heredoc so it does not block xargs or a shell -c.
+        this.pos += 3;
+        st.herestring = true;
       } else if (next === '<') {
         const dash = third === '-';
         this.pos += dash ? 3 : 2;
@@ -730,7 +741,14 @@ class Lexer {
       } else if (ch === "'") {
         // bash 5 reads a ' inside "${...}" as a quote and older bash does not. Do not guess.
         if (inDq) throw new LexUnclear("' inside a double-quoted ${...}");
+        const start = this.pos + 1;
         this.skipSingleQuoted();
+        // A subscript or offset in ${...} is evaluated as arithmetic, which strips the quotes and
+        // runs any $(...) or backtick they hid. The lexer never saw it as a command, so fail closed.
+        const quoted = src.slice(start, this.pos - 1);
+        if (/\$\((?!\()/.test(quoted) || quoted.includes('`')) {
+          throw new LexUnclear('quoted command substitution inside ${...}');
+        }
       } else if (ch === '"') {
         this.pos++;
         this.scanDq(null);
@@ -810,15 +828,45 @@ class Lexer {
   }
 }
 
+/** Removes every balanced `${...}` span; their contents were already scanned as they were read. */
+function stripParamExpansions(s: string): string {
+  let out = '';
+  for (let i = 0; i < s.length; ) {
+    if (s.charAt(i) === '$' && s.charAt(i + 1) === '{') {
+      let depth = 1;
+      i += 2;
+      while (i < s.length && depth > 0) {
+        const ch = s.charAt(i);
+        if (ch === '{') depth++;
+        else if (ch === '}') depth--;
+        i++;
+      }
+    } else {
+      out += s.charAt(i);
+      i++;
+    }
+  }
+  return out;
+}
+
 /**
  * A bare variable name as the whole arithmetic operand (`$((x))`, `(( x ))`) has bash re-evaluate
- * that variable's string as arithmetic, which recursively expands any `$(...)` a subscript holds. A
- * `[` subscript does the same. A literal-number expression (`1 + 2`, `i + 1`, `1 << 2`) is safe.
+ * that variable's string as arithmetic, which recursively expands any `$(...)` a subscript holds, so
+ * it fails closed. A `${...}` expansion and a subscript whose index is digits, a plain `$name`, or
+ * `@`/`*` (`arr[0]`, `arr[$i]`, `${#a[@]}`) are read directly, so they are safe; any other subscript
+ * fails closed. A literal-number expression (`1 + 2`, `i + 1`, `1 << 2`) is safe.
  */
 function checkArithOperand(inner: string): void {
   const trimmed = inner.trim();
-  if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(trimmed) || trimmed.includes('[')) {
-    throw new LexUnclear('arithmetic operand is a bare name or subscript');
+  if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(trimmed)) {
+    throw new LexUnclear('arithmetic operand is a bare name');
+  }
+  const remaining = stripParamExpansions(trimmed).replace(
+    /[A-Za-z_][A-Za-z0-9_]*\[\s*(?:\d+|\$[A-Za-z_][A-Za-z0-9_]*|[@*])\s*\]/g,
+    '',
+  );
+  if (remaining.includes('[')) {
+    throw new LexUnclear('arithmetic subscript is not a simple index');
   }
 }
 
