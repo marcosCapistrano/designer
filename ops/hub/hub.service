@@ -1,0 +1,28 @@
+[Unit]
+Description=Hub server
+Wants=network-online.target tailscaled.service
+After=network-online.target tailscaled.service
+
+[Service]
+Type=simple
+User=hub
+Group=hub
+WorkingDirectory=/opt/hub/apps/server
+EnvironmentFile=/etc/hub/hub.env
+Environment=NODE_ENV=production
+Environment=PATH=/var/lib/hub/.local/bin:/usr/local/bin:/usr/bin:/bin
+LoadCredentialEncrypted=HUB_PASSPHRASE_HASH
+LoadCredentialEncrypted=GITHUB_TOKEN
+LoadCredentialEncrypted=CLAUDE_CODE_OAUTH_TOKEN
+UnsetEnvironment=ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN
+ExecStart=/opt/hub/apps/server/node_modules/.bin/tsx /opt/hub/apps/server/src/main.ts
+Restart=on-failure
+RestartSec=5
+KillMode=mixed
+TimeoutStopSec=30
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target
