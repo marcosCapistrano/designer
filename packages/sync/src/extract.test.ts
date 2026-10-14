@@ -176,3 +176,85 @@ describe('Next routes', () => {
     expect(() => discoverNextRoutes({ files: { 'app/@modal/page.tsx': '' } })).toThrow('preview choice');
   });
 });
+
+describe('path aliases and the document shell', () => {
+  it('resolves aliased imports through the longest matching prefix and the usual extension/index resolution', () => {
+    const files = {
+      'site/src/app/page.tsx': `import { X } from "@/components/X"; import { Y } from "@/ui"; import "@/app/globals.css"; export default () => <main className="m"><X /><Y /></main>`,
+      'site/src/components/X.tsx': `import { label } from '@/lib/label'; export function X() { return <p>{label}</p>; }`,
+      'site/src/lib/label.ts': `export const label = 'From alias';`,
+      'site/src/ui/index.tsx': `export function Y() { return <span>Index</span>; }`,
+      'site/src/app/globals.css': `.m { color: red; }`,
+      'other/ui/index.tsx': `export function Y() { return <span>Wrong</span>; }`,
+    };
+    const result = extractPages({ files, aliases: { '@/': 'site/src/', '@/ui': 'other/ui' } }, [{ route: '/', file: 'site/src/app/page.tsx' }]);
+    expect(result.ok, JSON.stringify(result)).toBe(true);
+    if (!result.ok) return;
+    const exported = exportPage(result.doc, Object.keys(result.doc.pages)[0]!);
+    expect(exported.ok && exported.value.html).toMatch(/From alias.*Wrong/);
+    expect(Object.values(result.dependencies)[0]).toEqual(['other/ui/index.tsx', 'site/src/app/globals.css', 'site/src/app/page.tsx', 'site/src/components/X.tsx', 'site/src/lib/label.ts']);
+  });
+
+  it('keeps failing unaliased bare specifiers and aliases that escape the source root', () => {
+    const page = (spec: string) => ({ 'site/src/app/page.tsx': `import { X } from "${spec}"; export default () => <X />` });
+    const bare = extractPages({ files: page('some-lib'), aliases: { '@/': 'site/src/' } }, [{ route: '/', file: 'site/src/app/page.tsx' }]);
+    expect(bare).toMatchObject({ ok: false, diagnostics: [{ file: 'site/src/app/page.tsx', message: 'External import some-lib needs a preview adapter' }] });
+    const escape = extractPages({ files: page('@/../../../etc/X'), aliases: { '@/': 'site/src/' } }, [{ route: '/', file: 'site/src/app/page.tsx' }]);
+    expect(escape).toMatchObject({ ok: false, diagnostics: [{ file: 'site/src/app/page.tsx', message: 'Import escapes source root' }] });
+    const partial = extractPages({ files: page('@/uix'), aliases: { '@/ui': 'ui' } }, [{ route: '/', file: 'site/src/app/page.tsx' }]);
+    expect(partial).toMatchObject({ ok: false, diagnostics: [{ message: 'External import @/uix needs a preview adapter' }] });
+  });
+
+  const shell = {
+    'app/layout.tsx': `"use client";
+      import type { Metadata } from 'next';
+      import styles from './layout.module.css';
+      import './globals.css';
+      export const metadata: Metadata = { title: process.env.TITLE, description: \`x \${1}\` };
+      export const dynamic = "force-dynamic";
+      export const revalidate = 0;
+      export async function generateMetadata() { return await fetch('/x'); }
+      export default function RootLayout({ children }: { children: unknown }) {
+        return <html lang="pt-BR" className="dark"><body className={styles.body}>{children}</body></html>;
+      }`,
+    'app/layout.module.css': `.body { margin: 0; }`,
+    'app/globals.css': `:root { --c: red; color: black; } .dark .t { color: white; } html > body > main { padding: 4px; } :root > body { font-size: 14px; }`,
+    'app/page.tsx': `'use client'; export const dynamic = "force-dynamic"; export default () => <main><p className="t">Hi</p></main>`,
+  };
+
+  it('matches selectors against html/body, then emits them as plain divs (R5)', () => {
+    const result = extractPages({ files: shell }, [{ route: '/', file: 'app/page.tsx', layouts: ['app/layout.tsx'] }]);
+    expect(result.ok, JSON.stringify(result)).toBe(true);
+    if (!result.ok) return;
+    const root = Object.values(result.doc.pages)[0]!.root;
+    expect(root).toMatchObject({ tag: 'div', attrs: {}, style: { base: { color: 'black' } } });
+    const body = root.children[0]!;
+    expect(body).toMatchObject({ kind: 'element', tag: 'div', attrs: {}, style: { base: { margin: '0', 'font-size': '14px' } } });
+    if (body.kind !== 'element') return;
+    expect(body.children).toHaveLength(1);
+    const main = body.children[0]!;
+    expect(main).toMatchObject({ tag: 'main', style: { base: { padding: '4px' } } });
+    if (main.kind === 'element') expect(main.children[0]).toMatchObject({ tag: 'p', style: { base: { color: 'white' } } });
+    const exported = exportPage(result.doc, Object.keys(result.doc.pages)[0]!);
+    expect(exported.ok).toBe(true);
+    if (exported.ok) expect(exported.value.html).not.toMatch(/<html|<body|lang=/);
+  });
+
+  it('rejects html/body anywhere but the outermost two elements of the root layout', () => {
+    const route = [{ route: '/', file: 'app/page.tsx', layouts: ['app/layout.tsx'] }];
+    const cases: [Record<string, string>, string, string][] = [
+      [{ 'app/page.tsx': `export default () => <div><body>x</body></div>` }, 'app/page.tsx', '<body> is only supported'],
+      [{ 'app/page.tsx': `export default () => <html><body>x</body></html>` }, 'app/page.tsx', '<html> is only supported'],
+      [{ 'app/layout.tsx': `export default ({ children }: { children: unknown }) => <html><main><body>{children}</body></main></html>` }, 'app/layout.tsx', '<body> is only supported'],
+      [{ 'app/layout.tsx': `export default ({ children }: { children: unknown }) => <div><html><body>{children}</body></html></div>` }, 'app/layout.tsx', '<html> is only supported'],
+      [{ 'app/layout.tsx': `export default ({ children }: { children: unknown }) => <body>{children}</body>` }, 'app/layout.tsx', '<body> is only supported'],
+    ];
+    for (const [overrides, file, message] of cases) {
+      const result = extractPages({ files: { ...shell, ...overrides } }, route);
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.diagnostics[0]).toMatchObject({ file, message: expect.stringContaining(message) });
+    }
+    const pageOnly = extractPages({ files: { 'page.tsx': `export default () => <html><body>x</body></html>` } }, [{ route: '/', file: 'page.tsx' }]);
+    expect(pageOnly).toMatchObject({ ok: false, diagnostics: [{ file: 'page.tsx', message: expect.stringContaining('<html> is only supported') }] });
+  });
+});

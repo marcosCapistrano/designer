@@ -25,19 +25,42 @@ function jsxText(text: string): string {
   });
 }
 
+/** The aliased target of a non-relative specifier, by longest matching prefix, or null. A prefix not ending in `/` matches whole segments. */
+function aliased(project: SourceProject, specifier: string): string | null {
+  let best: string | null = null;
+  for (const prefix of Object.keys(project.aliases ?? {})) {
+    const matches = specifier === prefix || specifier.startsWith(prefix) && (prefix.endsWith('/') || specifier[prefix.length] === '/');
+    if (prefix && matches && (best === null || prefix.length > best.length)) best = prefix;
+  }
+  if (best === null) return null;
+  const target = project.aliases![best]!;
+  if (target.startsWith('/')) throw new Error(`Alias ${best} must map to a source-relative directory`);
+  return `${target}/${specifier.slice(best.length)}`;
+}
+
+/** Relative and aliased specifiers are source files; any other specifier is an external package. */
+function isSource(project: SourceProject, specifier: string): boolean {
+  return specifier.startsWith('.') || aliased(project, specifier) !== null;
+}
+
 function resolveFile(project: SourceProject, from: string, specifier: string): string {
-  if (!specifier.startsWith('.')) throw new Error(`External import ${specifier} needs a preview adapter`);
-  const segments = from.split('/').slice(0, -1);
-  for (const part of specifier.split('/')) {
+  const target = specifier.startsWith('.') ? null : aliased(project, specifier);
+  if (!specifier.startsWith('.') && target === null) throw new Error(`External import ${specifier} needs a preview adapter`);
+  const segments = target === null ? from.split('/').slice(0, -1) : [];
+  for (const part of (target ?? specifier).split('/')) {
     if (part === '..') { if (!segments.length) throw new Error('Import escapes source root'); segments.pop(); }
-    else if (part !== '.') segments.push(part);
+    else if (part !== '.' && part !== '') segments.push(part);
   }
   const base = segments.join('/');
-  const matches = [base, `${base}.tsx`, `${base}.jsx`, `${base}.ts`, `${base}.js`, `${base}/index.tsx`, `${base}/index.jsx`]
+  const matches = [base, `${base}.tsx`, `${base}.jsx`, `${base}.ts`, `${base}.js`, `${base}/index.tsx`, `${base}/index.jsx`, `${base}/index.ts`, `${base}/index.js`]
     .filter((file) => Object.hasOwn(project.files, file));
   if (matches.length !== 1) throw new Error(`Missing or ambiguous import ${specifier} from ${from}`);
   return matches[0]!;
 }
+
+// R5: the root layout's document shell is matched as html/body, then emitted as divs without document-only attributes.
+const SHELL_TAGS = new Set(['html', 'body']);
+const DOCUMENT_ATTRS = ['lang', 'xmlns', 'suppressHydrationWarning'];
 
 class PropValue { constructor(readonly name: string) {} }
 type Value = string | number | boolean | null | Record<string, unknown> | unknown[] | PropValue;
@@ -129,11 +152,11 @@ export function extractPages(project: SourceProject, entries: RouteEntry[], opti
               }
               if (clause.namedBindings && ts.isNamespaceImport(clause.namedBindings)) mod.imports.set(clause.namedBindings.name.text,{file:specifier,name:'*'});
               const runtime=clause.name||clause.namedBindings&&(!ts.isNamedImports(clause.namedBindings)||clause.namedBindings.elements.some(binding=>!binding.isTypeOnly));
-              if(runtime&&specifier.startsWith('.')) { module(resolveFile(project,file,specifier)); currentFile=file; }
+              if(runtime&&isSource(project,specifier)) { module(resolveFile(project,file,specifier)); currentFile=file; }
             } else if (!statement.importClause) throw new Error(`Side-effect import ${specifier} needs a preview adapter`);
           }
           if(ts.isExpressionStatement(statement)&&!ts.isStringLiteral(statement.expression))throw new Error('Module side effects need an explicit preview adapter');
-          if(ts.isExportDeclaration(statement)&&!statement.isTypeOnly&&statement.moduleSpecifier&&ts.isStringLiteral(statement.moduleSpecifier)&&statement.moduleSpecifier.text.startsWith('.')) {
+          if(ts.isExportDeclaration(statement)&&!statement.isTypeOnly&&statement.moduleSpecifier&&ts.isStringLiteral(statement.moduleSpecifier)&&isSource(project,statement.moduleSpecifier.text)) {
             const runtime=!statement.exportClause||!ts.isNamedExports(statement.exportClause)||statement.exportClause.elements.some(binding=>!binding.isTypeOnly);
             if(runtime){module(resolveFile(project,file,statement.moduleSpecifier.text));currentFile=file;}
           }
@@ -156,7 +179,7 @@ export function extractPages(project: SourceProject, entries: RouteEntry[], opti
           const constant = mod.constants.get(expression.text);
           if (constant) return value(constant, mod, env, depth + 1);
           const imported=mod.imports.get(expression.text);
-          if(imported?.file.startsWith('.')) {
+          if(imported&&isSource(project,imported.file)) {
             const target=module(resolveFile(project,mod.source.fileName,imported.file));
             const exported=target.constants.get(imported.name);
             if(exported)return value(exported,target,{},depth+1);
@@ -353,6 +376,7 @@ export function extractPages(project: SourceProject, entries: RouteEntry[], opti
       function renderJsx(jsx: ts.JsxElement | ts.JsxSelfClosingElement, mod: Module, env: Record<string, Value>, path: string): DesignNode[] {
         const opening = ts.isJsxElement(jsx) ? jsx.openingElement : jsx;
         const tag = opening.tagName.getText(mod.source);
+        if (SHELL_TAGS.has(tag) && (declarations || mod.source.fileName !== entry.layouts?.[0])) throw new Error(`<${tag}> is only supported as the root layout's document shell`);
         const props: Record<string, Value> = {};
         for (const attribute of opening.attributes.properties) {
           if (!ts.isJsxAttribute(attribute)) throw new Error('JSX spreads need a preview choice');
@@ -442,7 +466,21 @@ export function extractPages(project: SourceProject, entries: RouteEntry[], opti
       const expanded: ElementNode = nodes.length === 1 && first?.kind === 'element' ? first
         : { id: `s${namespace}`, kind: 'element', tag: 'div', attrs: {}, style: { base: {} }, children: nodes };
       const matched = new Map<ElementNode, Rule[]>();
+      // R5: html may only be the page root and body only its child, both from the root layout.
+      (function shell(node: ElementNode, parent: ElementNode | null): void {
+        if (node.tag === 'html' && (parent || expanded !== first || occurrences.has(node)) || node.tag === 'body' && parent?.tag !== 'html') {
+          currentFile = entry.layouts?.[0] ?? entry.file;
+          throw new Error(`<${node.tag}> is only supported as the root layout's document shell`);
+        }
+        for (const child of node.children) if (child.kind === 'element') shell(child, node);
+      })(expanded, null);
       applyStyles(expanded, rules, inline, { wrapper: expanded !== first, matched });
+      // Selectors saw the real document; the model forbids document tags, so the shell becomes divs.
+      for (const node of expanded.tag === 'html' ? [expanded, ...expanded.children] : []) {
+        if (node.kind !== 'element' || !SHELL_TAGS.has(node.tag)) continue;
+        node.tag = 'div';
+        for (const name of DOCUMENT_ATTRS) delete node.attrs[name];
+      }
       const styled = new Set<string>();
       function adopt(node: ElementNode, { component, label }: Occurrence): void {
         const styles = new Map<string, { style: NodeStyle; rules: Rule[] }>();
