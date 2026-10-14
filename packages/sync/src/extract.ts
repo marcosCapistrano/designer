@@ -143,6 +143,13 @@ export function extractPages(project: SourceProject, entries: RouteEntry[], opti
           if (Object.hasOwn(env, expression.text)) return env[expression.text]!;
           const constant = mod.constants.get(expression.text);
           if (constant) return value(constant, mod, env, depth + 1);
+          const imported=mod.imports.get(expression.text);
+          if(imported?.file.startsWith('.')) {
+            const target=module(resolveFile(project,mod.source.fileName,imported.file));
+            const exported=target.constants.get(imported.name);
+            if(exported)return value(exported,target,{},depth+1);
+            if(imported.name==='default')for(const statement of target.source.statements)if(ts.isExportAssignment(statement))return value(statement.expression,target,{},depth+1);
+          }
         }
         if (ts.isPropertyAccessExpression(expression)) {
           if (ts.isIdentifier(expression.expression)) {
@@ -241,7 +248,7 @@ export function extractPages(project: SourceProject, entries: RouteEntry[], opti
         } finally { stack.pop(); }
       }
       function renderExpression(expression: ts.Expression, mod: Module, env: Record<string, Value>, path: string): DesignNode[] {
-        if (ts.isParenthesizedExpression(expression)) return renderExpression(expression.expression, mod, env, path);
+        if (ts.isParenthesizedExpression(expression)||ts.isAsExpression(expression)||ts.isSatisfiesExpression(expression)) return renderExpression(expression.expression, mod, env, path);
         if (ts.isJsxElement(expression) || ts.isJsxSelfClosingElement(expression)) return renderJsx(expression, mod, env, path);
         if (ts.isJsxFragment(expression)) return children(expression.children, mod, env, path);
         if(ts.isConditionalExpression(expression)) {

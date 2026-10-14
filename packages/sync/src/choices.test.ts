@@ -90,4 +90,10 @@ describe('saved source preview choices', () => {
       expect(exportPage(result.doc,Object.keys(result.doc.pages)[0]!)).toMatchObject({ok:true,value:{css:expect.stringContaining('color:blue')}});
     }
   });
+  it('reads imported literal constants and does not guess values already available in source',()=>{
+    const files={'page.tsx':`import {title} from './data';export default () => (<h1>{title}</h1> as unknown)`, 'data.ts':'export const title="From source";'};
+    const result=extractPages({files},entry);
+    expect(result.ok).toBe(true);
+    if(result.ok)expect(exportPage(result.doc,Object.keys(result.doc.pages)[0]!)).toMatchObject({ok:true,value:{html:expect.stringContaining('From source')}});
+  });
 });
