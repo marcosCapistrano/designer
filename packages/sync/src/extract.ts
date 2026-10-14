@@ -64,7 +64,34 @@ const SHELL_TAGS = new Set(['html', 'body']);
 const DOCUMENT_ATTRS = ['lang', 'xmlns', 'suppressHydrationWarning'];
 
 class PropValue { constructor(readonly name: string) {} }
-type Value = string | number | boolean | null | Record<string, unknown> | unknown[] | PropValue;
+type Value = string | number | boolean | null | undefined | Record<string, unknown> | unknown[] | PropValue;
+/** A local binding evaluated on first use, so a gap arises only for values the preview actually renders. */
+class Lazy {
+  private state: 'idle' | 'busy' | 'done' = 'idle';
+  private result: Value = null;
+  constructor(private readonly compute: () => Value) {}
+  get(): Value {
+    if (this.state === 'done') return this.result;
+    if (this.state === 'busy') throw new Error('Cyclic local binding');
+    this.state = 'busy';
+    try { this.result = this.compute(); this.state = 'done'; return this.result; }
+    finally { if (this.state === 'busy') this.state = 'idle'; }
+  }
+}
+type Env = Record<string, Value | Lazy>;
+const RESERVED_KEYS = ['__proto__', 'constructor', 'prototype'];
+
+/** Decision 1: `clsx` from the module "clsx" is the only built-in function, with the library's semantics. */
+function classList(item: unknown): string {
+  if (item instanceof PropValue) throw new Error('Prop-driven CSS needs a saved preview adapter');
+  if (typeof item === 'string' || typeof item === 'number') return String(item);
+  if (Array.isArray(item)) return item.filter(Boolean).map(classList).filter(Boolean).join(' ');
+  if (item && typeof item === 'object') return Object.entries(item).filter(([, on]) => {
+    if (on instanceof PropValue) throw new Error('Prop-driven CSS needs a saved preview adapter');
+    return Boolean(on);
+  }).map(([name]) => name).join(' ');
+  return '';
+}
 interface Module { source: ts.SourceFile; imports: Map<string, { file: string; name: string }>; styles: Map<string, string>; constants: Map<string, ts.Expression> }
 interface Occurrence { instance: InstanceNode; component: string; label: string }
 
@@ -108,12 +135,28 @@ export function extractPages(project: SourceProject, entries: RouteEntry[], opti
         if (ts.isPropertyAccessExpression(expression)&&ts.isIdentifier(expression.expression)&&expression.name.text===hook) { const imported=mod.imports.get(expression.expression.text);return imported?.file==='react'&&(imported.name==='default'||imported.name==='*'); }
         return false;
       }
-      function previewValue(expression: ts.Expression, mod: Module): Value {
-        const code=expression.getText(mod.source),key=choiceKey(mod.source.fileName,code);
+      function chosenValue(file: string, code: string): Value {
+        const key=choiceKey(file,code);
         const choice=options.choices?.[key];
         if(choice?.kind==='value')return choice.value;
-        throw new PreviewRequired({key,file:mod.source.fileName,expression:code,kind:'value'});
+        throw new PreviewRequired({key,file,expression:code,kind:'value'});
       }
+      function previewValue(expression: ts.Expression, mod: Module): Value { return chosenValue(mod.source.fileName, expression.getText(mod.source)); }
+      // Decision 3: props of a page/layout entry that the importer does not supply come from the entry file's `props.<name>` choice.
+      const entryProps = new WeakMap<object, string>();
+      const entryProp = (file: string, name: string): Value => chosenValue(file, `props.${name}`);
+      /** True for a member access rooted at the global `process`, which is never read: the whole access is a gap. */
+      function globalProcess(expression: ts.Expression, mod: Module, env: Env): boolean {
+        let root = expression;
+        while (ts.isPropertyAccessExpression(root) || ts.isElementAccessExpression(root)) root = root.expression;
+        return ts.isIdentifier(root) && root.text === 'process' && !Object.hasOwn(env, 'process') && !mod.constants.has('process') && !mod.imports.has('process');
+      }
+      function isClsx(callee: ts.Expression, mod: Module, env: Env): boolean {
+        if (!ts.isIdentifier(callee) || Object.hasOwn(env, callee.text) || mod.constants.has(callee.text)) return false;
+        const imported = mod.imports.get(callee.text);
+        return imported?.file === 'clsx' && (imported.name === 'clsx' || imported.name === 'default');
+      }
+      const lookup = (object: Record<string, unknown>, key: string): Value => object[key] as Value;
       function module(file: string): Module {
         currentFile = file;
         const cached = modules.get(file); if (cached) return cached;
@@ -176,16 +219,17 @@ export function extractPages(project: SourceProject, entries: RouteEntry[], opti
         }
         return mod;
       }
-      function value(expression: ts.Expression, mod: Module, env: Record<string, Value>, depth = 0): Value {
+      function value(expression: ts.Expression, mod: Module, env: Env, depth = 0): Value {
         if (depth > 30) throw new Error('Cyclic or deeply nested constant');
-        if (ts.isParenthesizedExpression(expression) || ts.isAsExpression(expression) || ts.isSatisfiesExpression(expression)) return value(expression.expression, mod, env, depth + 1);
+        // Decision 2: `await x` is the value of x; a Promise prop is modeled by its resolved value.
+        if (ts.isParenthesizedExpression(expression) || ts.isAsExpression(expression) || ts.isSatisfiesExpression(expression) || ts.isNonNullExpression(expression) || ts.isAwaitExpression(expression)) return value(expression.expression, mod, env, depth + 1);
         if (ts.isStringLiteral(expression) || ts.isNoSubstitutionTemplateLiteral(expression)) return expression.text;
         if (ts.isNumericLiteral(expression)) return Number(expression.text);
         if (expression.kind === ts.SyntaxKind.TrueKeyword) return true;
         if (expression.kind === ts.SyntaxKind.FalseKeyword) return false;
         if (expression.kind === ts.SyntaxKind.NullKeyword) return null;
         if (ts.isIdentifier(expression)) {
-          if (Object.hasOwn(env, expression.text)) return env[expression.text]!;
+          if (Object.hasOwn(env, expression.text)) { const bound = env[expression.text]; return bound instanceof Lazy ? bound.get() : bound; }
           const constant = mod.constants.get(expression.text);
           if (constant) return value(constant, mod, env, depth + 1);
           const imported=mod.imports.get(expression.text);
@@ -195,7 +239,9 @@ export function extractPages(project: SourceProject, entries: RouteEntry[], opti
             if(exported)return value(exported,target,{},depth+1);
             if(imported.name==='default')for(const statement of target.source.statements)if(ts.isExportAssignment(statement))return value(statement.expression,target,{},depth+1);
           }
+          if (expression.text === 'undefined' && !imported) return undefined;
         }
+        if ((ts.isPropertyAccessExpression(expression) || ts.isElementAccessExpression(expression)) && globalProcess(expression, mod, env)) return previewValue(expression, mod);
         if (ts.isPropertyAccessExpression(expression)) {
           if (ts.isIdentifier(expression.expression)) {
             const scope = mod.styles.get(expression.expression.text);
@@ -203,14 +249,66 @@ export function extractPages(project: SourceProject, entries: RouteEntry[], opti
           }
           const object = value(expression.expression, mod, env, depth + 1);
           if (object instanceof PropValue) throw new Error('Object preview props need a saved adapter');
-          if (object && typeof object === 'object' && !Array.isArray(object) && Object.hasOwn(object, expression.name.text)) return object[expression.name.text] as Value;
+          if (expression.questionDotToken && (object === null || object === undefined)) return undefined;
+          if (object && typeof object === 'object' && !Array.isArray(object) && Object.hasOwn(object, expression.name.text)) return lookup(object, expression.name.text);
+          if (object && typeof object === 'object' && entryProps.has(object)) return entryProp(entryProps.get(object)!, expression.name.text);
+        }
+        if (ts.isElementAccessExpression(expression)) {
+          const object = value(expression.expression, mod, env, depth + 1);
+          const key = value(expression.argumentExpression, mod, env, depth + 1);
+          if (object instanceof PropValue || key instanceof PropValue) throw new Error('Prop-dependent lookups need a preview adapter');
+          if (expression.questionDotToken && (object === null || object === undefined)) return undefined;
+          if ((typeof key === 'string' || typeof key === 'number') && !RESERVED_KEYS.includes(String(key)) && object && typeof object === 'object') {
+            if (Object.hasOwn(object, String(key))) return lookup(object as Record<string, unknown>, String(key));
+            if (typeof key === 'string' && entryProps.has(object)) return entryProp(entryProps.get(object)!, key);
+          }
+        }
+        if (ts.isPrefixUnaryExpression(expression) && expression.operator === ts.SyntaxKind.ExclamationToken) {
+          const operand = value(expression.operand, mod, env, depth + 1);
+          if (operand instanceof PropValue) throw new Error('Prop-dependent shared branches need a preview adapter');
+          return !operand;
+        }
+        if (ts.isConditionalExpression(expression)) {
+          const condition = value(expression.condition, mod, env, depth + 1);
+          if (condition instanceof PropValue) throw new Error('Prop-dependent shared branches need a preview adapter');
+          return value(condition ? expression.whenTrue : expression.whenFalse, mod, env, depth + 1);
+        }
+        if (ts.isBinaryExpression(expression)) {
+          const operator = expression.operatorToken.kind;
+          if (operator === ts.SyntaxKind.AmpersandAmpersandToken || operator === ts.SyntaxKind.BarBarToken || operator === ts.SyntaxKind.QuestionQuestionToken) {
+            const left = value(expression.left, mod, env, depth + 1);
+            if (left instanceof PropValue) throw new Error('Prop-dependent shared branches need a preview adapter');
+            const settled = operator === ts.SyntaxKind.AmpersandAmpersandToken ? !left : operator === ts.SyntaxKind.BarBarToken ? !!left : left !== null && left !== undefined;
+            return settled ? left : value(expression.right, mod, env, depth + 1);
+          }
+          if (operator === ts.SyntaxKind.EqualsEqualsEqualsToken || operator === ts.SyntaxKind.ExclamationEqualsEqualsToken) {
+            const left = value(expression.left, mod, env, depth + 1), right = value(expression.right, mod, env, depth + 1);
+            if (left instanceof PropValue || right instanceof PropValue) throw new Error('Prop-dependent shared branches need a preview adapter');
+            if ((left !== null && typeof left === 'object') || (right !== null && typeof right === 'object')) throw new Error(`Only scalar values can be compared statically: ${expression.getText(mod.source).slice(0, 100)}`);
+            return (left === right) === (operator === ts.SyntaxKind.EqualsEqualsEqualsToken);
+          }
+        }
+        // Decision 4: any other call is a gap for the whole call, and its arguments are never evaluated.
+        if (ts.isCallExpression(expression) && isClsx(expression.expression, mod, env)) {
+          return classList(expression.arguments.map((argument) => {
+            if (ts.isSpreadElement(argument)) throw new Error(`Spread clsx arguments are unsupported: ${expression.getText(mod.source).slice(0, 100)}`);
+            return value(argument, mod, env, depth + 1);
+          }));
         }
         if (ts.isObjectLiteralExpression(expression)) {
           const result: Record<string, unknown> = {};
           for (const property of expression.properties) {
-            if (!ts.isPropertyAssignment(property) || !(ts.isIdentifier(property.name) || ts.isStringLiteral(property.name))) throw new Error('Unsupported object property');
-            if (['__proto__', 'constructor', 'prototype'].includes(property.name.text)) throw new Error('Reserved object property');
-            result[property.name.text] = value(property.initializer, mod, env, depth + 1);
+            let name: string, initializer: ts.Expression;
+            if (ts.isShorthandPropertyAssignment(property)) { name = property.name.text; initializer = property.name; }
+            else if (ts.isPropertyAssignment(property) && (ts.isIdentifier(property.name) || ts.isStringLiteral(property.name) || ts.isNumericLiteral(property.name))) { name = property.name.text; initializer = property.initializer; }
+            else if (ts.isPropertyAssignment(property) && ts.isComputedPropertyName(property.name)) {
+              const computed = value(property.name.expression, mod, env, depth + 1);
+              if (typeof computed !== 'string' && typeof computed !== 'number') throw new Error('Computed object keys must be static strings or numbers');
+              name = String(computed); initializer = property.initializer;
+            }
+            else throw new Error('Unsupported object property');
+            if (RESERVED_KEYS.includes(name)) throw new Error('Reserved object property');
+            result[name] = value(initializer, mod, env, depth + 1);
           }
           return result;
         }
@@ -218,13 +316,10 @@ export function extractPages(project: SourceProject, entries: RouteEntry[], opti
           if(expression.elements.some((item)=>ts.isOmittedExpression(item)||ts.isSpreadElement(item)))throw new Error('Sparse or spread source arrays need a preview adapter');
           const result=expression.elements.map((item)=>value(item,mod,env,depth+1));sampleArrays.add(result);return result;
         }
-        const code = expression.getText(mod.source);
-        const key = choiceKey(mod.source.fileName,code);
-        const chosen = options.choices?.[key];
-        if (chosen?.kind === 'value') return chosen.value;
-        throw new PreviewRequired({ key, file: mod.source.fileName, expression: code, kind: 'value' });
+        return previewValue(expression, mod);
       }
-      function renderComponent(file: string, name: string, props: Record<string, Value>, path: string): DesignNode[] {
+      /** `isEntry` marks a page/layout entry component, whose props the importer does not supply come from choices. */
+      function renderComponent(file: string, name: string, props: Record<string, Value>, path: string, isEntry = false): DesignNode[] {
         const mod = module(file);
         const key = `${file}:${name}`;
         if (stack.includes(key) || stack.length > 40) throw new Error(`Recursive component ${key}`);
@@ -239,7 +334,7 @@ export function extractPages(project: SourceProject, entries: RouteEntry[], opti
               else if (ts.isIdentifier(expression)) {
                 const local = mod.constants.get(expression.text);
                 if (local && (ts.isArrowFunction(local) || ts.isFunctionExpression(local))) fn = local;
-                else return renderComponent(file, expression.text, props, path);
+                else return renderComponent(file, expression.text, props, path, isEntry);
               }
             }
             if (ts.isVariableStatement(statement)) for (const declaration of statement.declarationList.declarations) {
@@ -247,10 +342,10 @@ export function extractPages(project: SourceProject, entries: RouteEntry[], opti
             }
           }
           if (!fn?.body) throw new Error(`Cannot resolve component export ${name} in ${file}`);
-          const env: Record<string, Value> = {};
+          const env: Env = {};
           const parameter = fn.parameters[0];
           if (parameter) {
-            if (ts.isIdentifier(parameter.name)) env[parameter.name.text] = props;
+            if (ts.isIdentifier(parameter.name)) { env[parameter.name.text] = props; if (isEntry) entryProps.set(props, file); }
             else if (ts.isObjectBindingPattern(parameter.name)) for (const binding of parameter.name.elements) {
               if (!ts.isIdentifier(binding.name) || binding.dotDotDotToken) throw new Error('Unsupported component props');
               const key = binding.propertyName?.getText(mod.source) ?? binding.name.text;
@@ -266,6 +361,7 @@ export function extractPages(project: SourceProject, entries: RouteEntry[], opti
               }
               else if (Object.hasOwn(props, key)) env[binding.name.text] = props[key]!;
               else if (binding.initializer) env[binding.name.text] = value(binding.initializer, mod, env);
+              else if (isEntry) env[binding.name.text] = new Lazy(() => entryProp(file, key));
               else throw new Error(`Missing preview prop ${key} for ${name}`);
             }
           }
@@ -273,14 +369,34 @@ export function extractPages(project: SourceProject, entries: RouteEntry[], opti
           if (ts.isBlock(fn.body)) {
             for (const statement of fn.body.statements) {
               if (ts.isVariableStatement(statement)) for (const declaration of statement.declarationList.declarations) {
-                if (ts.isIdentifier(declaration.name) && declaration.initializer) env[declaration.name.text] = value(declaration.initializer, mod, env);
+                const initializer = declaration.initializer;
+                // Decision 5: local bindings are evaluated lazily, on first use while rendering.
+                const lazy = (compute: () => Value) => new Lazy(() => { currentFile = mod.source.fileName; return compute(); });
+                if (ts.isIdentifier(declaration.name) && initializer) env[declaration.name.text] = lazy(() => value(initializer, mod, env));
+                else if (ts.isObjectBindingPattern(declaration.name) && initializer) {
+                  const source = lazy(() => value(initializer, mod, env));
+                  for (const binding of declaration.name.elements) {
+                    const property = binding.propertyName;
+                    if (!ts.isIdentifier(binding.name) || binding.dotDotDotToken || (property && !ts.isIdentifier(property) && !ts.isStringLiteral(property))) throw new Error(`Unsupported local binding ${declaration.name.getText(mod.source).slice(0, 100)}`);
+                    const key = property ? property.text : binding.name.text, fallback = binding.initializer;
+                    if (RESERVED_KEYS.includes(key)) throw new Error('Reserved object property');
+                    env[binding.name.text] = lazy(() => {
+                      const object = source.get();
+                      if (object instanceof PropValue) throw new Error('Object preview props need a saved adapter');
+                      if (!object || typeof object !== 'object' || Array.isArray(object)) throw new Error(`Cannot destructure ${key} from a non-object preview value: ${initializer.getText(mod.source).slice(0, 100)}`);
+                      const found = Object.hasOwn(object, key) ? lookup(object, key) : entryProps.has(object) ? entryProp(entryProps.get(object)!, key) : undefined;
+                      return found === undefined && fallback ? value(fallback, mod, env) : found;
+                    });
+                  }
+                }
                 else if (ts.isArrayBindingPattern(declaration.name)&&declaration.initializer&&ts.isCallExpression(declaration.initializer)&&reactHook(declaration.initializer.expression,mod,'useState')) {
                   const first=declaration.name.elements[0];
                   if(!first||!ts.isBindingElement(first)||!ts.isIdentifier(first.name)||first.dotDotDotToken||declaration.name.elements.length>2)throw new Error('Unsupported state binding');
                   env[first.name.text]=previewValue(declaration.initializer,mod);
                 }
-                else throw new Error('Unsupported local binding');
+                else throw new Error(`Unsupported local binding ${declaration.name.getText(mod.source).slice(0, 100)}`);
               }
+              else if (ts.isFunctionDeclaration(statement)) continue; // A local helper is never executed; calling it raises a gap.
               else if (ts.isReturnStatement(statement)) body = statement.expression;
               else if (ts.isExpressionStatement(statement)&&ts.isCallExpression(statement.expression)&&(reactHook(statement.expression.expression,mod,'useEffect')||reactHook(statement.expression.expression,mod,'useLayoutEffect'))) {
                 if(previewValue(statement.expression,mod)!==null)throw new Error('Effect preview choices must be null: effects are never executed');
@@ -292,7 +408,7 @@ export function extractPages(project: SourceProject, entries: RouteEntry[], opti
           return renderExpression(body, mod, env, `${path}/root`);
         } finally { stack.pop(); }
       }
-      function renderExpression(expression: ts.Expression, mod: Module, env: Record<string, Value>, path: string): DesignNode[] {
+      function renderExpression(expression: ts.Expression, mod: Module, env: Env, path: string): DesignNode[] {
         if (ts.isParenthesizedExpression(expression)||ts.isAsExpression(expression)||ts.isSatisfiesExpression(expression)) return renderExpression(expression.expression, mod, env, path);
         if (ts.isJsxElement(expression) || ts.isJsxSelfClosingElement(expression)) return renderJsx(expression, mod, env, path);
         if (ts.isJsxFragment(expression)) return children(expression.children, mod, env, path);
@@ -362,11 +478,11 @@ export function extractPages(project: SourceProject, entries: RouteEntry[], opti
         if (literal instanceof PropValue) return [{ id: nodeId(mod.source.fileName, path), kind: 'text', text: `{{${literal.name}}}` }];
         if (declarations && typeof literal === 'string' && /\{\{[A-Za-z_][A-Za-z0-9_]*\}\}/.test(literal)) throw new Error('Literal placeholder syntax in shared components needs an adapter');
         if (Array.isArray(literal)) { if (sampleArrays.has(literal)) return sampledNodes(); return literal as DesignNode[]; }
-        if (literal === null || typeof literal === 'boolean') return [];
+        if (literal === null || literal === undefined || typeof literal === 'boolean') return [];
         if (typeof literal === 'object') throw new Error('Object is not a JSX child');
         return [{ id: nodeId(mod.source.fileName, path), kind: 'text', text: String(literal) }];
       }
-      function children(items: ts.NodeArray<ts.JsxChild>, mod: Module, env: Record<string, Value>, path: string): DesignNode[] {
+      function children(items: ts.NodeArray<ts.JsxChild>, mod: Module, env: Env, path: string): DesignNode[] {
         const output: DesignNode[] = [];
         let index = 0;
         for (const child of items) {
@@ -394,7 +510,7 @@ export function extractPages(project: SourceProject, entries: RouteEntry[], opti
         if (!adapter) throw new Error(`External import ${imported.file} needs a preview adapter`);
         return adapter;
       }
-      function renderJsx(jsx: ts.JsxElement | ts.JsxSelfClosingElement, mod: Module, env: Record<string, Value>, path: string): DesignNode[] {
+      function renderJsx(jsx: ts.JsxElement | ts.JsxSelfClosingElement, mod: Module, env: Env, path: string): DesignNode[] {
         const opening = ts.isJsxElement(jsx) ? jsx.openingElement : jsx;
         let tag = opening.tagName.getText(mod.source);
         if (SHELL_TAGS.has(tag) && (declarations || mod.source.fileName !== entry.layouts?.[0])) throw new Error(`<${tag}> is only supported as the root layout's document shell`);
@@ -482,7 +598,7 @@ export function extractPages(project: SourceProject, entries: RouteEntry[], opti
               style[property.startsWith('--') ? property : property.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`)] = val;
             }
             inline.set(id, style);
-          } else if (literal !== false && literal !== null) {
+          } else if (literal !== false && literal !== null && literal !== undefined) {
             if (typeof literal === 'object') throw new Error(`Non-scalar attribute ${name}`);
             attrs[name === 'className' ? 'class' : name === 'htmlFor' ? 'for' : name] = literal === true ? '' : String(literal);
           }
@@ -491,9 +607,9 @@ export function extractPages(project: SourceProject, entries: RouteEntry[], opti
       }
       // Layout styles load before the page's styles, as in an App Router source hierarchy.
       for (const layout of entry.layouts ?? []) module(layout);
-      let nodes = renderComponent(entry.file, entry.exportName ?? 'default', {}, 'page');
+      let nodes = renderComponent(entry.file, entry.exportName ?? 'default', {}, 'page', true);
       for (const [index, layout] of [...(entry.layouts ?? [])].reverse().entries()) {
-        nodes = renderComponent(layout, 'default', { children: nodes }, `layout/${index}`);
+        nodes = renderComponent(layout, 'default', { children: nodes }, `layout/${index}`, true);
       }
       const id = `page-${namespace}`;
       const first = nodes[0];

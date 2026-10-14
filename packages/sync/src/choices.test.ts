@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { exportPage } from '@hub/design-model';
-import { choiceKey, extractPages, parseSyncState, serializeSyncState, synchronizePages } from './index.js';
+import { choiceKey, choicesProblem, extractPages, parseSyncState, serializeSyncState, synchronizePages } from './index.js';
 const entry = [{ route: '/', file: 'page.tsx' }];
 describe('saved source preview choices', () => {
   it('reports a stable missing gap and reuses accepted sample nodes with source-derived IDs', () => {
@@ -95,5 +95,16 @@ describe('saved source preview choices', () => {
     const result=extractPages({files},entry);
     expect(result.ok).toBe(true);
     if(result.ok)expect(exportPage(result.doc,Object.keys(result.doc.pages)[0]!)).toMatchObject({ok:true,value:{html:expect.stringContaining('From source')}});
+  });
+});
+describe('preview choice limits (R9)', () => {
+  const many = (count: number, size: number) => Object.fromEntries(Array.from({ length: count }, (_, index) => [choiceKey('page.tsx', `e${index}`), { kind: 'value' as const, value: 'x'.repeat(size) }]));
+  it('accepts up to 2,000 choices and refuses 2,001', () => {
+    expect(choicesProblem(many(2000, 1))).toBeNull();
+    expect(choicesProblem(many(2001, 1))).toBe('At most 2000 preview choices are supported');
+  });
+  it('accepts up to 4 MB of choices and refuses more', () => {
+    expect(choicesProblem(many(2000, 1900))).toBeNull();
+    expect(choicesProblem(many(2000, 2100))).toBe('Preview choices exceed 4 MB');
   });
 });

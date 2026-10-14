@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { canonicalStringify, exportPage } from '@hub/design-model';
-import { extractPages, discoverNextRoutes } from './index.js';
+import { choiceKey, extractPages, discoverNextRoutes } from './index.js';
 
 const fixture = {
   'web/page.tsx': `import styles from './page.module.css'; import { Button } from './Button';
@@ -256,5 +256,118 @@ describe('path aliases and the document shell', () => {
     }
     const pageOnly = extractPages({ files: { 'page.tsx': `export default () => <html><body>x</body></html>` } }, [{ route: '/', file: 'page.tsx' }]);
     expect(pageOnly).toMatchObject({ ok: false, diagnostics: [{ file: 'page.tsx', message: expect.stringContaining('<html> is only supported') }] });
+  });
+});
+
+describe('clsx, async components and choice-backed calls', () => {
+  const route = [{ route: '/', file: 'app/page.tsx' }];
+  const css = { 'app/page.module.css': `.a { color: red; } .b { padding: 1px; }`, 'app/globals.css': `.ember { margin: 0; } .x { top: 0; } .y { left: 0; } .z { right: 0; }` };
+  const pageRoot = (result: ReturnType<typeof extractPages>) => { if (!result.ok) throw new Error(JSON.stringify(result.diagnostics)); return Object.values(result.doc.pages)[0]!.root; };
+  const gapOf = (result: ReturnType<typeof extractPages>) => { if (result.ok) throw new Error('gap expected'); return result.diagnostics[0]!.gap; };
+  const val = (file: string, expression: string, value: unknown) => ({ [choiceKey(file, expression)]: { kind: 'value' as const, value: value as string } });
+
+  it('evaluates clsx like the library: strings kept, falsy dropped, arrays flattened, object keys with truthy values', () => {
+    const files = { ...css, 'app/page.tsx': `import { clsx } from "clsx"; import styles from './page.module.css'; import './globals.css';
+      const cond = true; const off = false;
+      export default () => <p className={clsx(styles.a, cond && styles.b, "ember", off && "nope", null, undefined, 0, ["x", [false, "y"]], { z: true, nope: false, [styles.b]: 1 })}>Hi</p>` };
+    expect(pageRoot(extractPages({ files }, route)).style.base).toEqual({ color: 'red', padding: '1px', margin: '0', top: '0', left: '0', right: '0' });
+    const off = { ...files, 'app/page.tsx': files['app/page.tsx'].replace('const cond = true', 'const cond = false') };
+    expect(pageRoot(extractPages({ files: off }, route)).style.base).toEqual({ color: 'red', margin: '0', top: '0', left: '0', right: '0', padding: '1px' });
+  });
+
+  it('takes a clsx condition from a saved choice and raises the gap for that argument only', () => {
+    const files = { ...css, 'app/page.tsx': `import clsx from "clsx"; import styles from './page.module.css';
+      export default function Page() { const cond = isOn(); return <p className={clsx(styles.a, cond && styles.b)}>Hi</p>; }` };
+    expect(gapOf(extractPages({ files }, route))).toMatchObject({ file: 'app/page.tsx', expression: 'isOn()', kind: 'value' });
+    expect(pageRoot(extractPages({ files }, route, { choices: val('app/page.tsx', 'isOn()', true) })).style.base).toEqual({ color: 'red', padding: '1px' });
+    expect(pageRoot(extractPages({ files }, route, { choices: val('app/page.tsx', 'isOn()', false) })).style.base).toEqual({ color: 'red' });
+  });
+
+  it('builds in only clsx from the module "clsx": other class helpers are calls with one gap for the whole call', () => {
+    for (const [source, expression] of [
+      [`import { cn } from './cn'; export default () => <p className={cn("a", missing)}>Hi</p>`, 'cn("a", missing)'],
+      [`import { clsx } from 'classnames'; export default () => <p className={clsx("a")}>Hi</p>`, 'clsx("a")'],
+    ]) {
+      const result = extractPages({ files: { 'app/page.tsx': source!, 'app/cn.ts': 'export function cn() { return "a"; }' } }, route);
+      expect(gapOf(result)).toMatchObject({ file: 'app/page.tsx', expression, kind: 'value' });
+    }
+  });
+
+  it('renders async page components and reads awaited route props from the props.<name> choice of the entry file', () => {
+    const files = { 'app/page.tsx': `export default async function LoginPage({ params, searchParams }: { params: Promise<{}>; searchParams: Promise<{ [k: string]: string | string[] | undefined }> }) {
+      const p = await searchParams;
+      return <a href={p.next}>Go</a>;
+    }` };
+    expect(gapOf(extractPages({ files }, route))).toEqual({ key: choiceKey('app/page.tsx', 'props.searchParams'), file: 'app/page.tsx', expression: 'props.searchParams', kind: 'value' });
+    const root = pageRoot(extractPages({ files }, route, { choices: val('app/page.tsx', 'props.searchParams', { next: '/home' }) }));
+    expect(root).toMatchObject({ tag: 'a', attrs: { href: '/home' } });
+    const arrow = { 'app/page.tsx': `const Page = async (props: { searchParams: Promise<{ next?: string }> }) => { const { next } = await props.searchParams; return <a href={next}>Go</a>; }; export default Page;` };
+    expect(gapOf(extractPages({ files: arrow }, route))).toMatchObject({ expression: 'props.searchParams' });
+    expect(pageRoot(extractPages({ files: arrow }, route, { choices: val('app/page.tsx', 'props.searchParams', { next: '/x' }) }))).toMatchObject({ attrs: { href: '/x' } });
+  });
+
+  it('raises entry props of layouts against the layout file and keeps shared component prop rules', () => {
+    const files = { 'app/layout.tsx': `export default async function Layout({ children, params }: { children: unknown; params: Promise<{ id: string }> }) { const { id } = await params; return <section title={id}>{children}</section>; }`, 'app/page.tsx': `export default () => <p>Hi</p>` };
+    const layouts = [{ route: '/', file: 'app/page.tsx', layouts: ['app/layout.tsx'] }];
+    expect(gapOf(extractPages({ files }, layouts))).toMatchObject({ file: 'app/layout.tsx', expression: 'props.params' });
+    expect(pageRoot(extractPages({ files }, layouts, { choices: val('app/layout.tsx', 'props.params', { id: '7' }) }))).toMatchObject({ tag: 'section', attrs: { title: '7' } });
+    const child = extractPages({ files: { 'app/page.tsx': `function Card({ title }: { title: string }) { return <p>{title}</p>; } export default () => <Card />` } }, route);
+    expect(child).toMatchObject({ ok: false, diagnostics: [{ message: 'Missing preview prop title for Card' }] });
+  });
+
+  it('raises a gap for a call to an imported source function without evaluating its arguments, and a saved value satisfies it', () => {
+    const files = {
+      'src/lib/auth.ts': `export function loginSettings() { return process.env.SECRET; } export function safeNext(x: unknown) { return x; }`,
+      'src/app/page.tsx': `import { loginSettings, safeNext } from "@/lib/auth";
+        const MESSAGES = { unset: "Login is not configured", bad: "Wrong password" };
+        export default async function LoginPage({ searchParams }: { searchParams: Promise<Record<string, string>> }) {
+          const params = await searchParams;
+          const next = safeNext(typeof params.next === "string" ? params.next : undefined);
+          const errorKey = params.error;
+          const message = !loginSettings() ? MESSAGES.unset : errorKey ? MESSAGES[errorKey] : undefined;
+          function unused() { return 1; }
+          const handler = () => unused();
+          return <main><input type="hidden" value={next} />{message && <p>{message}</p>}</main>;
+        }`,
+    };
+    const project = { files, aliases: { '@/': 'src/' } };
+    const entries = [{ route: '/', file: 'src/app/page.tsx' }];
+    // The call is a gap before its argument (which reads the unresolved searchParams) is ever evaluated.
+    expect(gapOf(extractPages(project, entries))).toMatchObject({ file: 'src/app/page.tsx', expression: 'safeNext(typeof params.next === "string" ? params.next : undefined)', kind: 'value' });
+    const next = val('src/app/page.tsx', 'safeNext(typeof params.next === "string" ? params.next : undefined)', '/home');
+    expect(gapOf(extractPages(project, entries, { choices: next }))).toMatchObject({ file: 'src/app/page.tsx', expression: 'loginSettings()', kind: 'value' });
+    // An unset login never reads searchParams, so no route-prop gap arises.
+    const unset = pageRoot(extractPages(project, entries, { choices: { ...next, ...val('src/app/page.tsx', 'loginSettings()', null) } }));
+    expect(unset.children[1]).toMatchObject({ tag: 'p', children: [{ text: 'Login is not configured' }] });
+    const settings = { ...next, ...val('src/app/page.tsx', 'loginSettings()', { password: 'x' }) };
+    expect(gapOf(extractPages(project, entries, { choices: settings }))).toMatchObject({ file: 'src/app/page.tsx', expression: 'props.searchParams' });
+    const configured = pageRoot(extractPages(project, entries, { choices: { ...settings, ...val('src/app/page.tsx', 'props.searchParams', { error: 'bad' }) } }));
+    expect(configured.children.map((child) => child.kind === 'element' ? [child.tag, child.attrs['value'] ?? (child.children[0] as { text?: string })?.text] : null)).toEqual([['input', '/home'], ['p', 'Wrong password']]);
+    // A field missing from a chosen object stays a gap for that member expression, as before.
+    expect(gapOf(extractPages(project, entries, { choices: { ...settings, ...val('src/app/page.tsx', 'props.searchParams', {}) } }))).toMatchObject({ expression: 'params.error' });
+    const clean = pageRoot(extractPages(project, entries, { choices: { ...settings, ...val('src/app/page.tsx', 'props.searchParams', { error: null }) } }));
+    expect(clean.children).toHaveLength(1);
+  });
+
+  it('raises a gap for process.env members, not for the comparison or the global', () => {
+    const files = { 'app/page.tsx': `export default () => <main>{process.env.NODE_ENV === "development" && <p>Dev</p>}<span>x</span></main>` };
+    expect(gapOf(extractPages({ files }, route))).toEqual({ key: choiceKey('app/page.tsx', 'process.env.NODE_ENV'), file: 'app/page.tsx', expression: 'process.env.NODE_ENV', kind: 'value' });
+    expect(pageRoot(extractPages({ files }, route, { choices: val('app/page.tsx', 'process.env.NODE_ENV', 'production') })).children).toHaveLength(1);
+    expect(pageRoot(extractPages({ files }, route, { choices: val('app/page.tsx', 'process.env.NODE_ENV', 'development') })).children[0]).toMatchObject({ tag: 'p' });
+    const bracket = { 'app/page.tsx': `export default () => <p title={process.env["TITLE"]}>x</p>` };
+    expect(gapOf(extractPages({ files: bracket }, route))).toMatchObject({ expression: 'process.env["TITLE"]' });
+  });
+
+  it('evaluates local bindings lazily and keeps rejecting unsupported statements and bindings', () => {
+    const files = { 'app/page.tsx': `export default function Page() { const unused = boom(); const { a, b: renamed, c = "dflt" } = data(); return <p title={c}>{a}{renamed}</p>; }` };
+    expect(gapOf(extractPages({ files }, route))).toMatchObject({ expression: 'data()' });
+    const root = pageRoot(extractPages({ files }, route, { choices: val('app/page.tsx', 'data()', { a: 'A', b: 'B' }) }));
+    expect(root).toMatchObject({ attrs: { title: 'dflt' }, children: [{ text: 'A' }, { text: 'B' }] });
+    for (const [source, message] of [
+      [`export default function Page() { const { ...rest } = data(); return <p>x</p>; }`, 'Unsupported local binding'],
+      [`export default function Page() { const [a] = data(); return <p>x</p>; }`, 'Unsupported local binding'],
+      [`export default function Page() { if (x) return null; return <p>x</p>; }`, 'Component execution needs a saved preview choice'],
+      [`export default function Page() { const a = b; const b = a; return <p>{a}</p>; }`, 'Cyclic local binding'],
+    ]) expect(extractPages({ files: { 'app/page.tsx': source! } }, route)).toMatchObject({ ok: false, diagnostics: [{ file: 'app/page.tsx', message: expect.stringContaining(message!) }] });
   });
 });

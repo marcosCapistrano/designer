@@ -4,10 +4,13 @@ export function choiceKey(file: string, expression: string): string { return cre
 export class PreviewRequired extends Error {
   constructor(readonly gap: SourceGap) { super(`Dynamic expression needs a saved preview choice: ${gap.expression.slice(0,100)}`); }
 }
+// R9: real apps have many dynamic sites; the bound still stops runaway data.
+const MAX_CHOICES = 2000;
+const MAX_CHOICES_BYTES = 4 * 1024 * 1024;
 /** Choices are JSON data, bounded before they reach source traversal. The final model is validated too. */
 export function choicesProblem(value: unknown): string | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return 'Preview choices must be an object';
-  if (Object.keys(value).length > 100) return 'At most 100 preview choices are supported';
+  if (Object.keys(value).length > MAX_CHOICES) return `At most ${MAX_CHOICES} preview choices are supported`;
   const json = (item: unknown, depth = 0): boolean => {
     if (depth > 30) return false;
     if (item === null || typeof item === 'boolean') return true;
@@ -24,6 +27,6 @@ export function choicesProblem(value: unknown): string | null {
     } else if (raw['kind'] === 'nodes') { if (!Array.isArray(raw['nodes'])) return 'Preview nodes must be an array'; }
     else return 'Invalid preview choice kind';
   }
-  if (JSON.stringify(value).length > 256 * 1024) return 'Preview choices exceed 256 KB';
+  if (JSON.stringify(value).length > MAX_CHOICES_BYTES) return 'Preview choices exceed 4 MB';
   return null;
 }
