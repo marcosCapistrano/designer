@@ -42,9 +42,47 @@ describe('BasePainter', () => {
     const stats = painter.paint(input(frames, { camera: { x: 380, y: 0, scale: 0.5 } }));
     expect(stats).toMatchObject({ mode: 'partial', blit: true, regions: 1 });
     const blit = calls.find(c => c.m === 'drawImage');
-    expect(blit?.a).toEqual([ctx.canvas, 10, 0]);
+    expect(blit?.a[0]).toBe(ctx.canvas);
+    expect(blit?.a[1]).toBe(10);
+    expect(blit?.a[2]).toBe(0);
     expect(calls.filter(c => c.m === 'rect').map(c => c.a)).toEqual([[0, 0, 10, 600]]);
     expect(draws(calls)).toContainEqual(['k/0_0', -190, 0, 512, 512]);
+  });
+
+  it('pan left blits and repaints the right strip', () => {
+    const { ctx, calls } = fakeCtx();
+    const painter = new BasePainter(ctx, tilesOf());
+    const frames = [frame()];
+    painter.paint(input(frames, { camera: { x: 0, y: 0, scale: 0.5 } }));
+    calls.length = 0;
+    const stats = painter.paint(input(frames, { camera: { x: 400, y: 0, scale: 0.5 } }));
+    expect(stats).toMatchObject({ mode: 'partial', blit: true, regions: 1 });
+    const blit = calls.find(c => c.m === 'drawImage');
+    expect(blit?.a[0]).toBe(ctx.canvas);
+    expect(blit?.a[1]).toBe(-200);
+    expect(blit?.a[2]).toBe(0);
+    expect(calls.filter(c => c.m === 'rect').map(c => c.a)).toEqual([[600, 0, 200, 600]]);
+  });
+
+  it('vertical pans blit and repaint the exposed top or bottom strip', () => {
+    const { ctx, calls } = fakeCtx();
+    const painter = new BasePainter(ctx, tilesOf());
+    const frames = [frame()];
+    painter.paint(input(frames, { camera: { x: 0, y: 0, scale: 0.5 } }));
+    calls.length = 0;
+    // Camera moves up (y decreases): content moves down, so dy > 0 and the top strip is exposed.
+    expect(painter.paint(input(frames, { camera: { x: 0, y: -100, scale: 0.5 } }))).toMatchObject({ mode: 'partial', blit: true, regions: 1 });
+    const down = calls.find(c => c.m === 'drawImage');
+    expect(down?.a[1]).toBe(0);
+    expect(down?.a[2]).toBe(50);
+    expect(calls.filter(c => c.m === 'rect').map(c => c.a)).toEqual([[0, 0, 800, 50]]);
+    calls.length = 0;
+    // Camera moves back down: dy < 0 and the bottom strip is exposed.
+    expect(painter.paint(input(frames, { camera: { x: 0, y: 0, scale: 0.5 } }))).toMatchObject({ mode: 'partial', blit: true, regions: 1 });
+    const up = calls.find(c => c.m === 'drawImage');
+    expect(up?.a[1]).toBe(0);
+    expect(up?.a[2]).toBe(-50);
+    expect(calls.filter(c => c.m === 'rect').map(c => c.a)).toEqual([[0, 550, 800, 50]]);
   });
 
   it('no change paints nothing', () => {
@@ -124,5 +162,78 @@ describe('BasePainter', () => {
     const painter = new BasePainter(ctx, tilesOf());
     painter.paint(input([frame()]));
     expect(painter.paint(input([frame()]))).toMatchObject({ mode: 'full' });
+  });
+
+  it('dpr change repaints fully even at the same canvas size', () => {
+    const { ctx } = fakeCtx();
+    const painter = new BasePainter(ctx, tilesOf());
+    const frames = [frame()];
+    painter.paint(input(frames, { dpr: 1 }));
+    expect(painter.paint(input(frames, { dpr: 2 }))).toMatchObject({ mode: 'full' });
+  });
+
+  it('invalidate() repaints fully once, then paints are incremental again', () => {
+    const { ctx } = fakeCtx();
+    const painter = new BasePainter(ctx, tilesOf());
+    const frames = [frame()];
+    painter.paint(input(frames));
+    painter.invalidate();
+    expect(painter.paint(input(frames))).toMatchObject({ mode: 'full', regions: 1 });
+    expect(painter.paint(input(frames))).toMatchObject({ mode: 'none' });
+  });
+
+  it('a canvas width or height change repaints fully', () => {
+    const { ctx } = fakeCtx();
+    const painter = new BasePainter(ctx, tilesOf());
+    const frames = [frame()];
+    painter.paint(input(frames));
+    ctx.canvas.width = 640;
+    expect(painter.paint(input(frames))).toMatchObject({ mode: 'full' });
+    expect(painter.paint(input(frames))).toMatchObject({ mode: 'none' });
+    ctx.canvas.height = 500;
+    expect(painter.paint(input(frames))).toMatchObject({ mode: 'full' });
+  });
+
+  it('a label wider than its frame is redrawn when a strip touches only its overhang', () => {
+    const { ctx, calls } = fakeCtx();
+    const painter = new BasePainter(ctx, tilesOf());
+    const narrow = [frame({ name: 'Narrow', device: 'mobile', w: 100 })];
+    painter.paint(input(narrow, { camera: { x: -400, y: -40, scale: 0.5 } }));
+    calls.length = 0;
+    // The frame moves to device x 0..50; the exposed right strip (600..800) lies past its right edge.
+    const stats = painter.paint(input(narrow, { camera: { x: 0, y: -40, scale: 0.5 } }));
+    expect(stats).toMatchObject({ mode: 'partial', blit: true, regions: 1 });
+    expect(calls.filter(c => c.m === 'rect').map(c => c.a)).toEqual([[600, 0, 200, 600]]);
+    expect(calls.filter(c => c.m === 'fillText').map(c => c.a)).toEqual([['Narrow · Mobile', 0, 14]]);
+  });
+
+  it('a missing tile falls back to zoom 0.5 before zoom 0.25 when both are loaded', () => {
+    const { ctx, calls } = fakeCtx();
+    const painter = new BasePainter(ctx, tilesOf('k/0_0', 'q/0_0'));
+    painter.paint(input([frame()], { zoom: 1, camera: { x: 0, y: 0, scale: 1 } }));
+    const drawn = draws(calls);
+    expect(drawn).toContainEqual(['k/0_0', 0, 0, 256, 256, 0, 0, 512, 512]);
+    expect(drawn.filter(d => d[0] === 'q/0_0')).toEqual([]);
+  });
+
+  it('a paint that throws mid-way forces a full repaint next time', () => {
+    const { ctx } = fakeCtx();
+    const loaded = tilesOf('k/0_0', 'k/1_0');
+    let failing = false;
+    const tiles = {
+      get: (k: string, x: number, y: number) => {
+        if (failing) throw new Error('boom');
+        return loaded.get(k, x, y);
+      },
+    };
+    const painter = new BasePainter(ctx, tiles);
+    const frames = [frame({ w: 2000 })];
+    painter.paint(input(frames));
+    // The pan blits the canvas, then the exposed strip's tile lookup throws.
+    failing = true;
+    expect(() => painter.paint(input(frames, { camera: { x: 20, y: 0, scale: 0.5 } }))).toThrow('boom');
+    failing = false;
+    // Without a full repaint this would blit the already-shifted canvas a second time.
+    expect(painter.paint(input(frames, { camera: { x: 20, y: 0, scale: 0.5 } }))).toMatchObject({ mode: 'full' });
   });
 });

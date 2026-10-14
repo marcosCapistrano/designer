@@ -41,6 +41,7 @@ interface Last {
   cam: Camera; // snapped to device px
   width: number;
   height: number;
+  dpr: number;
   frames: readonly Frame[];
   zoom: Zoom;
   smoothing: boolean;
@@ -50,6 +51,7 @@ interface Pass {
   cam: Camera; // snapped
   s: number; // device px per world px
   dpr: number;
+  width: number;
   frames: readonly Frame[];
   zoom: Zoom;
   smoothing: boolean;
@@ -113,12 +115,16 @@ export class BasePainter {
       cam.scale !== last.cam.scale ||
       width !== last.width ||
       height !== last.height ||
+      input.dpr !== last.dpr ||
       input.frames !== last.frames ||
       input.zoom !== last.zoom ||
       (input.smoothing && !last.smoothing) ||
       Math.abs(dx) >= width ||
       Math.abs(dy) >= height;
 
+    // Set before any drawing and cleared only when the paint completes, so a
+    // throw mid-paint leaves it set and the next paint starts from a full repaint.
+    this.invalidated = true;
     const regions: Rect[] = [];
     let blit = false;
     if (full || last === null) {
@@ -138,11 +144,11 @@ export class BasePainter {
       }
     }
 
-    const pass: Pass = { cam, s, dpr: input.dpr, frames: input.frames, zoom: input.zoom, smoothing: input.smoothing };
+    const pass: Pass = { cam, s, dpr: input.dpr, width, frames: input.frames, zoom: input.zoom, smoothing: input.smoothing };
     const counts: Counts = { tilesDrawn: 0, missing: 0 };
     for (const r of regions) this.paintRegion(r, pass, counts);
 
-    this.last = { cam, width, height, frames: input.frames, zoom: input.zoom, smoothing: input.smoothing };
+    this.last = { cam, width, height, dpr: input.dpr, frames: input.frames, zoom: input.zoom, smoothing: input.smoothing };
     this.invalidated = false;
     this.dirty = [];
     return {
@@ -156,7 +162,7 @@ export class BasePainter {
 
   private paintRegion(r: Rect, pass: Pass, counts: Counts): void {
     const { ctx } = this;
-    const { cam, s, dpr, frames, zoom } = pass;
+    const { cam, s, dpr, width, frames, zoom } = pass;
     ctx.save();
     ctx.beginPath();
     ctx.rect(r.x, r.y, r.w, r.h);
@@ -195,7 +201,10 @@ export class BasePainter {
           ctx.fillRect(fr.x + fr.w - 24 * dpr, fr.y + 8 * dpr, 16 * dpr, 16 * dpr);
         }
       }
-      if (cam.scale >= LABEL_MIN_SCALE && rectsIntersect({ x: fr.x, y: fr.y - 20 * dpr, w: fr.w, h: 20 * dpr }, r)) {
+      // The label text may run past the frame's right edge, so its cull band
+      // extends to the canvas edge rather than the frame width.
+      const labelBand: Rect = { x: fr.x, y: fr.y - 20 * dpr, w: Math.max(0, width - fr.x), h: 20 * dpr };
+      if (cam.scale >= LABEL_MIN_SCALE && rectsIntersect(labelBand, r)) {
         ctx.fillStyle = COLORS.label;
         ctx.font = `${12 * dpr}px system-ui, sans-serif`;
         ctx.textBaseline = 'bottom';
