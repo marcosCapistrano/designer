@@ -126,6 +126,33 @@ describe('lexShell heredocs', () => {
     expect(view('cat <<A <<B\na\nA\nb\nB\ngit push')).toEqual([['cat'], ['git', 'push']]);
     expect(view('cat <<EOF\ngit push')).toEqual([['cat']]);
   });
+
+  it('marks a <<< here-string separately from a << heredoc', () => {
+    const here = lexShell('cat <<< x\ngit push');
+    expect(here.map((c) => c.heredoc)).toEqual([false, false]);
+    expect(here.map((c) => c.herestring)).toEqual([true, false]);
+    const doc = lexShell('cat <<EOF\nx\nEOF\ngit push');
+    expect(doc.map((c) => c.heredoc)).toEqual([true, false]);
+    expect(doc.map((c) => c.herestring)).toEqual([false, false]);
+  });
+
+  it('fails closed on a < redirection inside [[ ]] (N6 sibling)', () => {
+    expect(() => lexShell('[[ x =~ (a <<E\n) ]]')).toThrow(LexUnclear);
+    expect(() => lexShell('[[ a < b ]]')).toThrow(LexUnclear);
+  });
+
+  it('fails closed on a quoted command substitution inside ${...}', () => {
+    expect(() => lexShell("echo ${a['$(ssh h)']}")).toThrow(LexUnclear);
+    expect(() => lexShell("echo ${x:0:'`id`'}")).toThrow(LexUnclear);
+    expect(view("echo ${a['literal']}")).toEqual([['echo', "${a['literal']}~"]]);
+  });
+
+  it('allows simple array subscripts in arithmetic but not a bare name', () => {
+    expect(view('echo $(( arr[0] + 1 ))')).toEqual([['echo', '$(( arr[0] + 1 ))~']]);
+    expect(view('echo $((${#a[@]} - 1))')).toEqual([['echo', '$((${#a[@]} - 1))~']]);
+    expect(() => lexShell('echo $((x))')).toThrow(LexUnclear);
+    expect(() => lexShell('echo $(( arr[$(ssh h)] ))')).toThrow(LexUnclear);
+  });
 });
 
 describe('lexShell fails closed', () => {

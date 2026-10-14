@@ -721,6 +721,111 @@ describe('deployDenyReason fix round 4', () => {
   });
 });
 
+// ---------------------------------------------------------------------------------------------
+// Fix round 5 (round-4 re-review): narrow the data-builtin $( rule (Ruling 15), close the N6/N8/N9
+// siblings cheaply, and lift the minor false denies the re-review listed.
+// ---------------------------------------------------------------------------------------------
+
+/** I1 (Ruling 15): a real substitution the lexer already scans is not a data-builtin bypass. */
+const ALLOWED_5_I1: string[] = [
+  '[ -z "$(git status --porcelain)" ]',
+  'if [ -n "$(git status --porcelain)" ]; then git add -A; fi',
+  'test -z "$(git diff --name-only)"',
+  '[[ -n $(git status -s) ]] && echo dirty',
+  'export VERSION=$(node -p "require(\'./package.json\').version")',
+  'export SHA=$(git rev-parse HEAD)',
+  "printf '%s\\n' \"$(git rev-parse HEAD)\"",
+  'local x=$(pwd)',
+  '[[ $(uname) == Linux ]] && echo linux',
+  '[[ "$(git branch --show-current)" == build/* ]] && echo onbranch',
+  '[ "$(id -u)" = 0 ] && echo root',
+  '[ "$(uname)" = Linux ]',
+];
+
+/** The minor false denies the re-review listed: all now allowed. */
+const ALLOWED_5: string[] = [
+  // M1: ENV=/PS4=/BASH_ENV= only matters as an assignment, not as plain text.
+  'echo "ENV=prod" >> .env',
+  'grep ENV= .env',
+  'git commit -m "ENV=prod config"',
+  'echo "PS4=x"',
+  // M2: parameter expansions and simple subscripts in arithmetic.
+  'echo $((${#arr[@]} - 1))',
+  'for ((i=0;i<${#a[@]};i++)); do :; done',
+  'echo $(( arr[0] + 1 ))',
+  // M3: a dynamic value after a literal -c key, and -c as a subcommand option.
+  'git -c user.name="$NAME" commit -m m',
+  'git commit -c "$SHA"',
+  'git show -c "$SHA"',
+  // M4: git-<x> runs the normal git rules, so a non-pushing subcommand is allowed.
+  'git-lfs status',
+  'git-crypt status',
+  // M5: a here-string that does not feed a program's script input.
+  'xargs -n1 echo <<< "a b"',
+  "bash -c 'pnpm test' <<< x",
+  'source .env <<< x',
+  'bash script.sh <<< x',
+  // C2: a literal config key after a config subcommand.
+  'git config set user.name x',
+  'git config get user.name',
+  // C3: callback builtins without a C/F callback flag.
+  'mapfile -t arr',
+  'readarray -t lines',
+  'compgen -A function',
+];
+
+const DENIED_5: Array<[string, string]> = [
+  // C1: a < or << operator inside [[ ]] (N6 sibling) fails closed.
+  ['[[ x =~ (a <<E\n) ]]; ssh h', UNCLEAR],
+  ["[[ x =~ (a <<'E'\n) ]]; ssh h", UNCLEAR],
+  ['[[ x =~ (a <<-E\n) ]]; ssh h', UNCLEAR],
+  ['[[ x =~ a(<<E\n) ]]; ssh h', UNCLEAR],
+  // C2: a dynamic key after a git config subcommand word.
+  ['git config set "$K" push', UNCLEAR],
+  // C3: a clustered callback flag.
+  ['mapfile -tC id a', UNCLEAR],
+  ['compgen -fC id', UNCLEAR],
+  ['complete -fF id x', UNCLEAR],
+  // C4: a quoted $( inside a ${...} subscript or offset.
+  ["echo ${a['$(ssh h)']}", UNCLEAR],
+  ["echo ${a['$(ssh h)']:-d}", UNCLEAR],
+  ["x=abc; echo ${x:0:'$(ssh h)'}", UNCLEAR],
+  ["echo ${@:'$(ssh h)'}", UNCLEAR],
+  ["echo ${!a['$(ssh h)']}", UNCLEAR],
+  // C5: /proc/thread-self/fd/0 and /proc/<pid>/fd/0 read this process's stdin.
+  ['sh /proc/thread-self/fd/0', UNCLEAR],
+  ['bash /proc/123/fd/0', UNCLEAR],
+  // M1: an assignment to PS4/BASH_ENV/ENV still fails closed.
+  ['ENV=x bash -c :', UNCLEAR],
+  ['export BASH_ENV=f', UNCLEAR],
+  ["PS4='$(ssh h)' bash -x s.sh", UNCLEAR],
+  // M2: a bare-name arithmetic operand still fails closed.
+  ["x='a[$(ssh h)]'; echo $((x))", UNCLEAR],
+  ['(( x ))', UNCLEAR],
+  ['let x', UNCLEAR],
+  // M3: a dynamic -c key still fails closed.
+  ['git -c "$K=push" p', UNCLEAR],
+  // M4: git-<x> keeps the push reason.
+  ['git-lfs push', GIT_PUSH],
+  // M5: a real heredoc into a shell or xargs still fails closed.
+  ['bash script.sh <<EOF\nx\nEOF', UNCLEAR],
+  ['xargs echo <<EOF\nx\nEOF', UNCLEAR],
+];
+
+describe('deployDenyReason fix round 5', () => {
+  it.each(ALLOWED_5_I1)('I1 allows %j', (command) => {
+    expect(deployDenyReason(command)).toBeNull();
+  });
+
+  it.each(ALLOWED_5)('allows %j', (command) => {
+    expect(deployDenyReason(command)).toBeNull();
+  });
+
+  it.each(DENIED_5)('denies %j', (command, reason) => {
+    expect(deployDenyReason(command)).toBe(reason);
+  });
+});
+
 describe('checkToolUse', () => {
   it('edits stay in the checkout', () => {
     expect(checkToolUse('/repo', 'Write', { file_path: '/repo/src/a.ts' })).toBeNull();
