@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { DEVICES, DEVICE_WIDTH } from '@hub/protocol';
 import type { Device, HitBox, PageRender, RenderManifest } from '@hub/protocol';
+import type { ControllerDeps } from './controller.js';
 import { CanvasController } from './controller.js';
 import { fitRect } from './geom.js';
 import type { PointerIn } from './gestures.js';
@@ -32,6 +33,19 @@ const M: RenderManifest = {
   ],
 };
 
+/** The home page with its base render keyed by `hash`, so each hash names its own hit-map load. */
+const withBaseHash = (hash: string): RenderManifest => ({
+  version: 1,
+  pages: [
+    {
+      pageId: 'home',
+      name: 'Home',
+      route: '/',
+      renders: { base: render('base', hash), tablet: render('tablet', 'ht'), mobile: render('mobile', 'hm') },
+    },
+  ],
+});
+
 const maps: Record<string, HitBox[]> = {
   hb: [
     { nodeId: 'n1', x: 0, y: 0, w: 1440, h: 1000 },
@@ -40,7 +54,32 @@ const maps: Record<string, HitBox[]> = {
   ],
 };
 
-function harness(now: () => number = () => 0) {
+const defaultHitMaps: ControllerDeps['hitMaps'] = {
+  get: (h: string) => maps[h],
+  load: async (h: string) => maps[h] ?? [],
+};
+
+/** Hit maps whose loads stay pending until a test settles them, one per hash. */
+function deferredMaps() {
+  const cache = new Map<string, HitBox[]>();
+  const pending = new Map<string, { ok: (m: HitBox[]) => void; fail: (e: Error) => void }>();
+  const hitMaps: ControllerDeps['hitMaps'] = {
+    get: (h: string) => cache.get(h),
+    load: (h: string) =>
+      new Promise<HitBox[]>((ok, fail) => {
+        pending.set(h, {
+          ok: (m) => {
+            cache.set(h, m);
+            ok(m);
+          },
+          fail,
+        });
+      }),
+  };
+  return { hitMaps, pending };
+}
+
+function harness(now: () => number = () => 0, hitMaps: ControllerDeps['hitMaps'] = defaultHitMaps) {
   const q: (() => void)[] = [];
   const flush = () => {
     while (q.length) q.shift()!();
@@ -48,10 +87,6 @@ function harness(now: () => number = () => 0) {
   const base = fakeCtx();
   const overlay = fakeCtx();
   const tiles = { get: () => undefined, request: vi.fn() };
-  const hitMaps = {
-    get: (h: string) => maps[h],
-    load: async (h: string) => maps[h] ?? [],
-  };
   const onSelect = vi.fn();
   const c = new CanvasController({
     base: base.ctx,
@@ -67,8 +102,8 @@ function harness(now: () => number = () => 0) {
   return { c, q, flush, base, overlay, tiles, onSelect };
 }
 
-function ready(now: () => number = () => 0) {
-  const h = harness(now);
+function ready(now: () => number = () => 0, hitMaps?: ControllerDeps['hitMaps']) {
+  const h = harness(now, hitMaps);
   h.c.resize(800, 600, 1);
   h.c.setManifest(M);
   h.flush();
@@ -78,6 +113,8 @@ function ready(now: () => number = () => 0) {
 }
 
 const lastFill = (calls: Call[]) => calls.filter((c) => c.m === 'fillRect').at(-1);
+const tileId = (w: TileWant) => `${w.key}/${w.x}_${w.y}`;
+const settle = () => new Promise((r) => setTimeout(r, 0));
 
 describe('CanvasController', () => {
   it('fits the first page on the first frame', () => {
@@ -129,7 +166,7 @@ describe('CanvasController', () => {
     c.pointer(at('down', 0, 0));
     c.pointer(at('move', 730, 45));
     c.pointer(at('up', 730, 45));
-    await new Promise((r) => setTimeout(r, 0));
+    await settle();
     expect(c.selection?.nodeIds).toEqual(['n2']);
   });
 
@@ -141,16 +178,32 @@ describe('CanvasController', () => {
     expect(c.camera.x).toBe(-40);
   });
 
-  it('requests visible tiles, then the coarse level', () => {
-    const { c, tiles } = ready();
+  it('requests visible tiles, then the coarse level, then the prefetch margin', () => {
+    const { c, tiles, flush } = ready();
     c.frame();
     const wants = tiles.request.mock.lastCall?.[0] as readonly TileWant[];
-    expect(wants.slice(0, 5).map((w) => `${w.key}/${w.x}_${w.y}`)).toEqual([
-      'hbh/0_0',
-      'hbh/1_0',
-      'hth/0_0',
+    expect(wants.slice(0, 5).map(tileId)).toEqual(['hbh/0_0', 'hbh/1_0', 'hth/0_0', 'hbq/0_0', 'htq/0_0']);
+
+    // Scale 1 at x=600: the viewport covers base columns 1-2 only. The 25% margin (200 px sideways,
+    // 150 px vertically) reaches base column 0 and the tablet, so those tiles appear only in the
+    // prefetch segment, which is the last 8 entries.
+    c.setCamera({ x: 600, y: 0, scale: 1 });
+    flush();
+    const margin = tiles.request.mock.lastCall?.[0] as readonly TileWant[];
+    expect(margin.map(tileId)).toEqual([
+      'hb/1_0',
+      'hb/2_0',
+      'hb/1_1',
+      'hb/2_1',
       'hbq/0_0',
-      'htq/0_0',
+      'hb/0_0',
+      'hb/1_0',
+      'hb/2_0',
+      'hb/0_1',
+      'hb/1_1',
+      'hb/2_1',
+      'ht/0_0',
+      'ht/0_1',
     ]);
   });
 
@@ -160,6 +213,78 @@ describe('CanvasController', () => {
     c.setDevices(new Set<Device>(['tablet', 'mobile']));
     expect(c.selection).toBeNull();
     expect(c.frames.length).toBe(2);
+  });
+
+  it('setManifest keeps a selection whose frame still exists', async () => {
+    const { c, onSelect } = ready();
+    await c.tap(15, 15);
+    c.setManifest(M);
+    await settle();
+    expect(c.selection).toEqual({ pageId: 'home', device: 'base', nodeIds: ['n3'] });
+    expect(onSelect).not.toHaveBeenCalledWith(null);
+  });
+
+  it('setManifest clears a selection whose page is gone', async () => {
+    const { c, onSelect } = ready();
+    await c.tap(15, 15);
+    c.setManifest({
+      version: 1,
+      pages: [{ pageId: 'other', name: 'Other', route: '/other', renders: { base: render('base', 'ob') } }],
+    });
+    expect(c.selection).toBeNull();
+    expect(onSelect).toHaveBeenLastCalledWith(null);
+  });
+
+  it('setManifest clears a selection whose device render is gone', async () => {
+    const { c, onSelect } = ready();
+    await c.tap(15, 15);
+    c.setManifest({
+      version: 1,
+      pages: [{ pageId: 'home', name: 'Home', route: '/', renders: { tablet: render('tablet', 'ht') } }],
+    });
+    expect(c.selection).toBeNull();
+    expect(onSelect).toHaveBeenLastCalledWith(null);
+  });
+
+  it('a stale hit-map rejection does not clear a newer selection', async () => {
+    const d = deferredMaps();
+    const { c, onSelect } = ready(undefined, d.hitMaps);
+    const tap = c.tap(15, 15);
+    d.pending.get('hb')!.ok(maps.hb!);
+    await tap;
+    expect(c.selection?.nodeIds).toEqual(['n3']);
+
+    c.setManifest(withBaseHash('hB'));
+    const stale = d.pending.get('hB')!;
+    c.setManifest(withBaseHash('hC'));
+    d.pending.get('hC')!.ok(maps.hb!);
+    stale.fail(new Error('stale load failed'));
+    await settle();
+
+    expect(c.selection).toEqual({ pageId: 'home', device: 'base', nodeIds: ['n3'] });
+    expect(onSelect).not.toHaveBeenCalledWith(null);
+  });
+
+  it('a tap still loading its hit map is dropped by setDevices', async () => {
+    const d = deferredMaps();
+    const { c, onSelect } = ready(undefined, d.hitMaps);
+    const tap = c.tap(15, 15);
+    c.setDevices(new Set<Device>(['tablet', 'mobile']));
+    d.pending.get('hb')!.ok(maps.hb!);
+    await tap;
+    expect(onSelect).not.toHaveBeenCalled();
+    expect(c.selection).toBeNull();
+  });
+
+  it('a tap still loading its hit map is dropped by setManifest', async () => {
+    const d = deferredMaps();
+    const { c, onSelect } = ready(undefined, d.hitMaps);
+    const tap = c.tap(15, 15);
+    c.setManifest(M);
+    d.pending.get('hb')!.ok(maps.hb!);
+    await tap;
+    expect(onSelect).not.toHaveBeenCalled();
+    expect(c.selection).toBeNull();
   });
 
   it('zoom paints without smoothing until settled', () => {
@@ -181,6 +306,19 @@ describe('CanvasController', () => {
     expect(q.length).toBe(1);
     flush();
     expect(c.stats().lastMode).toBe('partial');
+  });
+
+  it('tileLoaded after setDevices repaints the frame at its moved position', () => {
+    const { c, flush, base } = ready();
+    // Hiding base moves the tablet frame to x=0, so its tile is no longer at x=1520.
+    c.setDevices(new Set<Device>(['tablet', 'mobile']));
+    flush();
+    const from = base.calls.length;
+    c.tileLoaded('hth', 0, 0);
+    flush();
+    expect(c.stats().lastMode).toBe('partial');
+    const rects = base.calls.slice(from).filter((call) => call.m === 'rect');
+    expect(rects.at(-1)?.a).toEqual([0, 0, 512, 512]);
   });
 
   it('a resize to the same size repaints in full', () => {
