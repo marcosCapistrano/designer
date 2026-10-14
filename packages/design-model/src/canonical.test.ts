@@ -1,5 +1,5 @@
 import { expect, test } from 'vitest';
-import { canonicalStringify } from './canonical.js';
+import { canonicalLine, canonicalStringify } from './canonical.js';
 
 test('sorts keys recursively', () => {
   expect(canonicalStringify({ b: 1, a: { d: 1, c: 2 } })).toBe(
@@ -9,6 +9,11 @@ test('sorts keys recursively', () => {
 
 test('keeps array order', () => {
   expect(canonicalStringify([3, 1])).toBe('[\n  3,\n  1\n]\n');
+});
+
+test('writes sparse array holes as null', () => {
+  expect(canonicalStringify([, 1])).toBe('[\n  null,\n  1\n]\n');
+  expect(canonicalLine([, 1])).toBe('[null,1]');
 });
 
 test('omits undefined', () => {
@@ -30,4 +35,16 @@ test('sorts keys by code point, not by UTF-16 code unit', () => {
 
 test('sorts integer-like keys as strings', () => {
   expect(canonicalStringify({ 2: 'b', 10: 'a' })).toBe('{\n  "10": "a",\n  "2": "b"\n}\n');
+});
+
+test('canonicalLine sorts keys and writes one line with no whitespace', () => {
+  expect(canonicalLine({ b: [1, { d: 'x y', c: null }], a: undefined })).toBe(
+    '{"b":[1,{"c":null,"d":"x y"}]}',
+  );
+});
+
+test('canonicalLine matches canonicalStringify apart from layout', () => {
+  const value = { z: { y: [true, 'q'], x: {} }, a: [] };
+  const pretty = canonicalStringify(value);
+  expect(canonicalLine(value)).toBe(JSON.stringify(JSON.parse(pretty)));
 });

@@ -9,7 +9,14 @@ import {
   type StyleMap,
 } from '../types.js';
 import type { HandlerMap } from './handler.js';
-import { lookupNode, ownValue, requireElement, requireNode, validateAttrName } from './util.js';
+import {
+  cycleError,
+  lookupNode,
+  ownValue,
+  requireElement,
+  requireNode,
+  validateAttrName,
+} from './util.js';
 
 const TAG_PATTERN = /^[a-z][a-z0-9-]*$/;
 const NOT_SIBLINGS = 'nodes must be contiguous siblings';
@@ -96,7 +103,7 @@ export const structureHandlers: HandlerMap = {
       if (!indexInRange(op.index, found.hit.node.children.length)) {
         return `Index ${op.index} is out of range`;
       }
-      return validateSubtree(doc, op.node);
+      return validateSubtree(doc, op.node) ?? cycleError(doc, found.hit.container, [op.node]);
     },
     mutate(draft, op) {
       requireElement(draft, op.parent).children.splice(op.index, 0, structuredClone(op.node));
@@ -131,6 +138,8 @@ export const structureHandlers: HandlerMap = {
       if (isDescendant(moved.hit.node, op.parent)) {
         return 'cannot move a node into itself or its descendant';
       }
+      const cycle = cycleError(doc, target.hit.container, [moved.hit.node]);
+      if (cycle !== null) return cycle;
 
       // The index counts the target's children after the node is detached from them.
       const detached = moved.hit.parent.id === op.parent ? 1 : 0;
@@ -160,6 +169,8 @@ export const structureHandlers: HandlerMap = {
         (hit, i) => hit.parent === first.parent && hit.index === first.index + i,
       );
       if (!contiguous) return NOT_SIBLINGS;
+      const cycle = cycleError(doc, first.container, hits.map((hit) => hit.node));
+      if (cycle !== null) return cycle;
 
       if (op.wrapper.kind !== 'element' || op.wrapper.children.length !== 0) {
         return 'wrapper must be an element with no children';

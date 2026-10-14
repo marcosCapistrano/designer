@@ -45,4 +45,21 @@ describe('validateStyle', () => {
     const reason = validateStyle('padding', '12px;}');
     expect(reason).toContain('padding');
   });
+
+  test.each([
+    ['padding', '1px}body{color:red'],
+    ['padding', '1px;color:red'],
+    ['color', 'red</style>'],
+    ['--x', 'a</style>'],
+    ['--x', 'a\\b'],
+    ['padding', '1px\n2px'],
+    ['color', 'var(--x)}'],
+  ])('rejects a forbidden character in %s: %j', (prop, value) => {
+    expect(validateStyle(prop, value)).toContain('forbidden character');
+  });
+
+  test('rejects CSS comment markers in a value', () => {
+    expect(validateStyle('padding', '1px /*')).toContain('forbidden character');
+    expect(validateStyle('--x', 'a */ b')).toContain('forbidden character');
+  });
 });
