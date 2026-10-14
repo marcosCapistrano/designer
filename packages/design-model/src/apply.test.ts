@@ -111,6 +111,11 @@ describe('setAttr', () => {
     expect(error).toContain('is not allowed');
   });
 
+  test('rejects an event handler attribute', () => {
+    const error = rejected(sampleDoc(), { op: 'setAttr', node: 'n3', name: 'onclick', value: 'alert(1)' });
+    expect(error).toBe('Attribute "onclick" is not allowed');
+  });
+
   test('rejects an instance node', () => {
     expect(rejected(sampleDoc(), { op: 'setAttr', node: 'n5', name: 'id', value: 'x' })).toContain('is not an element');
   });

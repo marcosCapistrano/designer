@@ -1,12 +1,13 @@
 import { canonicalStringify } from './canonical.js';
 import { basicHandlers } from './ops/basic.js';
 import type { AnyOpHandler, HandlerMap } from './ops/handler.js';
+import { structureHandlers } from './ops/structure.js';
 import { ownValue } from './ops/util.js';
 import { nextSeq } from './tree.js';
 import type { DesignDoc, Op, Result, RestoreEntry } from './types.js';
 
-// Later tasks add structureHandlers, componentHandlers and pageHandlers to this spread.
-const handlers: HandlerMap = { ...basicHandlers };
+// Later tasks add componentHandlers and pageHandlers to this spread.
+const handlers: HandlerMap = { ...basicHandlers, ...structureHandlers };
 
 type RestoreOp = Extract<Op, { op: 'restore' }>;
 

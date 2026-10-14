@@ -8,10 +8,9 @@ import {
   type TextNode,
 } from '../types.js';
 import type { HandlerMap } from './handler.js';
-import { lookupNode, ownValue, requireNode } from './util.js';
+import { lookupNode, ownValue, requireElement, requireNode, validateAttrName } from './util.js';
 
 const NAME_PATTERN = /^[a-z][a-z0-9-]*$/;
-const RESERVED_ATTRS: ReadonlySet<string> = new Set(['style', 'class', 'data-d-id']);
 
 // setStyle and setName apply to element and instance nodes. validate has already rejected text nodes.
 function requireNonText(draft: DesignDoc, id: string): ElementNode | InstanceNode {
@@ -23,12 +22,6 @@ function requireNonText(draft: DesignDoc, id: string): ElementNode | InstanceNod
 function requireText(draft: DesignDoc, id: string): TextNode {
   const { node } = requireNode(draft, id);
   if (node.kind !== 'text') throw new Error(`Node ${id} is not a text node`);
-  return node;
-}
-
-function requireElement(draft: DesignDoc, id: string): ElementNode {
-  const { node } = requireNode(draft, id);
-  if (node.kind !== 'element') throw new Error(`Node ${id} is not an element`);
   return node;
 }
 
@@ -105,10 +98,7 @@ export const basicHandlers: HandlerMap = {
       const found = lookupNode(doc, op.node);
       if (!found.ok) return found.error;
       if (found.hit.node.kind !== 'element') return `Node ${op.node} is not an element`;
-      if (!NAME_PATTERN.test(op.name) || RESERVED_ATTRS.has(op.name)) {
-        return `Attribute "${op.name}" is not allowed`;
-      }
-      return null;
+      return validateAttrName(op.name);
     },
     mutate(draft, op) {
       writeEntry(requireElement(draft, op.node).attrs, op.name, op.value);

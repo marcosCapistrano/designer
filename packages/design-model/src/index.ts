@@ -4,3 +4,4 @@ export * from './fixtures.js';
 export * from './tree.js';
 export * from './css.js';
 export * from './apply.js';
+export * from './ops/structure.js';
