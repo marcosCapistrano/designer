@@ -1,5 +1,5 @@
 import { dirname, join } from 'node:path';
-import { symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, symlinkSync, writeFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { makeTestRepo, git } from '../git/test-repo.js';
 import { readSourceProject } from './source.js';
@@ -20,5 +20,26 @@ describe('source checkout reading', () => {
     symlinkSync('../secret.tsx', join(repo.work, 'linked.tsx'));
     git(repo.work, 'add', '.'); git(repo.work, 'commit', '-m', 'link');
     await expect(readSourceProject(repo.work)).rejects.toThrow('regular file');
+  });
+  it('does not invoke checkout-configured fsmonitor or clean filters', async () => {
+    const repo = makeTestRepo({ files: { 'page.tsx': 'export default () => <main />', '.gitattributes': '*.tsx filter=unsafe' } });
+    const marker = join(repo.work, 'EXECUTED');
+    const script = join(dirname(repo.work), 'unsafe.sh');
+    writeFileSync(script, `#!/bin/sh\ntouch '${marker}'\ncat\n`, { mode: 0o700 });
+    git(repo.work, 'config', 'core.fsmonitor', script);
+    git(repo.work, 'config', 'filter.unsafe.clean', script);
+    writeFileSync(join(repo.work, 'page.tsx'), 'export default () => <main />');
+    expect((await readSourceProject(repo.work)).project.files['page.tsx']).toContain('<main />');
+    expect(existsSync(marker)).toBe(false);
+  });
+  it('refuses staged source additions and modifications without calling status', async () => {
+    const repo = makeTestRepo({ files: { 'page.tsx': 'export default () => <main />' } });
+    writeFileSync(join(repo.work, 'new.tsx'), 'export default () => <p />');
+    git(repo.work, 'add', 'new.tsx');
+    await expect(readSourceProject(repo.work)).rejects.toThrow('Commit source changes');
+    git(repo.work, 'commit', '-m', 'add source');
+    writeFileSync(join(repo.work, 'page.tsx'), 'export default () => <aside />');
+    git(repo.work, 'add', 'page.tsx');
+    await expect(readSourceProject(repo.work)).rejects.toThrow('Commit source changes');
   });
 });
