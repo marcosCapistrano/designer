@@ -2,8 +2,15 @@ import { validateOpInternal } from './apply.js';
 import { validateStyle } from './css.js';
 import { defaultProps, propAttrIssue, resolveProps, templatedAttrs } from './props.js';
 import { validateAttrValue, validateNodeId, validatePageId, validateTag, VOID_TAGS } from './rules.js';
-import { componentReaches, instanceComponents, ownValue, validateAttrName } from './ops/util.js';
-import { componentFieldsProblem, MAX_DEPTH, pageFieldsProblem, tokensProblem } from './shape.js';
+import { instanceComponents, ownValue, validateAttrName } from './ops/util.js';
+import {
+  componentFieldsProblem,
+  isPlainObject,
+  MAX_DEPTH,
+  nodeProblem,
+  pageFieldsProblem,
+  tokensProblem,
+} from './shape.js';
 import {
   DEVICES,
   type ComponentDef,
@@ -19,18 +26,15 @@ import {
 // Returns the first problem as "<where>: <problem>", where <where> is "page <id>" or "component <name>",
 // with " node <id>" added when the problem is on a node. Returns null when every rule holds.
 export function validateDoc(doc: DesignDoc): string | null {
+  // Nothing below reads a field before this has shown it is there, so no doc can make validateDoc throw.
+  const shape = docShapeProblem(doc);
+  if (shape !== null) return shape;
+
   const scan: Scan = { ids: new Set<string>(), attrs: new Map<ComponentDef, TemplatedAttrs>() };
-  // Instances read their component's props, so every component's fields are checked before any page.
-  for (const [key, def] of sortedEntries(doc.components)) {
-    const fields = componentFieldsProblem(def);
-    if (fields !== null) return `component ${label(key)}: ${fields}`;
-  }
   for (const [key, page] of sortedEntries(doc.pages)) {
     const where = `page ${label(key)}`;
     const keyProblem = validatePageId(key);
     if (keyProblem !== null) return `${where}: ${keyProblem}`;
-    const fields = pageFieldsProblem(page);
-    if (fields !== null) return `${where}: ${fields}`;
     if (page.id !== key) return `${where}: page id "${label(page.id)}" does not match its key`;
     const problem = nodeIssue(doc, where, page.root, 1, scan);
     if (problem !== null) return problem;
@@ -48,12 +52,78 @@ export function validateDoc(doc: DesignDoc): string | null {
   return tokensIssue(doc);
 }
 
-// Ruling 21: no component may contain itself, directly or through the components it uses. This runs
-// after every component tree has passed its depth check, because it walks all of them.
+// Why `doc` is not shaped like a DesignDoc, or null: the meta, the three records, the header fields of each
+// page and component, and the shape of every node tree. The rules in validateDoc read all of these unchecked,
+// and so does a session, so both ask this first.
+export function docShapeProblem(doc: unknown): string | null {
+  if (!isPlainObject(doc)) return 'doc must be an object';
+  const meta = doc['meta'];
+  const seq = isPlainObject(meta) ? meta['seq'] : undefined;
+  if (!isPlainObject(meta) || meta['version'] !== 1 || !Number.isSafeInteger(seq) || (seq as number) < 0) {
+    return 'meta must be an object with version 1 and a non-negative integer seq';
+  }
+  const { pages, components } = doc;
+  if (!isPlainObject(pages)) return 'pages must be an object';
+  if (!isPlainObject(components)) return 'components must be an object';
+  const tokens = tokensProblem(doc['tokens']);
+  if (tokens !== null) return `tokens: ${tokens}`;
+
+  for (const [key, def] of sortedEntries(components)) {
+    const problem = componentFieldsProblem(def) ?? rootProblem(def);
+    if (problem !== null) return `component ${label(key)}: ${problem}`;
+  }
+  for (const [key, page] of sortedEntries(pages)) {
+    const problem = pageFieldsProblem(page) ?? rootProblem(page);
+    if (problem !== null) return `page ${label(key)}: ${problem}`;
+  }
+  return null;
+}
+
+// Why the root of a page or component (already known to be an object) is not a well-formed element tree.
+function rootProblem(entry: unknown): string | null {
+  const root = isPlainObject(entry) ? entry['root'] : undefined;
+  if (!isPlainObject(root) || root['kind'] !== 'element') return 'root must be an element node';
+  return nodeProblem(root);
+}
+
+// Ruling 21: no component may contain itself, directly or through the components it uses. A depth-first
+// search with three colors (absent: not reached, 1: on the current path, 2: finished) finds a cycle when it
+// reaches a component that is on the current path, and visits each component and each instance once.
+// It runs after every component tree has passed its depth check, because it walks all of them.
+// Names the smallest key on the first cycle found, so the answer does not depend on where the search entered it.
 function cycleIssue(doc: DesignDoc): string | null {
-  for (const [key, def] of sortedEntries(doc.components)) {
-    if (instanceComponents([def.root]).some((name) => componentReaches(doc, name, key))) {
-      return `component ${label(key)}: Component cycle at ${label(key)}`;
+  const entries = sortedEntries(doc.components);
+  const uses = new Map<string, string[]>();
+  for (const [key, def] of entries) {
+    const names = new Set(instanceComponents([def.root]));
+    uses.set(key, [...names].filter((name) => Object.hasOwn(doc.components, name)).sort());
+  }
+
+  const color = new Map<string, 1 | 2>();
+  for (const [start] of entries) {
+    if (color.has(start)) continue;
+    // The path from the start, each with the index of the next component it uses to try.
+    const path: { key: string; next: number }[] = [{ key: start, next: 0 }];
+    color.set(start, 1);
+    for (let top = path.at(-1); top !== undefined; top = path.at(-1)) {
+      const used = uses.get(top.key) ?? [];
+      const name = used[top.next];
+      if (name === undefined) {
+        color.set(top.key, 2);
+        path.pop();
+        continue;
+      }
+      top.next += 1;
+      const seen = color.get(name);
+      if (seen === 1) {
+        const ring = path.slice(path.findIndex((step) => step.key === name)).map((step) => step.key);
+        const first = ring.reduce((a, b) => (a < b ? a : b));
+        return `component ${label(first)}: Component cycle at ${label(first)}`;
+      }
+      if (seen === undefined) {
+        color.set(name, 1);
+        path.push({ key: name, next: 0 });
+      }
     }
   }
   return null;
@@ -160,8 +230,6 @@ function styleIssue(style: NodeStyle): string | null {
 
 // Each token goes through setToken's own validator, so a token is valid exactly when setToken accepts it.
 function tokensIssue(doc: DesignDoc): string | null {
-  const shape = tokensProblem(doc.tokens);
-  if (shape !== null) return `tokens: ${shape}`;
   for (const [group, names] of sortedEntries(doc.tokens)) {
     for (const [name, value] of sortedEntries(names)) {
       const problem = validateOpInternal(doc, { op: 'setToken', group, name, value });

@@ -1,6 +1,7 @@
 import { applyOpInternal } from './apply.js';
 import { opProblem } from './shape.js';
 import { findNode } from './tree.js';
+import { docShapeProblem } from './validate.js';
 import type { DesignDoc, Op, Result } from './types.js';
 
 export type BatchResult = { ok: true; doc: DesignDoc } | { ok: false; index: number; error: string };
@@ -110,9 +111,12 @@ export class DesignSession {
   #redo: Batch[] = [];
 
   // `doc` already includes the `changes` batches, which are part of the changelist but cannot be undone.
-  // A constructor cannot return a Result, so it throws a TypeError when `changes` is not an array of
-  // batches of well-formed ops, or holds a restore op. DesignSession.create reports that as an error value.
+  // A constructor cannot return a Result, so it throws a TypeError when `doc` is not shaped like a doc, or
+  // `changes` is not an array of batches of well-formed ops, or holds a restore op. DesignSession.create
+  // reports that as an error value. The doc's shape is checked, not its rules: parseDoc and validateDoc do that.
   constructor(doc: DesignDoc, changes: Op[][] = []) {
+    const shape = docShapeProblem(doc);
+    if (shape !== null) throw new TypeError(`DesignSession: ${shape}`);
     const loaded = loadChanges(changes);
     if (!loaded.ok) throw new TypeError(loaded.error);
     this.#doc = deepFreeze(structuredClone(doc));
