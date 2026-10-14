@@ -4,7 +4,7 @@
 
 **Goal:** Render design pages per device into deterministic WebP tiles plus hit maps with a long-lived Playwright pool, and show them on a smooth Canvas 2D infinite canvas (Preact PWA) with device frames, LOD, culling, an IndexedDB tile cache, tap selection and box selection. A static dev harness makes it usable before the hub server exists.
 
-**Architecture:** `@hub/renderer` loads `exportPage` output into Chromium (JS disabled, network blocked) at the device width. It takes one full-page PNG, slices it with sharp into 512px WebP tiles at zoom 0.25/0.5/1, and collects a hit map from `data-d-id` boxes. A render is addressed by `sha256(html + css + device + zoom)`, where `css` is first reduced to the rules that apply on that device. As a result, an edit re-renders exactly the page×devices whose input changed, and a component edit re-renders every page whose exported HTML contains it. The client reads a `RenderManifest` through a `TileSource` (a static folder now, the hub server in plan 3) and lays out one row per page with device frames side by side. It paints with a dirty-rect painter that blits the previous frame while panning and repaints only the exposed strips. Measured in headless Chromium at 4x CPU throttle, a full smoothed redraw runs at 20–30 fps and blit + strip runs at 60 fps.
+**Architecture:** `@hub/renderer` loads `exportPage` output into Chromium (JS disabled, network blocked) at the device width. It takes one full-page PNG, slices it with sharp into 512px WebP tiles at zoom 0.25/0.5/1, and collects a hit map from `data-d-id` boxes. A render is addressed by `sha256('r' + RENDER_VERSION + ':' + html + css + device + zoom)` (Ruling 13), where `css` is first reduced to the rules that apply on that device. As a result, an edit re-renders exactly the page×devices whose input changed, and a component edit re-renders every page whose exported HTML contains it. The client reads a `RenderManifest` through a `TileSource` (a static folder now, the hub server in plan 3) and lays out one row per page with device frames side by side. It paints with a dirty-rect painter that blits the previous frame while panning and repaints only the exposed strips. Measured in headless Chromium at 4x CPU throttle, a full smoothed redraw runs at 20–30 fps and blit + strip runs at 60 fps.
 
 **Tech Stack:** Node 22, pnpm 10, TypeScript strict ESM, vitest, Playwright 1.56.1 (Chromium), sharp 0.34.5 (WebP), Preact 10, Vite 7, idb-keyval, fake-indexeddb (tests), sirv (dev static serving), tsx (dev harness).
 
@@ -185,7 +185,7 @@ EOF
 - Produces:
 
 ```ts
-// keys.ts — node:crypto sha256 of the plain concatenation, lowercase hex
+// keys.ts — node:crypto sha256 of 'r' + RENDER_VERSION + ':' + the plain concatenation, lowercase hex (Ruling 13)
 export function tileKey(html: string, css: string, device: Device, zoom: Zoom): string;
 // html.ts
 export const BASE_CSS =
@@ -203,7 +203,7 @@ export function buildDocument(html: string, css: string, device: Device): string
 - [ ] **Step 2: Write failing tests.**
 
 `keys.test.ts`:
-- `matches sha256 of the concatenation`: `tileKey('<p></p>', 'p{}', 'base', 0.25)` === `createHash('sha256').update('<p></p>p{}base0.25').digest('hex')`.
+- `matches sha256 of the concatenation`: `tileKey('<p></p>', 'p{}', 'base', 0.25)` === `createHash('sha256').update('r' + RENDER_VERSION + ':' + '<p></p>p{}base0.25').digest('hex')` (Ruling 13).
 - `differs by device and zoom`: `tileKey('a','b','base',1)` ≠ `tileKey('a','b','tablet',1)` and ≠ `tileKey('a','b','base',0.5)`.
 - `is 64 lowercase hex chars`: matches `/^[0-9a-f]{64}$/`.
 
