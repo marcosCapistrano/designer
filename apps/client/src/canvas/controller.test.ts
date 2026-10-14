@@ -3,9 +3,12 @@ import { DEVICES, DEVICE_WIDTH } from '@hub/protocol';
 import type { Device, HitBox, PageRender, RenderManifest } from '@hub/protocol';
 import type { ControllerDeps } from './controller.js';
 import { CanvasController } from './controller.js';
+import { createNullCache } from './cache.js';
 import { fitRect } from './geom.js';
 import type { PointerIn } from './gestures.js';
+import { TileLoader } from './loader.js';
 import type { TileWant } from './loader.js';
+import { visibleTiles } from './tiles.js';
 import { fakeCtx } from './test-utils.js';
 import type { Call } from './test-utils.js';
 
@@ -355,5 +358,80 @@ describe('CanvasController', () => {
     c.setDevices(new Set<Device>(DEVICES));
     flush();
     expect(c.camera).toEqual(fitRect({ x: 0, y: 0, w: 2824, h: 1000 }, { w: 800, h: 600 }, 40));
+  });
+});
+
+describe('CanvasController with a real TileLoader', () => {
+  // 50 one-screen-tall pages on the Tab S6 Lite in portrait, at MIN_SCALE: every frame is in view and
+  // each has one 0.25 tile, so 150 tiles are visible and the 128-image cache cannot hold them all.
+  const render1 = (device: Device, hash: string): PageRender => ({
+    device,
+    hash,
+    width: DEVICE_WIDTH[device],
+    height: 1000,
+    levels: [
+      { zoom: 0.25, key: hash + 'q', cols: 1, rows: 1 },
+      { zoom: 0.5, key: hash + 'h', cols: 1, rows: 1 },
+      { zoom: 1, key: hash, cols: 3, rows: 2 },
+    ],
+  });
+  const BIG: RenderManifest = {
+    version: 1,
+    pages: Array.from({ length: 50 }, (_, i) => ({
+      pageId: `p${i}`,
+      name: `Page ${i}`,
+      route: `/p${i}`,
+      renders: {
+        base: render1('base', `b${i}`),
+        tablet: render1('tablet', `t${i}`),
+        mobile: render1('mobile', `m${i}`),
+      },
+    })),
+  };
+
+  it('a still camera at MIN_SCALE with more visible tiles than maxImages settles with bounded source calls', async () => {
+    const q: (() => void)[] = [];
+    const tick = async () => {
+      for (const cb of q.splice(0)) cb();
+      await settle();
+    };
+    const source = { tile: vi.fn(async (key: string, x: number, y: number) => new Blob([`${key}/${x}_${y}`])) };
+    const closed = vi.fn();
+    const loader = new TileLoader({
+      source,
+      cache: createNullCache(),
+      onLoad: (key, x, y) => c.tileLoaded(key, x, y),
+      decode: async () => ({ width: 512, height: 512, close: closed }),
+    });
+    const c = new CanvasController({
+      base: fakeCtx().ctx,
+      overlay: fakeCtx().ctx,
+      tiles: loader,
+      hitMaps: defaultHitMaps,
+      requestFrame: (cb) => {
+        q.push(cb);
+      },
+      now: () => 0,
+    });
+    c.resize(800, 1333, 1.5);
+    c.setManifest(BIG);
+    await tick();
+    const fitCalls = source.tile.mock.calls.length;
+    c.setCamera({ x: 0, y: 0, scale: 0.02 });
+    // 150 ids are visible; make sure the scenario really exceeds the cache.
+    const area = { x: 0, y: 0, w: 800 / 0.02, h: 1333 / 0.02 };
+    expect(visibleTiles(c.frames, area, 0.25).length).toBeGreaterThan(128);
+
+    const N = 40;
+    for (let i = 0; i < N; i++) await tick();
+    expect(q.length).toBe(0);
+    const calls = source.tile.mock.calls.length;
+    // The cache is 128 images; the first page's fit view loaded a few tiles of its own before the zoom out.
+    expect(calls).toBeLessThanOrEqual(128 + fitCalls);
+    expect(loader.stats().images).toBeLessThanOrEqual(128);
+
+    for (let i = 0; i < N; i++) await tick();
+    expect(q.length).toBe(0);
+    expect(source.tile.mock.calls.length).toBe(calls);
   });
 });

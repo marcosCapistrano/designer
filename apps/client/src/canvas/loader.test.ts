@@ -165,4 +165,105 @@ describe('TileLoader', () => {
 
     expect(source.tile).toHaveBeenCalledTimes(1);
   });
+
+  it('request keeps only the first maxImages ids, so the wanted set never exceeds the cache', async () => {
+    const { cache } = mapCache();
+    const source = instantSource();
+    const loader = new TileLoader({ source, cache, onLoad: vi.fn(), decode, maxImages: 2 });
+
+    loader.request(['a', 'b', 'c', 'd'].map((key) => ({ key, x: 0, y: 0 })));
+    await loader.whenIdle();
+
+    expect(source.tile.mock.calls.map((c) => c[0])).toEqual(['a', 'b']);
+    expect(loader.stats().images).toBe(2);
+  });
+
+  it('truncation counts resident ids, so order decides what is wanted', async () => {
+    const { cache } = mapCache();
+    const source = instantSource();
+    const loader = new TileLoader({ source, cache, onLoad: vi.fn(), decode, maxImages: 2 });
+
+    loader.request([{ key: 'b', x: 0, y: 0 }]);
+    await loader.whenIdle();
+    // b is resident and second in line, so c (third) is beyond the limit.
+    loader.request(['a', 'b', 'c'].map((key) => ({ key, x: 0, y: 0 })));
+    await loader.whenIdle();
+
+    expect(source.tile.mock.calls.map((c) => c[0])).toEqual(['b', 'a']);
+  });
+
+  it('insert evicts an image that is no longer wanted before a wanted one', async () => {
+    const { cache } = mapCache();
+    const loader = new TileLoader({ source: instantSource(), cache, onLoad: vi.fn(), decode, maxImages: 2 });
+
+    loader.request([{ key: 'a', x: 0, y: 0 }, { key: 'b', x: 0, y: 0 }]);
+    await loader.whenIdle();
+    const a = loader.get('a', 0, 0)!;
+    const b = loader.get('b', 0, 0)!;
+    // Map order is now a, b. Plain LRU would evict a; a is still wanted, b is not.
+    loader.request([{ key: 'a', x: 0, y: 0 }, { key: 'c', x: 0, y: 0 }]);
+    await loader.whenIdle();
+
+    expect(b.close).toHaveBeenCalledTimes(1);
+    expect(a.close).not.toHaveBeenCalled();
+    expect(loader.get('a', 0, 0)).toBeDefined();
+    expect(loader.get('b', 0, 0)).toBeUndefined();
+    expect(loader.get('c', 0, 0)).toBeDefined();
+  });
+
+  it('closes a late image instead of evicting a wanted one, and does not call onLoad for it', async () => {
+    const { cache } = mapCache();
+    const { source, calls } = deferredSource();
+    const onLoad = vi.fn();
+    const loader = new TileLoader({ source, cache, onLoad, decode, maxImages: 2 });
+    const want = (key: string) => ({ key, x: 0, y: 0 });
+
+    loader.request([want('c')]);
+    await tick();
+    // The camera moved on: a and b are wanted now, c is in flight but superseded.
+    loader.request([want('a'), want('b')]);
+    await tick();
+    calls.find((c) => c.key === 'a')!.resolve(new Blob(['a/0_0']));
+    calls.find((c) => c.key === 'b')!.resolve(new Blob(['b/0_0']));
+    await tick();
+    const a = loader.get('a', 0, 0)!;
+    const b = loader.get('b', 0, 0)!;
+    onLoad.mockClear();
+
+    calls.find((c) => c.key === 'c')!.resolve(new Blob(['c/0_0']));
+    await loader.whenIdle();
+
+    expect(loader.get('c', 0, 0)).toBeUndefined();
+    expect(a.close).not.toHaveBeenCalled();
+    expect(b.close).not.toHaveBeenCalled();
+    expect(loader.stats().images).toBe(2);
+    expect(onLoad).not.toHaveBeenCalled();
+  });
+
+  it('maxImages of zero or less, or not finite, falls back to 128', async () => {
+    for (const maxImages of [0, Number.NaN, Number.POSITIVE_INFINITY]) {
+      const { cache } = mapCache();
+      const loader = new TileLoader({ source: instantSource(), cache, onLoad: vi.fn(), decode, maxImages });
+      loader.request(Array.from({ length: 200 }, (_, x) => ({ key: 'k', x, y: 0 })));
+      await loader.whenIdle();
+      expect(loader.stats().images, `maxImages ${maxImages}`).toBe(128);
+    }
+  });
+
+  it('a negative maxImages falls back to 128 instead of looping forever', async () => {
+    const { cache } = mapCache();
+    const loader = new TileLoader({ source: instantSource(), cache, onLoad: vi.fn(), decode, maxImages: -3 });
+    loader.request(Array.from({ length: 200 }, (_, x) => ({ key: 'k', x, y: 0 })));
+    await loader.whenIdle();
+    expect(loader.stats().images).toBe(128);
+  });
+
+  it('a fractional maxImages is floored to at least 1', async () => {
+    const { cache } = mapCache();
+    const loader = new TileLoader({ source: instantSource(), cache, onLoad: vi.fn(), decode, maxImages: 0.5 });
+    loader.request([{ key: 'a', x: 0, y: 0 }, { key: 'b', x: 0, y: 0 }]);
+    await loader.whenIdle();
+    expect(loader.stats().images).toBe(1);
+    expect(loader.get('a', 0, 0)).toBeDefined();
+  });
 });
