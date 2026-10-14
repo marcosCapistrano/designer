@@ -1,10 +1,12 @@
 import { validateOpInternal } from './apply.js';
 import { validateStyle } from './css.js';
+import { defaultProps, propAttrIssue, resolveProps, templatedAttrs } from './props.js';
 import { validateAttrValue, validateNodeId, validatePageId, validateTag, VOID_TAGS } from './rules.js';
 import { ownValue, validateAttrName } from './ops/util.js';
 import { componentFieldsProblem, MAX_DEPTH, pageFieldsProblem, tokensProblem } from './shape.js';
 import {
   DEVICES,
+  type ComponentDef,
   type DesignDoc,
   type DesignNode,
   type ElementNode,
@@ -17,12 +19,12 @@ import {
 // Returns the first problem as "<where>: <problem>", where <where> is "page <id>" or "component <name>",
 // with " node <id>" added when the problem is on a node. Returns null when every rule holds.
 export function validateDoc(doc: DesignDoc): string | null {
+  const scan: Scan = { ids: new Set<string>(), attrs: new Map<ComponentDef, TemplatedAttrs>() };
   // Instances read their component's props, so every component's fields are checked before any page.
   for (const [key, def] of sortedEntries(doc.components)) {
     const fields = componentFieldsProblem(def);
     if (fields !== null) return `component ${label(key)}: ${fields}`;
   }
-  const ids = new Set<string>();
   for (const [key, page] of sortedEntries(doc.pages)) {
     const where = `page ${label(key)}`;
     const keyProblem = validatePageId(key);
@@ -30,12 +32,16 @@ export function validateDoc(doc: DesignDoc): string | null {
     const fields = pageFieldsProblem(page);
     if (fields !== null) return `${where}: ${fields}`;
     if (page.id !== key) return `${where}: page id "${label(page.id)}" does not match its key`;
-    const problem = nodeIssue(doc, where, page.root, 1, ids);
+    const problem = nodeIssue(doc, where, page.root, 1, scan);
     if (problem !== null) return problem;
   }
   for (const [key, def] of sortedEntries(doc.components)) {
-    const problem = nodeIssue(doc, `component ${label(key)}`, def.root, 1, ids);
+    const where = `component ${label(key)}`;
+    const problem = nodeIssue(doc, where, def.root, 1, scan);
     if (problem !== null) return problem;
+    // A default is a value an instance gets when it sets none, so it must be safe where it is used.
+    const unsafe = propAttrIssue(def, defaultProps(def), attrsOf(scan, def));
+    if (unsafe !== null) return `${where}: ${unsafe}`;
   }
   return tokensIssue(doc);
 }
@@ -49,15 +55,34 @@ function sortedEntries<T>(record: Record<string, T>): [string, T][] {
   return Object.entries(record).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
 }
 
+type TemplatedAttrs = ReturnType<typeof templatedAttrs>;
+
+// What one validateDoc call carries from node to node.
+interface Scan {
+  // Every node id seen so far in the doc, so a repeat anywhere is reported.
+  ids: Set<string>;
+  // The attributes with a placeholder, per component, found once and used for each of its instances.
+  attrs: Map<ComponentDef, TemplatedAttrs>;
+}
+
+function attrsOf(scan: Scan, def: ComponentDef): TemplatedAttrs {
+  let attrs = scan.attrs.get(def);
+  if (attrs === undefined) {
+    attrs = templatedAttrs(def);
+    scan.attrs.set(def, attrs);
+  }
+  return attrs;
+}
+
 // The first problem in the subtree at `node`, which sits at `depth` (the root is 1), or null.
-// `ids` collects every node id seen so far in the doc, so a repeat anywhere is reported.
 function nodeIssue(
   doc: DesignDoc,
   where: string,
   node: DesignNode,
   depth: number,
-  ids: Set<string>,
+  scan: Scan,
 ): string | null {
+  const { ids } = scan;
   if (depth > MAX_DEPTH) return `${where}: Node tree deeper than ${MAX_DEPTH} levels`;
   const here = `${where} node ${label(node.id)}`;
   const idProblem = validateNodeId(node.id);
@@ -66,11 +91,11 @@ function nodeIssue(
   ids.add(node.id);
 
   if (node.kind === 'text') return null;
-  const problem = node.kind === 'instance' ? instanceIssue(doc, node) : elementIssue(node);
+  const problem = node.kind === 'instance' ? instanceIssue(doc, node, scan) : elementIssue(node);
   if (problem !== null) return `${here}: ${problem}`;
   if (node.kind === 'element') {
     for (const child of node.children) {
-      const childIssue = nodeIssue(doc, where, child, depth + 1, ids);
+      const childIssue = nodeIssue(doc, where, child, depth + 1, scan);
       if (childIssue !== null) return childIssue;
     }
   }
@@ -96,13 +121,13 @@ function elementIssue(node: ElementNode): string | null {
 // The component must exist, and every prop must be declared by it. This is the rule that checkNode
 // (insertNode) and setInstanceProp apply, written with the same messages. Their validators are not
 // called here: each one searches the whole doc for its node, which would make this check quadratic.
-function instanceIssue(doc: DesignDoc, node: InstanceNode): string | null {
+function instanceIssue(doc: DesignDoc, node: InstanceNode, scan: Scan): string | null {
   const def = ownValue(doc.components, node.component);
   if (def === undefined) return `Component ${node.component} not found`;
   for (const prop of Object.keys(node.props)) {
     if (!Object.hasOwn(def.props, prop)) return `Component ${node.component} has no prop "${prop}"`;
   }
-  return styleIssue(node.style);
+  return propAttrIssue(def, resolveProps(def, node), attrsOf(scan, def)) ?? styleIssue(node.style);
 }
 
 const KNOWN_DEVICES: ReadonlySet<string> = new Set(DEVICES);

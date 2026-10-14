@@ -1,6 +1,6 @@
 import { ownValue } from './ops/util.js';
 import { resolveProps, substituteProps } from './props.js';
-import { VOID_TAGS } from './rules.js';
+import { validateAttrValue, VOID_TAGS } from './rules.js';
 import type {
   DesignDoc,
   DesignNode,
@@ -124,22 +124,31 @@ function expandElement(
 ): Result<ElementOut> {
   const counted = takeNode(scope);
   if (!counted.ok) return counted;
+  const id = scope.prefix + node.id;
+  const attrs = expandAttrs(node, id, scope);
+  if (!attrs.ok) return attrs;
   const children = expandAll(node.children, scope);
   if (!children.ok) return children;
   return {
     ok: true,
-    value: {
-      kind: 'element',
-      id: scope.prefix + node.id,
-      tag: node.tag,
-      attrs: sortedEntries(node.attrs).map(([name, value]): [string, string] => [
-        name,
-        substituteProps(value, scope.props),
-      ]),
-      styles,
-      children: children.value,
-    },
+    value: { kind: 'element', id, tag: node.tag, attrs: attrs.value, styles, children: children.value },
   };
+}
+
+// Attribute values after prop substitution. A prop can turn a safe template into an unsafe value
+// (href="{{url}}" with url set to javascript:...), so each final value is checked here and the
+// page is refused: no unsafe value is ever written out.
+function expandAttrs(node: ElementNode, id: string, scope: Scope): Result<[string, string][]> {
+  const attrs: [string, string][] = [];
+  for (const [name, template] of sortedEntries(node.attrs)) {
+    const value = substituteProps(template, scope.props);
+    const problem = validateAttrValue(name, value);
+    if (problem !== null) {
+      return { ok: false, error: `Page ${scope.budget.pageId} node ${id}: ${problem}` };
+    }
+    attrs.push([name, value]);
+  }
+  return { ok: true, value: attrs };
 }
 
 // The expanded root takes the instance's id prefix, and its style is the component root's
