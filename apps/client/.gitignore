@@ -1,0 +1,4 @@
+dist/
+.dev-renders/
+test-results/
+playwright-report/
