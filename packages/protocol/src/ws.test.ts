@@ -27,3 +27,15 @@ test('open task statuses', () => {
   expect(isOpenTask('merged')).toBe(false);
   expect(isOpenTask('closed')).toBe(false);
 });
+
+test('parseClientMsg rejects a non-finite t', () => {
+  // JSON.parse turns 1e999 into Infinity.
+  expect(parseClientMsg('{"type":"ping","t":1e999}')).toBeNull();
+  expect(parseClientMsg('{"type":"ping","t":-1e999}')).toBeNull();
+  expect(parseClientMsg('{"type":"ping","t":"1"}')).toBeNull();
+});
+
+test('parseServerMsg checks the tag only', () => {
+  // Documented behaviour: a known type with a wrong payload still parses.
+  expect(parseServerMsg('{"type":"pong"}')).toEqual({ type: 'pong' });
+});
