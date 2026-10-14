@@ -3,10 +3,7 @@ import { validateOp } from './apply.js';
 import { sampleDoc } from './fixtures.js';
 import type { Op } from './types.js';
 
-// The component ops have no handler until the component task adds them. That task removes
-// them from ComponentKind and adds a sample op for each to SAMPLES.
-type ComponentKind = 'extractComponent' | 'setInstanceProp' | 'detachInstance';
-type HandledKind = Exclude<Op['op'], ComponentKind>;
+type HandledKind = Op['op'];
 
 // One valid sample op per handled kind. The mapped type fails typecheck when an Op kind is
 // missing here, or when a sample's op field does not match its key.
@@ -38,6 +35,9 @@ const SAMPLES: { [K in HandledKind]: Extract<Op, { op: K }> } = {
     idMap: { n1: 'n10', n2: 'n11', n3: 'n12', n4: 'n13', n5: 'n14' },
   },
   removePage: { op: 'removePage', page: 'home' },
+  extractComponent: { op: 'extractComponent', node: 'n2', component: 'Header', instanceId: 'n9' },
+  setInstanceProp: { op: 'setInstanceProp', node: 'n5', prop: 'title', value: 'Hi' },
+  detachInstance: { op: 'detachInstance', node: 'n5', idMap: { n6: 'n10', n7: 'n11', n8: 'n12' } },
   restore: { op: 'restore', seq: 9, entries: [] },
 };
 
