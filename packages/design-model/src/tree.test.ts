@@ -15,6 +15,26 @@ function homeRoot(doc: DesignDoc): ElementNode {
   return page.root;
 }
 
+function rootOf(id: string, children: DesignNode[] = []): ElementNode {
+  return { id, kind: 'element', tag: 'div', attrs: {}, style: { base: {} }, children };
+}
+
+// Keys are inserted b before a and Z before A, so only the sort can produce a, b, A, Z.
+function unorderedDoc(): DesignDoc {
+  return {
+    meta: { version: 1, seq: 1 },
+    pages: {
+      b: { id: 'b', name: 'B', route: '/b', root: rootOf('n10', [{ id: 'n11', kind: 'text', text: 'in b' }]) },
+      a: { id: 'a', name: 'A', route: '/a', root: rootOf('n20', [{ id: 'n21', kind: 'text', text: 'in a' }]) },
+    },
+    components: {
+      Z: { name: 'Z', props: {}, root: rootOf('n30', [{ id: 'n31', kind: 'text', text: 'in Z' }]) },
+      A: { name: 'A', props: {}, root: rootOf('n40', [{ id: 'n41', kind: 'text', text: 'in A' }]) },
+    },
+    tokens: {},
+  };
+}
+
 describe('findNode', () => {
   test('finds nested node', () => {
     const hit = findNode(sampleDoc(), 'n4');
@@ -73,9 +93,39 @@ describe('walkDoc', () => {
   });
 });
 
+describe('sorted traversal order', () => {
+  test('walkDoc visits pages then components in sorted key order', () => {
+    const seen: string[] = [];
+    walkDoc(unorderedDoc(), (node, container) => {
+      seen.push(`${container.kind}:${container.key}:${node.id}`);
+    });
+    expect(seen).toEqual([
+      'page:a:n20',
+      'page:a:n21',
+      'page:b:n10',
+      'page:b:n11',
+      'component:A:n40',
+      'component:A:n41',
+      'component:Z:n30',
+      'component:Z:n31',
+    ]);
+  });
+
+  test('findNode resolves an id in page b', () => {
+    const hit = findNode(unorderedDoc(), 'n11');
+    expect(hit?.container).toEqual({ kind: 'page', key: 'b' });
+    expect(hit?.parent?.id).toBe('n10');
+    expect(hit?.path.map((n) => n.id)).toEqual(['n10']);
+  });
+});
+
 describe('allIds', () => {
   test('lists ids in walk order', () => {
     expect(allIds(sampleDoc())).toEqual(['n1', 'n2', 'n3', 'n4', 'n5', 'n6', 'n7', 'n8']);
+  });
+
+  test('follows sorted key order, not insertion order', () => {
+    expect(allIds(unorderedDoc())).toEqual(['n20', 'n21', 'n10', 'n11', 'n40', 'n41', 'n30', 'n31']);
   });
 });
 
@@ -113,6 +163,16 @@ describe('nextSeq', () => {
     // The fixture's n8 already sets the floor at 9. If n41x were matched, the result would be 42.
     homeRoot(doc).children.push({ id: 'n41x', kind: 'text', text: 'odd' });
     expect(nextSeq(doc)).toBe(9);
+  });
+
+  test('ignores an id with a prefix before the n', () => {
+    const doc: DesignDoc = {
+      meta: { version: 1, seq: 1 },
+      pages: { p: { id: 'p', name: 'P', route: '/', root: rootOf('xn41') } },
+      components: {},
+      tokens: {},
+    };
+    expect(nextSeq(doc)).toBe(1);
   });
 });
 
