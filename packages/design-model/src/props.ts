@@ -1,7 +1,8 @@
 import { ownValue } from './ops/util.js';
 import { validateAttrValue } from './rules.js';
 import { MAX_DEPTH } from './shape.js';
-import type { ComponentDef, DesignNode, InstanceNode } from './types.js';
+import { walkDoc, type Container } from './tree.js';
+import type { ComponentDef, DesignDoc, DesignNode, InstanceNode } from './types.js';
 
 const PLACEHOLDER = /\{\{([A-Za-z_][A-Za-z0-9_]*)\}\}/g;
 // Same pattern without the g flag, so test() keeps no state between calls.
@@ -42,21 +43,33 @@ export function withProp(
   return Object.fromEntries(entries);
 }
 
-// The attributes of the component's own elements whose value has a {{prop}} placeholder, as
-// [node id, name, template]. Instances inside the component are not entered: what they receive is
-// checked where the page is exported. The walk stops at MAX_DEPTH, so a tree that is too deep
-// (which validateDoc reports) cannot overflow the stack here.
-export function templatedAttrs(def: ComponentDef): [string, string, string][] {
-  const found: [string, string, string][] = [];
-  const visit = (node: DesignNode, depth: number): void => {
-    if (node.kind !== 'element' || depth > MAX_DEPTH) return;
-    for (const [name, template] of Object.entries(node.attrs)) {
-      if (PLACEHOLDER_TEST.test(template)) found.push([node.id, name, template]);
+// An attribute whose value has a {{prop}} placeholder: [node id, name, template].
+export type TemplatedAttr = [id: string, name: string, template: string];
+
+// The templated attributes of the elements in the subtree at `node`. Instances inside it are not
+// entered: what they receive is checked where the page is exported. The walk stops at MAX_DEPTH,
+// so a tree that is too deep (which validateDoc and the ops report) cannot overflow the stack here.
+export function templatedAttrsIn(node: DesignNode): TemplatedAttr[] {
+  const found: TemplatedAttr[] = [];
+  const visit = (current: DesignNode, depth: number): void => {
+    if (current.kind !== 'element' || depth > MAX_DEPTH) return;
+    for (const [name, template] of Object.entries(current.attrs)) {
+      if (PLACEHOLDER_TEST.test(template)) found.push([current.id, name, template]);
     }
-    for (const child of node.children) visit(child, depth + 1);
+    for (const child of current.children) visit(child, depth + 1);
   };
-  visit(def.root, 1);
+  visit(node, 1);
   return found;
+}
+
+// The templated attributes of the component's own elements.
+export function templatedAttrs(def: ComponentDef): TemplatedAttr[] {
+  return templatedAttrsIn(def.root);
+}
+
+// The one attribute `name` of node `id` set to `value`, as a list: empty when the value has no placeholder.
+export function templatedAttr(id: string, name: string, value: string): TemplatedAttr[] {
+  return PLACEHOLDER_TEST.test(value) ? [[id, name, value]] : [];
 }
 
 // Why filling `values` into the component's attributes would leave one that validateAttrValue
@@ -66,11 +79,30 @@ export function templatedAttrs(def: ComponentDef): [string, string, string][] {
 export function propAttrIssue(
   def: ComponentDef,
   values: Record<string, string>,
-  attrs: [string, string, string][] = templatedAttrs(def),
+  attrs: TemplatedAttr[] = templatedAttrs(def),
 ): string | null {
   for (const [id, name, template] of attrs) {
     const problem = validateAttrValue(name, substituteProps(template, values));
     if (problem !== null) return `${problem} (component ${def.name}, node ${id})`;
   }
   return null;
+}
+
+// Why adding the templated attributes `added` to the component that `container` names would leave an
+// instance of it with an attribute that validateAttrValue rejects, or null. An edit inside a component
+// can make an instance unsafe that was fine before, because the prop it sets only fed text until now.
+// Every instance in the doc is checked, on pages and inside other components, and so is the component's
+// own set of defaults. Only the added attributes are checked: the ones already there passed when they were added.
+export function editedAttrsIssue(doc: DesignDoc, container: Container, added: TemplatedAttr[]): string | null {
+  if (container.kind !== 'component' || added.length === 0) return null;
+  const def = ownValue(doc.components, container.key);
+  if (def === undefined) return null;
+  const unsafeDefault = propAttrIssue(def, defaultProps(def), added);
+  if (unsafeDefault !== null) return unsafeDefault;
+  let issue: string | null = null;
+  walkDoc(doc, (node) => {
+    if (issue !== null || node.kind !== 'instance' || node.component !== container.key) return;
+    issue = propAttrIssue(def, resolveProps(def, node), added);
+  });
+  return issue;
 }

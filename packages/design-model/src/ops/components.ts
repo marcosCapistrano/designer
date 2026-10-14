@@ -1,4 +1,11 @@
-import { propAttrIssue, resolveProps, substituteProps, withProp } from '../props.js';
+import {
+  editedAttrsIssue,
+  propAttrIssue,
+  resolveProps,
+  substituteProps,
+  templatedAttrsIn,
+  withProp,
+} from '../props.js';
 import { validateNodeId } from '../rules.js';
 import { allIds, depthOf, heightOf } from '../tree.js';
 import type {
@@ -169,7 +176,9 @@ export const componentHandlers: HandlerMap = {
       return (
         validateSubtree(doc, copy) ??
         cycleError(doc, container, [copy]) ??
-        depthError(depthOf(doc, op.node), heightOf(copy))
+        depthError(depthOf(doc, op.node), heightOf(copy)) ??
+        // Inside a component the copy's own placeholders stay, and the instances of that component fill them in.
+        editedAttrsIssue(doc, container, templatedAttrsIn(copy))
       );
     },
     mutate(draft, op) {
