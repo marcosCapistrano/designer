@@ -2,3 +2,4 @@ export * from './keys.js';
 export * from './html.js';
 export * from './pool.js';
 export * from './tiles.js';
+export * from './store.js';
