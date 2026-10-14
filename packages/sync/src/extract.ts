@@ -84,6 +84,11 @@ const RESERVED_KEYS = ['__proto__', 'constructor', 'prototype'];
 
 /** CSS that depends on a shared definition's prop. Ruling F: the definition being rendered is inlined instead. */
 class PropDrivenCss extends Error { constructor() { super('Prop-driven CSS needs a saved preview adapter'); } }
+/** Ruling G: a definition reads a destructured prop without a default that its occurrence omits. */
+class OmittedProp extends Error {}
+const RANK: Record<InlineReason, number> = { children: 0, 'optional-prop': 1, 'prop-css': 2 };
+/** The reason reported for a component inlined for several reasons, independent of route and cache order. */
+export function strongerReason(a: InlineReason | undefined, b: InlineReason): InlineReason { return a !== undefined && RANK[a] >= RANK[b] ? a : b; }
 /** A component found to need inlining (Ruling F); the route is rendered again with it inlined. */
 class Inline extends Error { constructor(readonly key: string, readonly reason: InlineReason) { super(`Inline ${key} (${reason})`); } }
 
@@ -122,7 +127,7 @@ function componentName(project: SourceProject, file: string, exportName: string)
 export function extractPages(project: SourceProject, entries: RouteEntry[], options: ExtractOptions = {}): ExtractResult {
   const inlineSet = new Map<string, InlineReason>();
   for (const [key, reason] of Object.entries(options.inline ?? {})) {
-    if (!/^[^:]+:[^:]+$/.test(key) || (reason !== 'children' && reason !== 'prop-css')) return { ok: false, diagnostics: [{ file: '', message: `Invalid inline component ${key}` }] };
+    if (!/^[^:]+:[^:]+$/.test(key) || !Object.hasOwn(RANK, reason)) return { ok: false, diagnostics: [{ file: '', message: `Invalid inline component ${key}` }] };
     inlineSet.set(key, reason);
   }
   for (;;) {
@@ -151,13 +156,16 @@ function extractOnce(project: SourceProject, entries: RouteEntry[], options: Ext
     return name;
   };
   // What each route rendered, and which components were already inlined when it last rendered.
-  const rendered: { entry: RouteEntry; id: string; encountered: Set<string>; known: Set<string> }[] = [];
+  const rendered: { entry: RouteEntry; id: string; encountered: Set<string>; known: Set<string>; reasons: Map<string, InlineReason> }[] = [];
   // Styles each shared definition computed at its first occurrence, with the rules responsible, across routes.
   const adopted = new Map<string, Map<string, { style: NodeStyle; rules: Rule[] }>>();
   const sorted = [...entries].sort((a, b) => a.route < b.route ? -1 : a.route > b.route ? 1 : 0);
   for (let index = 0; index < sorted.length; index++) {
     const entry = sorted[index]!;
     const encountered = new Set<string>(), known = new Set(inlineSet.keys());
+    // Every reason this route gives for inlining each component, found at every occurrence even once it is inlined.
+    const reasons = new Map<string, InlineReason>(), tried = new Set<string>();
+    const note = (key: string, reason: InlineReason) => reasons.set(key, strongerReason(reasons.get(key), reason));
     let currentFile = entry.file;
     try {
       if (!entry.route.startsWith('/') || (index > 0 && sorted[index - 1]!.route === entry.route)) throw new Error(`Invalid or duplicate route ${entry.route}`);
@@ -368,6 +376,40 @@ function extractOnce(project: SourceProject, entries: RouteEntry[], options: Ext
         }
         return previewValue(expression, mod);
       }
+      type ComponentFn = ts.FunctionDeclaration | ts.ArrowFunction | ts.FunctionExpression;
+      /** The function a component export names, or the local name a default export re-exports. */
+      function componentFunction(mod: Module, name: string): { fn?: ComponentFn; redirect?: string } {
+        let fn: ComponentFn | undefined;
+        for (const statement of mod.source.statements) {
+          if (ts.isFunctionDeclaration(statement) && (name === 'default' ? statement.modifiers?.some((m) => m.kind === ts.SyntaxKind.DefaultKeyword) : statement.name?.text === name)) fn = statement;
+          if (ts.isExportAssignment(statement) && name === 'default') {
+            const expression = statement.expression;
+            if (ts.isArrowFunction(expression) || ts.isFunctionExpression(expression)) fn = expression;
+            else if (ts.isIdentifier(expression)) {
+              const local = mod.constants.get(expression.text);
+              if (local && (ts.isArrowFunction(local) || ts.isFunctionExpression(local))) fn = local;
+              else return { redirect: expression.text };
+            }
+          }
+          if (ts.isVariableStatement(statement)) for (const declaration of statement.declarationList.declarations) {
+            if (ts.isIdentifier(declaration.name) && declaration.name.text === name && declaration.initializer && (ts.isArrowFunction(declaration.initializer) || ts.isFunctionExpression(declaration.initializer))) fn = declaration.initializer;
+          }
+        }
+        return { fn };
+      }
+      /** Destructured props without a default that this occurrence omits (Ruling G). */
+      function omittedProps(file: string, name: string, props: Record<string, Value>): string[] {
+        const mod = module(file);
+        let found = componentFunction(mod, name);
+        for (let depth = 0; found.redirect !== undefined && depth < 10; depth++) found = componentFunction(mod, found.redirect);
+        const parameter = found.fn?.parameters[0];
+        if (!parameter || !ts.isObjectBindingPattern(parameter.name)) return [];
+        return parameter.name.elements.flatMap((binding) => {
+          if (!ts.isIdentifier(binding.name) || binding.dotDotDotToken || binding.initializer) return [];
+          const key = binding.propertyName?.getText(mod.source) ?? binding.name.text;
+          return key === 'children' || /^on[A-Z]/.test(key) || Object.hasOwn(props, key) ? [] : [key];
+        });
+      }
       /** `isEntry` marks a page/layout entry component, whose props the importer does not supply come from choices. */
       function renderComponent(file: string, name: string, props: Record<string, Value>, path: string, isEntry = false): DesignNode[] {
         const mod = module(file);
@@ -375,22 +417,8 @@ function extractOnce(project: SourceProject, entries: RouteEntry[], options: Ext
         if (stack.includes(key) || stack.length > 40) throw new Error(`Recursive component ${key}`);
         stack.push(key);
         try {
-          let fn: ts.FunctionDeclaration | ts.ArrowFunction | ts.FunctionExpression | undefined;
-          for (const statement of mod.source.statements) {
-            if (ts.isFunctionDeclaration(statement) && (name === 'default' ? statement.modifiers?.some((m) => m.kind === ts.SyntaxKind.DefaultKeyword) : statement.name?.text === name)) fn = statement;
-            if (ts.isExportAssignment(statement) && name === 'default') {
-              const expression = statement.expression;
-              if (ts.isArrowFunction(expression) || ts.isFunctionExpression(expression)) fn = expression;
-              else if (ts.isIdentifier(expression)) {
-                const local = mod.constants.get(expression.text);
-                if (local && (ts.isArrowFunction(local) || ts.isFunctionExpression(local))) fn = local;
-                else return renderComponent(file, expression.text, props, path, isEntry);
-              }
-            }
-            if (ts.isVariableStatement(statement)) for (const declaration of statement.declarationList.declarations) {
-              if (ts.isIdentifier(declaration.name) && declaration.name.text === name && declaration.initializer && (ts.isArrowFunction(declaration.initializer) || ts.isFunctionExpression(declaration.initializer))) fn = declaration.initializer;
-            }
-          }
+          const { fn, redirect } = componentFunction(mod, name);
+          if (redirect !== undefined) return renderComponent(file, redirect, props, path, isEntry);
           if (!fn?.body) throw new Error(`Cannot resolve component export ${name} in ${file}`);
           const env: Env = {};
           const parameter = fn.parameters[0];
@@ -401,7 +429,7 @@ function extractOnce(project: SourceProject, entries: RouteEntry[], options: Ext
               const key = binding.propertyName?.getText(mod.source) ?? binding.name.text;
               if(/^on[A-Z]/.test(key))continue; // callback-only props do not affect a static preview unless read elsewhere
               if (declarations && key !== 'children') {
-                if (!Object.hasOwn(props, key) && !binding.initializer) throw new Error(`Missing preview prop ${key} for ${name}`);
+                if (!Object.hasOwn(props, key) && !binding.initializer) throw new OmittedProp(`Missing preview prop ${key} for ${name}`);
                 if (binding.initializer) requiredProps?.delete(key);
                 else requiredProps?.add(key);
                 const defaultValue = binding.initializer ? value(binding.initializer, mod, env) : '';
@@ -412,7 +440,7 @@ function extractOnce(project: SourceProject, entries: RouteEntry[], options: Ext
               else if (Object.hasOwn(props, key)) env[binding.name.text] = props[key]!;
               else if (binding.initializer) env[binding.name.text] = value(binding.initializer, mod, env);
               else if (isEntry) env[binding.name.text] = new Lazy(() => entryProp(file, key));
-              else throw new Error(`Missing preview prop ${key} for ${name}`);
+              else env[binding.name.text] = undefined; // Ruling G: an omitted prop without a default is undefined, as in JS.
             }
           }
           let body: ts.Expression | undefined;
@@ -560,6 +588,25 @@ function extractOnce(project: SourceProject, entries: RouteEntry[], options: Ext
         if (!adapter) throw new Error(`External import ${imported.file} needs a preview adapter`);
         return adapter;
       }
+      /**
+       * Whether an inlined component's definition would have prop-driven CSS, rendered as a definition once per route and
+       * discarded, so that reason is found whether or not another route inlined the component first. Only nested
+       * components that must be inlined escape; every other problem belongs to the inlined rendering, not to this probe.
+       */
+      function definitionHasPropCss(file: string, exportName: string, keys: string[]): boolean {
+        const component = `C${stableId(`${file}:${exportName}`)}`;
+        const before = new Set(Object.keys(definitions));
+        const oldNamespace = idNamespace, oldDeclarations = declarations, oldRequired = requiredProps;
+        idNamespace = component;
+        declarations = Object.fromEntries(keys.map((key) => [key, { default: '' }]));
+        requiredProps = new Set(keys);
+        try { renderComponent(file, exportName, { ...Object.fromEntries(keys.map((key) => [key, new PropValue(key)])), children: [] }, 'definition'); return false; }
+        catch (error) { if (error instanceof Inline) throw error; return error instanceof PropDrivenCss; }
+        finally {
+          idNamespace = oldNamespace; declarations = oldDeclarations; requiredProps = oldRequired;
+          for (const name of Object.keys(definitions)) if (!before.has(name)) { delete definitions[name]; requirements.delete(name); }
+        }
+      }
       function renderJsx(jsx: ts.JsxElement | ts.JsxSelfClosingElement, mod: Module, env: Env, path: string): DesignNode[] {
         const opening = ts.isJsxElement(jsx) ? jsx.openingElement : jsx;
         let tag = opening.tagName.getText(mod.source);
@@ -598,12 +645,17 @@ function extractOnce(project: SourceProject, entries: RouteEntry[], options: Ext
             const exportName = imported?.name ?? tag;
             const key = `${file}:${exportName}`;
             encountered.add(key);
-            if (!inlineSet.has(key)) {
-              // Ruling F: the model's instances have no slots or caller CSS yet, so such a component is expanded in place.
-              if (Object.hasOwn(props, 'className') || Object.hasOwn(props, 'style')) throw new Inline(key, 'prop-css');
-              if (nodes.length) throw new Inline(key, 'children');
-            }
+            // Ruling F/G: instances have no slots, caller CSS or absent props yet, so such a component is expanded in place.
+            // The reasons are collected at every occurrence, inlined or not, so the reported reason never depends on order.
+            const omitted = omittedProps(file, exportName, props);
+            const caller: InlineReason | null = Object.hasOwn(props, 'className') || Object.hasOwn(props, 'style') ? 'prop-css' : omitted.length ? 'optional-prop' : nodes.length ? 'children' : null;
+            if (caller) note(key, caller);
+            if (caller && !inlineSet.has(key)) throw new Inline(key, caller);
             if (inlineSet.has(key)) {
+              if (reasons.get(key) !== 'prop-css' && !tried.has(key)) {
+                tried.add(key);
+                if (definitionHasPropCss(file, exportName, [...Object.keys(props).filter((name) => name !== 'children'), ...omitted])) note(key, 'prop-css');
+              }
               const expanded = renderComponent(file, exportName, props, `${path}/${tag}`);
               const root = expanded[0];
               if (expanded.length === 1 && root?.kind === 'element' && root.name === undefined) root.name = nameOf(key);
@@ -627,7 +679,11 @@ function extractOnce(project: SourceProject, entries: RouteEntry[], options: Ext
                 const symbolic = Object.fromEntries(Object.keys(passed).map((key) => [key, new PropValue(key)]));
                 let rendered: DesignNode[];
                 try { rendered = renderComponent(file, exportName, { ...symbolic, children: [] }, 'definition'); }
-                catch (error) { if (error instanceof PropDrivenCss) throw new Inline(key, 'prop-css'); throw error; }
+                catch (error) {
+                  if (error instanceof PropDrivenCss) throw new Inline(key, 'prop-css');
+                  if (error instanceof OmittedProp) throw new Inline(key, 'optional-prop');
+                  throw error;
+                }
                 if (rendered.length !== 1 || rendered[0]?.kind !== 'element') throw new Error('Shared components require one element root');
                 definitions[component] = { name: component, props: declared, root: rendered[0] };
                 requirements.set(component, required);
@@ -762,20 +818,25 @@ function extractOnce(project: SourceProject, entries: RouteEntry[], options: Ext
       if (error instanceof Inline && !inlineSet.has(error.key)) { inlineSet.set(error.key, error.reason); index--; continue; }
       diagnostics.push({ file: error instanceof PreviewRequired ? error.gap.file : error instanceof CssError ? error.file : currentFile, message: error instanceof Error ? error.message : 'Extraction failed', ...(error instanceof PreviewRequired ? { gap: error.gap } : {}) });
     }
-    rendered.push({ entry, id: `page-${stableId(entry.route)}`, encountered, known });
+    rendered.push({ entry, id: `page-${stableId(entry.route)}`, encountered, known, reasons });
   }
   // A route that rendered a component before it became inlined elsewhere must not keep it shared: start over.
   if (rendered.some(({ encountered, known }) => [...encountered].some((key) => inlineSet.has(key) && !known.has(key)))) return null;
   if (diagnostics.length) return { ok: false, diagnostics };
   const invalid = validateDoc(doc);
   if (invalid) return { ok: false, diagnostics: [{ file: '', message: invalid }] };
+  // Reasons merge over routes by fixed priority; a component no route here gives a reason for keeps its input reason.
+  const merged = new Map<string, InlineReason>();
+  for (const { reasons } of rendered) for (const [key, reason] of reasons) merged.set(key, strongerReason(merged.get(key), reason));
+  for (const [key, reason] of inlineSet) if (!merged.has(key)) merged.set(key, reason);
   const inlined: InlinedComponent[] = [];
   const inlining: Record<string, RouteInlining> = {};
-  for (const { entry, id, encountered } of rendered) {
+  for (const { entry, id, encountered, reasons } of rendered) {
     const keys = [...encountered].sort();
-    const routeInline = keys.filter((key) => inlineSet.has(key)).map((key) => ({ key, component: nameOf(key), file: key.slice(0, key.lastIndexOf(':')), reason: inlineSet.get(key)! }));
-    for (const { component, file, reason } of routeInline) inlined.push({ route: entry.route, component, file, reason });
-    inlining[id] = { encountered: keys, input: keys.filter((key) => Object.hasOwn(options.inline ?? {}, key)), inline: routeInline };
+    const routeInline = keys.filter((key) => inlineSet.has(key)).map((key) => ({ key, component: nameOf(key), file: key.slice(0, key.lastIndexOf(':')) }));
+    for (const { key, component, file } of routeInline) inlined.push({ route: entry.route, component, file, reason: merged.get(key)! });
+    // A route finds its own reasons whatever arrived inlined, so only components it has none for depend on the input.
+    inlining[id] = { encountered: keys, input: routeInline.map(({ key }) => key).filter((key) => !reasons.has(key)), inline: routeInline, reasons: Object.fromEntries([...reasons].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) };
   }
   inlined.sort((a, b) => a.route !== b.route ? (a.route < b.route ? -1 : 1) : a.component !== b.component ? (a.component < b.component ? -1 : 1) : a.file < b.file ? -1 : a.file > b.file ? 1 : 0);
   return { ok: true, doc, dependencies, tokens: routeTokens, inlined, inlining };

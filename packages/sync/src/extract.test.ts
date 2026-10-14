@@ -312,7 +312,8 @@ describe('clsx, async components and choice-backed calls', () => {
     expect(gapOf(extractPages({ files }, layouts))).toMatchObject({ file: 'app/layout.tsx', expression: 'props.params' });
     expect(pageRoot(extractPages({ files }, layouts, { choices: val('app/layout.tsx', 'props.params', { id: '7' }) }))).toMatchObject({ tag: 'section', attrs: { title: '7' } });
     const child = extractPages({ files: { 'app/page.tsx': `function Card({ title }: { title: string }) { return <p>{title}</p>; } export default () => <Card />` } }, route);
-    expect(child).toMatchObject({ ok: false, diagnostics: [{ message: 'Missing preview prop title for Card' }] });
+    // Ruling G: a non-entry component's omitted prop without a default is undefined, which renders nothing.
+    expect(pageRoot(child)).toMatchObject({ tag: 'p', children: [] });
   });
 
   it('raises a gap for a call to an imported source function without evaluating its arguments, and a saved value satisfies it', () => {

@@ -1,13 +1,13 @@
 import { createHash } from 'node:crypto';
 import { applyOp, canonicalStringify, validateDoc, type ComponentDef, type DesignDoc, type Op, type Page } from '@hub/design-model';
-import { extractPages } from './extract.js';
+import { extractPages, strongerReason } from './extract.js';
 import type { InlinedComponent, InlineReason, PreviewChoices, RouteEntry, RouteInlining, SourceDiagnostic, SourceProject, TokenSource } from './types.js';
 import { mergeTokens } from './tokens.js';
 import { choicesProblem } from './choices.js';
 import { ADAPTERS_FILE, adaptersIssue } from './adapters.js';
 
 /** Bump whenever extraction semantics change, so cached baselines are rebuilt. */
-export const SYNC_VERSION = 5;
+export const SYNC_VERSION = 6;
 export interface PageBaseline {
   entry: RouteEntry;
   commit: string;
@@ -86,11 +86,15 @@ export function synchronizePages(input: {
   // Ruling F: a component inlined on any route is inlined on every route. Pages are extracted separately, so the set
   // grows until every page, reused or rebuilt, was extracted with exactly the inlined components it renders.
   const inline = new Map<string, InlineReason>();
-  const include = ({ key, reason }: RouteInlining['inline'][number]): boolean => {
-    const was = inline.get(key);
-    // Prefer one reason regardless of route order; only a new component changes extraction.
-    if (was !== reason && was !== 'prop-css') inline.set(key, reason);
-    return was === undefined;
+  /** Adds a page's own reasons; only a newly inlined component changes extraction. */
+  const include = (inlining: RouteInlining): boolean => {
+    let grew = false;
+    for (const [key, reason] of Object.entries(inlining.reasons)) {
+      const was = inline.get(key);
+      inline.set(key, strongerReason(was, reason));
+      grew ||= was === undefined;
+    }
+    return grew;
   };
   const fits = (inlining: RouteInlining | undefined): boolean => {
     if (!inlining) return false;
@@ -114,7 +118,7 @@ export function synchronizePages(input: {
         if (unchanged && fits(saved.inlining)) outcomes.set(entry.route, { kind: 'reused', page: saved });
         else continue;
       }
-      for (const item of (outcomes.get(entry.route) as { page: PageBaseline }).page.inlining!.inline) grew = include(item) || grew;
+      grew = include((outcomes.get(entry.route) as { page: PageBaseline }).page.inlining!) || grew;
     }
     if (grew) continue;
     for (const entry of sorted) {
@@ -127,10 +131,13 @@ export function synchronizePages(input: {
       const tokens = extracted.tokens[page.id] ?? [];
       const inlining = extracted.inlining[page.id]!;
       outcomes.set(entry.route, { kind: 'rebuilt', page: { entry: structuredClone(entry), commit, hashes, page, components: extracted.doc.components, ...(tokens.length ? { tokens } : {}), inlining } });
-      for (const item of inlining.inline) grew = include(item) || grew;
+      grew = include(inlining) || grew;
     }
     if (!grew) break;
   }
+  // The reported reason merges the final pages' own reasons by fixed priority, never the order they were found in.
+  const reasons = new Map<string, InlineReason>();
+  for (const outcome of outcomes.values()) if (outcome.kind !== 'failed') for (const [key, reason] of Object.entries(outcome.page.inlining!.reasons)) reasons.set(key, strongerReason(reasons.get(key), reason));
   const inlined: InlinedComponent[] = [];
   for (const entry of sorted) {
     const outcome = outcomes.get(entry.route)!;
@@ -140,7 +147,7 @@ export function synchronizePages(input: {
     doc.pages[page.page.id] = structuredClone(page.page);
     mergeComponents(page.components ?? {});
     addTokens(page.tokens);
-    for (const { key, component, file } of page.inlining!.inline) inlined.push({ route: entry.route, component, file, reason: inline.get(key)! });
+    for (const { key, component, file } of page.inlining!.inline) inlined.push({ route: entry.route, component, file, reason: reasons.get(key) ?? inline.get(key)! });
     (outcome.kind === 'reused' ? reused : rebuilt).push(entry.route);
   }
   if (diagnostics.length) return { ok: false, kind: 'source', diagnostics };

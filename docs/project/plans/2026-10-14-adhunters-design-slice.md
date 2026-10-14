@@ -166,7 +166,7 @@ Ledger Ruling F. In incremental sync (always shared mode), a source component th
 - Test: `packages/sync/src/components.test.ts`
 
 **Interfaces:**
-- `ExtractResult` (ok) and `synchronizePages` (ok) gain `inlined: { route: string; component: string; file: string; reason: 'children' | 'prop-css' }[]`.
+- `ExtractResult` (ok) and `synchronizePages` (ok) gain `inlined: { route: string; component: string; file: string; reason: 'children' | 'optional-prop' | 'prop-css' }[]`.
 - The expanded root element of each inlined occurrence gets `name` = the component name (`ElementNode.name` exists in the model).
 
 - [ ] **Step 1: Write failing tests.**

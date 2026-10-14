@@ -11,8 +11,10 @@ const path = (value: unknown): value is string => typeof value === 'string' && !
 function fail(error: string): Result<SyncState> { return { ok: false, error }; }
 const tokenSources = (value: unknown): value is TokenSource[] => Array.isArray(value) && value.every((token) => object(token) && Object.keys(token).length === 4 && ['group', 'name', 'value', 'file'].every((key) => typeof token[key] === 'string') && path(token['file']));
 const strings = (value: unknown): value is string[] => Array.isArray(value) && value.every((item) => typeof item === 'string');
-const routeInlining = (value: unknown): value is RouteInlining => object(value) && Object.keys(value).length === 3 && strings(value['encountered']) && strings(value['input'])
-  && Array.isArray(value['inline']) && value['inline'].every((item) => object(item) && Object.keys(item).length === 4 && ['key', 'component', 'file'].every((key) => typeof item[key] === 'string') && path(item['file']) && (item['reason'] === 'children' || item['reason'] === 'prop-css'));
+const REASONS = ['children', 'optional-prop', 'prop-css'];
+const routeInlining = (value: unknown): value is RouteInlining => object(value) && Object.keys(value).length === 4 && strings(value['encountered']) && strings(value['input'])
+  && Array.isArray(value['inline']) && value['inline'].every((item) => object(item) && Object.keys(item).length === 3 && ['key', 'component', 'file'].every((key) => typeof item[key] === 'string') && path(item['file']))
+  && object(value['reasons']) && Object.values(value['reasons']).every((reason) => REASONS.includes(reason as string));
 
 /** The document tokens a stored baseline defines, merged over its routes. */
 export function baselineTokens(baseline: SyncBaseline): Tokens {

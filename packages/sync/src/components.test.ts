@@ -99,9 +99,11 @@ describe('shared source components', () => {
   it('refuses recursive definitions', () => {
     expect(extractPages({ files: { ...files, 'Button.tsx': 'export default function Button({label}) { return <main><Button label={label} /></main>; }' } }, entries, { sharedComponents: true }).ok).toBe(false);
   });
-  it('does not invent missing required props or interpret literal placeholder syntax', () => {
+  it('inlines a component an occurrence omits a required prop of (Ruling G) and does not interpret literal placeholder syntax', () => {
     const project = { files: { ...files, 'page.tsx': `import Button from './Button'; export default () => <main><Button label="X" /><Button /></main>`, 'Button.tsx': 'export default ({label}) => <button>{label}</button>' } };
-    expect(extractPages(project, entries, { sharedComponents: true })).toMatchObject({ ok: false, diagnostics: expect.arrayContaining([{ file: expect.any(String), message: expect.stringContaining('Missing preview prop') }]) });
+    const result = extractPages(project, entries, { sharedComponents: true });
+    expect(result).toMatchObject({ ok: true, doc: { components: {} }, inlined: [{ route: '/a', reason: 'optional-prop' }, { route: '/b', reason: 'optional-prop' }] });
+    if (result.ok) expect(Object.values(result.doc.pages)[0]!.root.children).toMatchObject([{ tag: 'button', children: [{ text: 'X' }] }, { tag: 'button', children: [] }]);
     expect(extractPages({ files: { ...files, 'Button.tsx': `export default ({label}) => <button>{'{{label}}'}</button>` } }, entries, { sharedComponents: true }).ok).toBe(false);
   });
 });
@@ -216,9 +218,10 @@ describe('inline fallback for components that cannot be shared yet (Ruling F)', 
     if (!result.ok) return;
     const panel = Object.values(result.doc.components)[0]!;
     expect(panel.root.children[0]).toMatchObject({ name: 'Box', tag: 'div', style: { base: { margin: '2px' } }, children: [{ tag: 'b', children: [{ text: '{{label}}' }] }] });
-    // Panel forwards its own prop into the inlined Box's class, so Panel is inlined too.
+    // Panel forwards its own prop into the inlined Box's class, so Panel is inlined too; Box's own definition has
+    // prop-driven CSS, which outranks its children slot.
     const forwarding = { ...nested, 'Box.tsx': `export default function Box({ tone, children }) { return <div className={tone}>{children}</div>; }`, 'Panel.tsx': `import './panel.css'; import Box from './Box'; export default function Panel({ label }) { return <section><Box tone={label}><b>{label}</b></Box></section>; }`, 'panel.css': '.A, .B { margin: 2px; }' };
-    expect(extractPages({ files: forwarding }, [{ route: '/', file: 'page.tsx' }], { sharedComponents: true })).toMatchObject({ ok: true, doc: { components: {} }, inlined: [{ component: 'Box', reason: 'children' }, { component: 'Panel', reason: 'prop-css' }] });
+    expect(extractPages({ files: forwarding }, [{ route: '/', file: 'page.tsx' }], { sharedComponents: true })).toMatchObject({ ok: true, doc: { components: {} }, inlined: [{ component: 'Box', reason: 'prop-css' }, { component: 'Panel', reason: 'prop-css' }] });
   });
 
   it('re-extracts earlier routes when a later route inlines a component they rendered', () => {
@@ -226,6 +229,58 @@ describe('inline fallback for components that cannot be shared yet (Ruling F)', 
     const result = extractPages({ files }, cardRoutes, { sharedComponents: true });
     expect(result).toMatchObject({ ok: true, inlined: [{ route: '/a', component: 'Card', reason: 'children' }, { route: '/b', component: 'Card', reason: 'children' }] });
     if (result.ok) expect(Object.values(result.doc.components).map((definition) => definition.root.tag)).toEqual(['button']);
+  });
+
+  it('reports the strongest reason over all routes, the same fresh, through extractPages and from either cache', () => {
+    const plain = `import Card from './Card'; export default () => <main><Card /></main>`;
+    const slotted = `import Card from './Card'; export default () => <main><Card><p>A</p></Card></main>`;
+    const styled = `import Card from './Card'; export default () => <main><Card className="x" /></main>`;
+    const project = (a: string, b: string) => ({ files: { ...card, 'card.css': '.card { padding: 4px; } .x { color: red; }', 'a.tsx': a, 'b.tsx': b } });
+    const expected = [{ route: '/a', component: 'Card', file: 'Card.tsx', reason: 'prop-css' }, { route: '/b', component: 'Card', file: 'Card.tsx', reason: 'prop-css' }];
+    const inlining = (state: { baseline: { pages: Record<string, { inlining?: unknown }> } }) => Object.fromEntries(Object.entries(state.baseline.pages).map(([route, page]) => [route, page.inlining]));
+    const extracted = extractPages(project(slotted, styled), cardRoutes, { sharedComponents: true });
+    expect(extracted).toMatchObject({ ok: true, inlined: expected });
+    const fresh = synchronizePages({ project: project(slotted, styled), entries: cardRoutes, commit: 'c' });
+    if (!fresh.ok) throw new Error(JSON.stringify(fresh));
+    expect(fresh.inlined).toEqual(expected);
+    for (const [a, b] of [[slotted, plain], [plain, styled]]) {
+      const cached = synchronizePages({ project: project(a!, b!), entries: cardRoutes, commit: 'c' });
+      if (!cached.ok) throw new Error(JSON.stringify(cached));
+      const next = synchronizePages({ project: project(slotted, styled), entries: cardRoutes, commit: 'c', previous: cached.state });
+      if (!next.ok) throw new Error(JSON.stringify(next));
+      expect(next.inlined).toEqual(expected);
+      expect(inlining(next.state)).toEqual(inlining(fresh.state));
+      expect({ ...next.state.doc, meta: fresh.state.doc.meta }).toEqual(fresh.state.doc);
+    }
+  });
+
+  it('treats an omitted prop without a default as undefined and inlines its component (Ruling G)', () => {
+    const optional = {
+      'Card.tsx': `import './card.css'; export default function Card({ children, className }) { return <section className={className}>{children}</section>; }`,
+      'card.css': '.x { color: red; }',
+      'Label.tsx': `export default function Label({ text, tone }) { return <span>{text}{tone}</span>; }`,
+      'Quiet.tsx': `export default function Quiet({ text, tone = 'calm' }) { return <em title={tone}>{text}</em>; }`,
+      'page.tsx': `import Card from './Card'; import Label from './Label'; import Quiet from './Quiet'; export default () => <main><Card className="x">A</Card><Card>B</Card><Label text="T" tone="!" /><Label text="U" /><Quiet text="Q" tone="loud" /><Quiet text="R" /></main>`,
+    };
+    const synced = synchronizePages({ project: { files: optional }, entries: [{ route: '/', file: 'page.tsx' }], commit: 'c' });
+    expect(synced.ok, JSON.stringify(synced)).toBe(true);
+    if (!synced.ok) return;
+    expect(synced.inlined).toEqual([
+      { route: '/', component: 'Card', file: 'Card.tsx', reason: 'prop-css' },
+      { route: '/', component: 'Label', file: 'Label.tsx', reason: 'optional-prop' },
+    ]);
+    const [cardA, cardB, labelT, labelU, quietQ, quietR] = Object.values(synced.state.doc.pages)[0]!.root.children;
+    expect(cardA).toMatchObject({ name: 'Card', tag: 'section', style: { base: { color: 'red' } } });
+    expect(cardB).toMatchObject({ name: 'Card', tag: 'section', attrs: {}, children: [{ text: 'B' }] });
+    expect(labelT).toMatchObject({ name: 'Label', children: [{ text: 'T' }, { text: '!' }] });
+    // JS renders an undefined child as nothing.
+    expect(labelU).toMatchObject({ name: 'Label', children: [{ text: 'U' }] });
+    expect((labelU as ElementNode).children).toHaveLength(1);
+    // An omitted prop with a default keeps today's behavior: one shared definition with that default.
+    expect([quietQ, quietR].map((node) => node!.kind)).toEqual(['instance', 'instance']);
+    expect(Object.values(synced.state.doc.components)[0]!.props).toEqual({ text: { default: '' }, tone: { default: 'calm' } });
+    const out = exportPage(synced.state.doc, Object.keys(synced.state.doc.pages)[0]!);
+    expect(out.ok && out.value.html).toContain('title="calm"');
   });
 
   it('still shares a component with no slot and no prop-driven CSS', () => {
