@@ -12,11 +12,16 @@ export interface TestRepo {
   work: string;
 }
 
+/**
+ * Runs git for a test. Output is piped, so git's progress and warnings stay out of the test log (they are in the
+ * error message when git fails), and the machine's global git config cannot change what a test sees.
+ */
 export function git(cwd: string, ...args: string[]): string {
   return execFileSync('git', args, {
     cwd,
     encoding: 'utf8',
-    env: { ...process.env, ...gitEnv(TEST_IDENTITY) },
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: { ...process.env, ...gitEnv(TEST_IDENTITY), GIT_CONFIG_GLOBAL: '/dev/null' },
   }).trim();
 }
 
