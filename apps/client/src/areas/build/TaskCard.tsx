@@ -5,19 +5,14 @@ import { useState } from 'preact/hooks';
 import type { JSX } from 'preact';
 import { isOpenTask } from '@hub/protocol';
 import type { BuildTask } from '@hub/protocol';
-import { ApiError } from '../../net/api.js';
-import { summarizeTask } from './state.js';
+import { errorText } from '../../net/errors.js';
+import { prLink, summarizeTask } from './state.js';
 
 export interface TaskCardProps {
   task: BuildTask;
   running: boolean;
   onMerge: () => Promise<void>;
   onClose: () => Promise<void>;
-}
-
-/** The server's text for an API error; a plain line for anything else, such as a network failure. */
-export function errorText(e: unknown): string {
-  return e instanceof ApiError ? e.message : 'Could not reach the hub. Try again.';
 }
 
 export function TaskCard({ task, running, onMerge, onClose }: TaskCardProps): JSX.Element {
@@ -27,8 +22,12 @@ export function TaskCard({ task, running, onMerge, onClose }: TaskCardProps): JS
   const [closeError, setCloseError] = useState<string | null>(null);
   const summary = summarizeTask(task, running);
   const canClose = isOpenTask(task.status) && !running;
+  const pr = prLink(task);
+  // Merge and Close both change the task, so neither starts while the other is in flight.
+  const busy = merging || closing;
 
   const merge = async (): Promise<void> => {
+    if (busy) return;
     setMerging(true);
     setMergeError(null);
     try {
@@ -41,6 +40,7 @@ export function TaskCard({ task, running, onMerge, onClose }: TaskCardProps): JS
   };
 
   const close = async (): Promise<void> => {
+    if (busy) return;
     setClosing(true);
     setCloseError(null);
     try {
@@ -62,9 +62,9 @@ export function TaskCard({ task, running, onMerge, onClose }: TaskCardProps): JS
       </div>
       <div class="task-meta">
         <code class="task-branch">{task.branch}</code>
-        {task.prUrl !== null && (
-          <a class="task-pr" data-testid="pr-link" href={task.prUrl} target="_blank" rel="noreferrer">
-            PR #{task.prNumber}
+        {pr !== null && (
+          <a class="task-pr" data-testid="pr-link" href={pr.href} target="_blank" rel="noreferrer">
+            {pr.label}
           </a>
         )}
         <span>
@@ -81,7 +81,7 @@ export function TaskCard({ task, running, onMerge, onClose }: TaskCardProps): JS
           type="button"
           class="btn btn-primary"
           data-testid="merge"
-          disabled={!summary.canMerge || merging}
+          disabled={!summary.canMerge || busy}
           onClick={() => void merge()}
         >
           {merging ? 'Merging…' : 'Merge'}
@@ -91,7 +91,7 @@ export function TaskCard({ task, running, onMerge, onClose }: TaskCardProps): JS
             type="button"
             class="btn"
             data-testid="close-task"
-            disabled={closing}
+            disabled={busy}
             onClick={() => void close()}
           >
             Close task

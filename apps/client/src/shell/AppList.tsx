@@ -7,7 +7,7 @@ import type { AppSummary } from '@hub/protocol';
 import type { ApiClient } from '../net/api.js';
 import type { WsClient } from '../net/ws.js';
 import { STATUS_LABEL } from '../areas/build/state.js';
-import { errorText } from '../areas/build/TaskCard.js';
+import { errorText } from '../net/errors.js';
 import { formatRoute } from './route.js';
 
 export interface AppListProps {
