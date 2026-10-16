@@ -19,6 +19,8 @@ export interface TokenSource { group: string; name: string; value: string; file:
 export type InlineReason = 'children' | 'optional-prop' | 'prop-css';
 /** One per route per inlined component, never per occurrence. */
 export interface InlinedComponent { route: string; component: string; file: string; reason: InlineReason }
+/** A route whose extraction failed in an otherwise applied import (R7): it keeps its previous version, or stays absent. */
+export interface RouteFailure { route: string; diagnostics: SourceDiagnostic[] }
 /**
  * A route's component keys (`<file>:<export>`): every one it rendered, those it inlined only because they arrived in
  * `ExtractOptions.inline`, every one it inlined, and the strongest reason the route itself gives for each.
@@ -27,6 +29,12 @@ export interface InlinedComponent { route: string; component: string; file: stri
 export interface RouteInlining { encountered: string[]; input: string[]; inline: { key: string; component: string; file: string }[]; reasons: Record<string, InlineReason> }
 /** `inline` forces components, by key, to be inlined from the start; extraction adds every one it finds a reason for. */
 export interface ExtractOptions { sharedComponents?: boolean; choices?: PreviewChoices; inline?: Record<string, InlineReason> }
+/** Per shared component, per definition node id: the rules (`<selector> (<file>)`) that styled it on this route. */
+export type ComponentRules = Record<string, Record<string, string[]>>;
+/**
+ * Per page id: `sourceOnly` counts, per stylesheet the route loaded, the rules and blocks parseStyles skipped as
+ * source-only (R2), omitting stylesheets with none; `componentRules` lets cross-route definition mismatches name their selectors.
+ */
 export type ExtractResult =
-  | { ok: true; doc: DesignDoc; dependencies: Record<string, string[]>; tokens: Record<string, TokenSource[]>; inlined: InlinedComponent[]; inlining: Record<string, RouteInlining> }
+  | { ok: true; doc: DesignDoc; dependencies: Record<string, string[]>; tokens: Record<string, TokenSource[]>; inlined: InlinedComponent[]; inlining: Record<string, RouteInlining>; sourceOnly: Record<string, Record<string, number>>; componentRules: Record<string, ComponentRules> }
   | { ok: false; diagnostics: SourceDiagnostic[] };

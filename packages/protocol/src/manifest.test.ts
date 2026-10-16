@@ -1,5 +1,5 @@
 import { expect, test } from 'vitest';
-import { parseAppManifest } from './manifest.js';
+import { parseAppManifest, routeIncluded } from './manifest.js';
 
 const SPEC_EXAMPLE = {
   name: 'myapp',
@@ -84,4 +84,32 @@ test('rejects an empty production domain', () => {
   const result = parseAppManifest(withPatch((d) => { d.deploy.production.domain = ''; }));
   expect(result.ok).toBe(false);
   if (!result.ok) expect(result.error).toContain('deploy.production.domain');
+});
+
+test('accepts design.include route globs and rejects malformed ones', () => {
+  const ok = parseAppManifest(withPatch((d) => { d.design.include = ['/login', '/ads/[id]', '/blog/*', '/docs/**', '/']; }));
+  expect(ok.ok && ok.manifest.design.include).toEqual(['/login', '/ads/[id]', '/blog/*', '/docs/**', '/']);
+  for (const include of [['login'], ['/a*'], ['/a//b'], ['/a/'], [], ['/***']]) {
+    const result = parseAppManifest(withPatch((d) => { d.design.include = include; }));
+    expect(result.ok, JSON.stringify(include)).toBe(false);
+    if (!result.ok) expect(result.error).toContain('design.include');
+  }
+});
+
+test('matches route globs segment by segment', () => {
+  expect(routeIncluded(undefined, '/anything')).toBe(true);
+  expect(routeIncluded(['/login'], '/login')).toBe(true);
+  expect(routeIncluded(['/login'], '/login/x')).toBe(false);
+  expect(routeIncluded(['/login'], '/')).toBe(false);
+  expect(routeIncluded(['/'], '/')).toBe(true);
+  expect(routeIncluded(['/ads/*'], '/ads/1')).toBe(true);
+  expect(routeIncluded(['/ads/*'], '/ads')).toBe(false);
+  expect(routeIncluded(['/ads/*'], '/ads/1/2')).toBe(false);
+  expect(routeIncluded(['/ads/**'], '/ads')).toBe(true);
+  expect(routeIncluded(['/ads/**'], '/ads/1/2')).toBe(true);
+  expect(routeIncluded(['/**/edit'], '/a/b/edit')).toBe(true);
+  expect(routeIncluded(['/**'], '/')).toBe(true);
+  expect(routeIncluded(['/ads/[id]'], '/ads/[id]')).toBe(true);
+  expect(routeIncluded(['/ads/[id]'], '/ads/7')).toBe(false);
+  expect(routeIncluded(['/x', '/login'], '/login')).toBe(true);
 });

@@ -23,6 +23,24 @@ describe('sync snapshot decoder', () => {
     expect(parsed).toEqual({ ok: true, value: state });
     if (parsed.ok) expect(canonicalStringify(serializeSyncState(parsed.value))).toBe(canonicalStringify(files));
   });
+  it('roundtrips kept route versions, source-only counts and inlined components, and rejects malformed ones', () => {
+    const state = fixture();
+    const page = state.baseline.pages['/']!;
+    expect(page.sourceOnly).toEqual({});
+    state.baseline.pages['/'] = { ...page, stale: true, sourceOnly: { 'page.css': 3 } };
+    state.baseline.inlined = [{ route: '/', component: 'Card', file: 'Card.tsx', reason: 'children' }];
+    expect(parseSyncState(serializeSyncState(state))).toEqual({ ok: true, value: state });
+    const corrupt = (patch: (baseline: Record<string, any>) => void) => {
+      const files = serializeSyncState(state);
+      const metadata = JSON.parse(files['sync.json']!); patch(metadata.baseline);
+      return parseSyncState({ ...files, 'sync.json': JSON.stringify(metadata) });
+    };
+    expect(corrupt((baseline) => { baseline.pages['/'].stale = false; })).toMatchObject({ ok: false, error: 'Invalid baseline for /' });
+    for (const sourceOnly of [3, { 'page.css': -1 }, { 'page.css': 0 }, { '../x.css': 1 }]) expect(corrupt((baseline) => { baseline.pages['/'].sourceOnly = sourceOnly; })).toMatchObject({ ok: false, error: 'Invalid baseline for /' });
+    expect(corrupt((baseline) => { baseline.inlined[0].reason = 'other'; })).toMatchObject({ ok: false, error: 'Invalid inlined components' });
+    expect(corrupt((baseline) => { baseline.inlined[0].route = '/missing'; })).toMatchObject({ ok: false, error: 'Invalid inlined components' });
+  });
+
   it('rejects a document that has edits missing from its log', () => {
     const files = serializeSyncState(fixture());
     files['changes.jsonl'] = '';

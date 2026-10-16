@@ -66,6 +66,7 @@ export function parseSyncState(files: Record<string, string>): Result<SyncState>
     const tokenOrigins = new Map<string, TokenSource>();
     for (const [route, value] of Object.entries(base['pages'])) {
       if (!route.startsWith('/') || !object(value) || !object(value['entry']) || !object(value['page']) || !object(value['hashes'])) return fail(`Invalid baseline for ${route}`);
+      if ((value['stale'] !== undefined && value['stale'] !== true) || (value['sourceOnly'] !== undefined && !(object(value['sourceOnly']) && Object.entries(value['sourceOnly']).every(([file, count]) => path(file) && Number.isSafeInteger(count) && (count as number) > 0)))) return fail(`Invalid baseline for ${route}`);
       const entry = value['entry'];
       if (entry['route'] !== route || !path(entry['file']) || (entry['exportName'] !== undefined && typeof entry['exportName'] !== 'string') || (entry['layouts'] !== undefined && (!Array.isArray(entry['layouts']) || !entry['layouts'].every(path)))) return fail(`Invalid route entry for ${route}`);
       if (typeof value['commit'] !== 'string' || !value['commit'].trim()) return fail(`Missing baseline commit for ${route}`);
@@ -96,6 +97,9 @@ export function parseSyncState(files: Record<string, string>): Result<SyncState>
         clean.components[name] = definition;
       }
     }
+    const inlined = base['inlined'];
+    if (inlined !== undefined && !(Array.isArray(inlined) && inlined.every((item) => object(item) && Object.keys(item).length === 4 && typeof item['route'] === 'string' && Object.hasOwn(base['pages'] as object, item['route'])
+      && typeof item['component'] === 'string' && path(item['file']) && REASONS.includes(item['reason'] as string)))) return fail('Invalid inlined components');
     const combined = parseDoc(serializeDoc(clean));
     if (!combined.ok) return fail(`Baseline: ${combined.error}`);
     let replayed = combined.value;

@@ -49,7 +49,7 @@ describe('saved source preview choices', () => {
     const choices = { [choiceKey('page.tsx','dynamic()')]: {kind:'nodes' as const,nodes:['Sample']} };
     const first = synchronizePages({ project:{files},entries:entry,commit:'one',choices });
     if (!first.ok) throw new Error(JSON.stringify(first));
-    expect(synchronizePages({project:{files:{'page.tsx':'export default () => <p>{different()}</p>'}},entries:entry,commit:'two',previous:first.state})).toMatchObject({ok:false,kind:'source',diagnostics:[{gap:{expression:'different()'}}]});
+    expect(synchronizePages({project:{files:{'page.tsx':'export default () => <p>{different()}</p>'}},entries:entry,commit:'two',previous:first.state})).toMatchObject({ok:true,failed:[{route:'/',diagnostics:[{gap:{expression:'different()'}}]}]});
     const snapshot = serializeSyncState(first.state);
     const metadata = JSON.parse(snapshot['sync.json']!); metadata.choices[Object.keys(choices)[0]!].nodes = ['Changed'];
     snapshot['sync.json'] = JSON.stringify(metadata);

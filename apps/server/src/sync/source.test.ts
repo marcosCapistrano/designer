@@ -11,6 +11,17 @@ describe('source checkout reading', () => {
     expect(out.project.files).toEqual({ 'page.tsx': 'throw new Error("must not execute")' });
     expect(out.commit).toMatch(/^[a-f0-9]{40}$/);
   });
+  it('reads tracked tsconfig files and .hub/adapters.json as configuration, and nothing else hidden', async () => {
+    const repo = makeTestRepo({ files: {
+      'site/src/app/page.tsx': 'export default () => <main />', 'site/tsconfig.json': '{ "compilerOptions": {} }', 'tsconfig.json': '{}',
+      '.hub/adapters.json': '{ "modules": {} }', '.hub/app.json': '{}', '.hub/secret.json': 'SECRET', '.config/tsconfig.json': '{}', 'node_modules/pkg/tsconfig.json': '{}', 'site/package.json': '{}',
+    } });
+    const out = await readSourceProject(repo.work);
+    expect(out.project.files).toEqual({ 'site/src/app/page.tsx': 'export default () => <main />' });
+    expect(out.config).toEqual({ 'site/tsconfig.json': '{ "compilerOptions": {} }', 'tsconfig.json': '{}', '.hub/adapters.json': '{ "modules": {} }' });
+    writeFileSync(join(repo.work, '.hub/adapters.json'), '{ "modules": { "x": {} } }');
+    await expect(readSourceProject(repo.work)).rejects.toThrow('Commit source changes');
+  });
   it('refuses uncommitted changes and tracked source symlinks', async () => {
     const repo = makeTestRepo({ files: { 'page.tsx': 'export default () => <main />' } });
     writeFileSync(join(repo.work, 'page.tsx'), 'changed');

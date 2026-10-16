@@ -44,11 +44,14 @@ function media(prelude: css.AtrulePrelude | css.Raw | null): Device | 'source' {
 }
 
 /** A deliberately bounded CSS subset. Unsupported rules fail before any design is written. */
-export function parseStyles(text: string, scope: string | null, opts: StyleOptions): { rules: Rule[]; tokens: Token[]; sourceOnly: number } {
+/** `sourceOnly` counts the rules and blocks skipped as source-only (R2); `sourceOnlyFiles` splits that count by file. */
+export function parseStyles(text: string, scope: string | null, opts: StyleOptions): { rules: Rule[]; tokens: Token[]; sourceOnly: number; sourceOnlyFiles: Record<string, number> } {
   const rules: Rule[] = [];
   const tokens: Token[] = [];
   const layers = opts.layers ?? [];
   let sourceOnly = 0;
+  const sourceOnlyFiles: Record<string, number> = {};
+  const skip = (file: string) => { sourceOnly++; sourceOnlyFiles[file] = (sourceOnlyFiles[file] ?? 0) + 1; };
   interface Context { device: Device; layer: number; source: boolean; top: boolean }
   function read(nodes: css.List<css.CssNode>, at: Context, stack: string[]): void {
     nodes.forEach((node) => {
@@ -79,7 +82,7 @@ export function parseStyles(text: string, scope: string | null, opts: StyleOptio
           read(node.block.children, { ...at, layer: LAYERS.indexOf(names[0]!), top: false }, stack);
           return;
         }
-        if (SOURCE_ONLY_AT_RULES.has(node.name) && node.block) { sourceOnly++; return; }
+        if (SOURCE_ONLY_AT_RULES.has(node.name) && node.block) { skip(stack[stack.length - 1]!); return; }
         if (node.name !== 'media' || !node.block) throw new Error(`Unsupported CSS at-rule @${node.name} ${prelude}`);
         const target = media(node.prelude);
         if (target === 'source') read(node.block.children, { ...at, source: true, top: false }, stack);
@@ -112,7 +115,7 @@ export function parseStyles(text: string, scope: string | null, opts: StyleOptio
           if (!Object.keys(own).length) return;
         }
         if (scope) css.walk(selector, (part) => { if (part.type === 'ClassSelector') part.name = `${scope}__${part.name}`; });
-        if (source) sourceOnly++;
+        if (source) skip(stack[stack.length - 1]!);
         rules.push({ selector, text, file: stack[stack.length - 1]!, device: at.device, layer: at.layer, declarations: own, specificity: specificity(selector), sourceOnly: source });
       });
     });
@@ -127,7 +130,7 @@ export function parseStyles(text: string, scope: string | null, opts: StyleOptio
     } catch (error) { throw error instanceof CssError ? error : new CssError(file, error instanceof Error ? error.message : 'Invalid CSS'); }
   }
   sheet(text, opts.file, [opts.file]);
-  return { rules, tokens, sourceOnly };
+  return { rules, tokens, sourceOnly, sourceOnlyFiles };
 }
 
 /** The token each `--group-name` resolves to over every stylesheet of a page, in load order: layer order, then source order. */

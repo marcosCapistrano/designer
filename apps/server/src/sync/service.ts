@@ -1,7 +1,8 @@
 import { join } from 'node:path';
 import type { DesignDoc } from '@hub/design-model';
-import { FsSyncStore, discoverNextRoutes, synchronizePages, type SyncStore } from '@hub/sync';
-import { APP_NAME_RE } from '@hub/protocol/manifest';
+import { ADAPTERS_FILE, FsSyncStore, countSourceOnly, discoverNextRoutes, projectAliases, synchronizePages, type SyncResult, type SyncState, type SyncStore } from '@hub/sync';
+import { APP_MANIFEST_FILE, APP_NAME_RE, routeIncluded } from '@hub/protocol/manifest';
+import { parseAdapters } from '@hub/protocol/adapters';
 import type { DesignSummary, ImportRequest, ImportResponse, RenderManifest } from '@hub/protocol';
 import { BrowserPool, FsTileStore, renderDoc } from '@hub/renderer';
 import type { AppRegistry } from '../apps/registry.js';
@@ -11,6 +12,17 @@ import type { WsHub } from '../ws/hub.js';
 import { renderDir } from '../design/render-files.js';
 import { readSourceProject } from './source.js';
 
+/** Import configuration that cannot be used; the diagnostic names the file. */
+export class SourceConfigError extends Error { constructor(readonly file: string, message: string) { super(message); } }
+/** The applied-import response for a successful preparation that was saved as `revision`. */
+export function importApplied(prepared: Extract<SyncResult, { ok: true }>, revision: string, preview: { manifest: RenderManifest | null; warnings: string[] }): ImportResponse {
+  const { rebuilt, reused, removed, failed, inlined, sourceOnlyRules } = prepared;
+  return { ok: true, revision, rebuilt, reused, removed, failed, inlined, sourceOnlyRules, ...preview };
+}
+/** What the saved design's latest import reported, over the routes it extracted (kept previous versions excluded). */
+function importFacts(state: SyncState | undefined): Pick<DesignSummary, 'sourceOnlyRules' | 'inlined'> {
+  return { sourceOnlyRules: countSourceOnly(Object.values(state?.baseline.pages ?? {})), inlined: state?.baseline.inlined ?? [] };
+}
 export interface SyncDeps {
   registry: Pick<AppRegistry, 'get'>;
   build: Pick<BuildService, 'withCheckout'>;
@@ -26,14 +38,31 @@ export class SyncService {
   constructor(private readonly deps: SyncDeps) {}
   async close(): Promise<void> { await this.pool.close(); }
   async load(app: string) { await this.entry(app); return this.store(app).load(); }
-  async save(app: string, state: import('@hub/sync').SyncState, revision: string | null) { await this.entry(app); return this.store(app).save(state, revision); }
+  async save(app: string, state: SyncState, revision: string | null) { await this.entry(app); return this.store(app).save(state, revision); }
   async source(app: string, request: ImportRequest) {
     const entry = await this.entry(app);
     const source = await (this.deps.readSource ?? readSourceProject)(entry.dir);
-    const appDir = request.mode === 'next' ? request.appDir ?? (Object.keys(source.project.files).some((file) => file.startsWith('src/app/')) ? 'src/app' : 'app') : '';
-    const entries = request.mode === 'react' ? request.entries : discoverNextRoutes(source.project, appDir);
-    if (!entries.length) throw new Error('No page routes found. Choose a React entry file or the Next app directory.');
-    return { ...source, entries };
+    const { files } = source.project, config = source.config ?? {};
+    const design = entry.manifest?.design;
+    const hasDir = (dir: string) => Object.keys(files).some((file) => file.startsWith(`${dir}/`));
+    // R8: the manifest's design.routes names the Next app directory when the request does not.
+    const appDir = request.mode === 'next' ? request.appDir ?? (design && hasDir(design.routes) ? design.routes : hasDir('src/app') ? 'src/app' : 'app') : '';
+    const include = design?.include;
+    const entries = request.mode === 'react' ? request.entries.filter((item) => routeIncluded(include, item.route)) : discoverNextRoutes(source.project, appDir, include);
+    if (!entries.length) {
+      if (include) throw new SourceConfigError(APP_MANIFEST_FILE, `No page routes match design.include (${include.join(', ')}).`);
+      throw new Error('No page routes found. Choose a React entry file or the Next app directory.');
+    }
+    const aliases = projectAliases(config, request.mode === 'next' ? appDir : entries[0]!.file.split('/').slice(0, -1).join('/'));
+    if (!aliases.ok) throw new SourceConfigError(aliases.diagnostic.file, aliases.diagnostic.message);
+    let adapters;
+    if (Object.hasOwn(config, ADAPTERS_FILE)) {
+      const parsed = parseAdapters(config[ADAPTERS_FILE]!);
+      if (!parsed.ok) throw new SourceConfigError(ADAPTERS_FILE, parsed.error);
+      adapters = parsed.adapters;
+    }
+    const project = { files, ...(Object.keys(aliases.aliases).length ? { aliases: aliases.aliases } : {}), ...(adapters ? { adapters } : {}) };
+    return { project, commit: source.commit, entries };
   }
   private store(app: string): SyncStore {
     let store = this.stores.get(app);
@@ -48,7 +77,7 @@ export class SyncService {
   async summary(app: string): Promise<DesignSummary> {
     await this.entry(app);
     const saved = await this.store(app).load();
-    return { imported: saved !== null, revision: saved?.revision ?? null, pages: Object.values(saved?.state.doc.pages ?? {}).map(({ id, route, name }) => ({ id, route, name })), pending: saved?.state.pending.length ?? 0 };
+    return { imported: saved !== null, revision: saved?.revision ?? null, pages: Object.values(saved?.state.doc.pages ?? {}).map(({ id, route, name }) => ({ id, route, name })), pending: saved?.state.pending.length ?? 0, ...importFacts(saved?.state) };
   }
   async import(app: string, request: ImportRequest): Promise<ImportResponse> {
     return this.deps.build.withCheckout(app, async () => {
@@ -57,12 +86,12 @@ export class SyncService {
       let source: Awaited<ReturnType<SyncService['source']>>;
       try {
         source = await this.source(app,request);
-      } catch (error) { return { ok: false, kind: 'source', diagnostics: [{ file: '', message: error instanceof Error ? error.message : 'Source could not be read' }] }; }
+      } catch (error) { return { ok: false, kind: 'source', diagnostics: [{ file: error instanceof SourceConfigError ? error.file : '', message: error instanceof Error ? error.message : 'Source could not be read' }] }; }
       const prepared = synchronizePages({ ...source, previous: previous?.state });
       if (!prepared.ok) return prepared;
       const revision = await this.store(app).save(prepared.state, previous?.revision ?? null);
       const preview = await this.preview(app, prepared.state.doc);
-      return { ok: true, revision, rebuilt: prepared.rebuilt, reused: prepared.reused, removed: prepared.removed, ...preview };
+      return importApplied(prepared, revision, preview);
     });
   }
   async preview(app: string, doc: DesignDoc, publish = true): Promise<{ manifest: RenderManifest | null; warnings: string[] }> {

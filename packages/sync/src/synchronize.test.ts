@@ -56,8 +56,10 @@ describe('incremental source synchronization', () => {
   });
 
   it('invalidates cached resolution when a new path makes an import ambiguous', () => {
-    const result = sync({ ...files, 'Button.jsx': 'export default () => <p>Other</p>' }, initial());
-    expect(result).toMatchObject({ ok: false, kind: 'source', diagnostics: [{ message: expect.stringContaining('ambiguous') }, { message: expect.stringContaining('ambiguous') }] });
+    const previous = initial();
+    const result = sync({ ...files, 'Button.jsx': 'export default () => <p>Other</p>' }, previous);
+    expect(result).toMatchObject({ ok: true, rebuilt: [], reused: [], failed: [{ route: '/a', diagnostics: [{ message: expect.stringContaining('ambiguous') }] }, { route: '/b', diagnostics: [{ message: expect.stringContaining('ambiguous') }] }] });
+    expect(result.ok && result.state.doc).toEqual(previous.doc);
   });
 
   it('rebuilds after entry configuration or extractor version changes', () => {
@@ -129,13 +131,17 @@ describe('incremental source synchronization', () => {
     expect(result.state.doc.tokens).toEqual(previous.doc.tokens);
   });
 
-  it('fails the entire preparation on unsupported or deleted source, leaving old edits untouched', () => {
+  it('keeps the previous version of routes with unsupported or deleted source, leaving old edits untouched', () => {
     const previous = initial();
     const snapshot = canonicalStringify(previous);
-    expect(sync({ ...files, 'b.tsx': 'export default () => <p>{fetch("/")}</p>' }, previous)).toMatchObject({ ok: false, kind: 'source' });
+    const unsupported = sync({ ...files, 'b.tsx': 'export default () => <p>{fetch("/")}</p>' }, previous);
+    expect(unsupported).toMatchObject({ ok: true, reused: ['/a'], failed: [{ route: '/b', diagnostics: [{ file: 'b.tsx' }] }] });
+    expect(unsupported.ok && unsupported.state.doc).toEqual(previous.doc);
     const missing = { ...files };
     delete (missing as Partial<typeof files>)['Button.tsx'];
-    expect(sync(missing, previous)).toMatchObject({ ok: false, kind: 'source' });
+    const deleted = sync(missing, previous);
+    expect(deleted).toMatchObject({ ok: true, failed: [{ route: '/a' }, { route: '/b' }] });
+    expect(deleted.ok && deleted.state.doc).toEqual(previous.doc);
     expect(canonicalStringify(previous)).toBe(snapshot);
   });
 
@@ -144,5 +150,74 @@ describe('incremental source synchronization', () => {
     const reordered = sync(Object.fromEntries(Object.entries(files).reverse()) as typeof files, undefined, [...entries].reverse());
     expect(canonicalStringify(reordered)).toBe(canonicalStringify(first));
     expect(sync(files, initial(), [entries[0]!, entries[0]!])).toMatchObject({ ok: false, kind: 'source' });
+  });
+
+  it('partial import keeps good routes and the old failed route', () => {
+    const previous = initial();
+    const changed = { ...files, 'a.css': 'main { color: blue; }', 'b.tsx': 'export default () => <aside>{fetch("/")}</aside>' };
+    const result = sync(changed, previous);
+    expect(result).toMatchObject({ ok: true, rebuilt: ['/a'], reused: [], removed: [], failed: [{ route: '/b', diagnostics: [{ file: 'b.tsx', message: expect.any(String) }] }] });
+    if (!result.ok) return;
+    const a = previous.baseline.pages['/a']!.page.id, b = previous.baseline.pages['/b']!.page.id;
+    expect(result.state.doc.pages[a]!.root.style.base).toEqual({ color: 'blue' });
+    expect(result.state.doc.pages[b]).toEqual(previous.doc.pages[b]);
+    expect(result.state.baseline.pages['/b']).toEqual({ ...previous.baseline.pages['/b'], stale: true });
+    // The kept version is never mistaken for a fresh import: the route keeps failing until its source is fixed.
+    expect(sync(changed, result.state)).toMatchObject({ ok: true, reused: ['/a'], failed: [{ route: '/b' }] });
+    const fixed = sync({ ...changed, 'b.tsx': files['b.tsx'] }, result.state);
+    expect(fixed).toMatchObject({ ok: true, reused: ['/a'], rebuilt: ['/b'], failed: [] });
+    expect(fixed.ok && fixed.state.baseline.pages['/b']!.stale).toBeUndefined();
+  });
+
+  it('saves the good routes of a first import, and fails only when no route succeeds', () => {
+    const broken = { ...files, 'b.tsx': 'export default () => <aside>{fetch("/")}</aside>' };
+    const partial = sync(broken);
+    expect(partial).toMatchObject({ ok: true, rebuilt: ['/a'], failed: [{ route: '/b' }] });
+    expect(partial.ok && Object.keys(partial.state.baseline.pages)).toEqual(['/a']);
+    expect(sync({ ...broken, 'a.tsx': 'export default () => <main>{fetch("/")}</main>' })).toMatchObject({ ok: false, kind: 'source', diagnostics: [{ file: 'a.tsx' }, { file: 'b.tsx' }] });
+  });
+
+  it('keeps replay conflicts all-or-nothing even when a route fails', () => {
+    let previous = initial();
+    const button = previous.baseline.pages['/a']!.page.root.children[0]!;
+    previous = edit(previous, { op: 'setStyle', node: button.id, device: 'base', prop: 'color', value: 'green' });
+    const result = sync({ ...files, 'a.tsx': 'export default () => <main />', 'b.tsx': 'export default () => <aside>{fetch("/")}</aside>' }, previous);
+    expect(result).toMatchObject({ ok: false, kind: 'replay' });
+  });
+
+  it('names the component, routes, file and selector of a cross-route shared definition mismatch', () => {
+    const result = sync({ ...files, 'a.css': 'button { color: red; }' });
+    expect(result).toMatchObject({ ok: true, rebuilt: ['/a'], failed: [{ route: '/b', diagnostics: [{ file: 'Button.tsx', message: expect.stringMatching(/Shared component Button .*\/a.*\/b/) }] }] });
+    if (result.ok) expect(result.failed[0]!.diagnostics[0]!.message).toContain('button (a.css)');
+  });
+
+  it('counts source-only rules per route and keeps the count for reused routes', () => {
+    const hover = { ...files, 'a.css': 'main { color: red; } main:hover { color: blue; } @media print { main { color: black; } }' };
+    const first = sync(hover);
+    expect(first).toMatchObject({ ok: true, sourceOnlyRules: 2 });
+    expect(first.ok && sync(hover, first.state)).toMatchObject({ ok: true, reused: ['/a', '/b'], sourceOnlyRules: 2 });
+  });
+
+  it('counts a stylesheet shared by several routes once', () => {
+    const shared = { ...files, 'shared.css': 'p:hover { color: blue; } @media print { p { color: black; } }', 'a.css': 'main:focus { color: red; }',
+      'a.tsx': `import './shared.css'; import './a.css'; export default () => <main><p>A</p></main>`, 'b.tsx': `import './shared.css'; export default () => <aside><p>B</p></aside>` };
+    const first = sync(shared);
+    expect(first).toMatchObject({ ok: true, sourceOnlyRules: 3 });
+    expect(first.ok && sync(shared, first.state)).toMatchObject({ ok: true, reused: ['/a', '/b'], sourceOnlyRules: 3 });
+  });
+
+  it('fails the whole import when a kept previous version disagrees with a fresh route', () => {
+    const previous = initial();
+    const result = sync({ ...files, 'Button.tsx': 'export default () => <button>Go</button>', 'b.tsx': 'import Button from \'./Button\'; export default () => <aside><Button />{fetch("/")}</aside>' }, previous);
+    expect(result).toMatchObject({ ok: false, kind: 'source', diagnostics: [{ file: 'b.tsx' }, { file: 'Button.tsx', message: expect.stringContaining('The previous version of /b cannot be kept: Shared component Button in Button.tsx differs between /a and /b') }] });
+  });
+
+  it('rebuilds when path aliases change, since they change resolution without changing any file', () => {
+    const aliased = { ...files, 'a.tsx': `import Button from '@/Button'; export default () => <main><Button /></main>`, 'lib/Button.tsx': 'export default () => <button>Lib</button>' };
+    const first = synchronizePages({ project: { files: aliased, aliases: { '@/': '' } }, entries, commit: 'c1' });
+    if (!first.ok) throw new Error(JSON.stringify(first));
+    const moved = synchronizePages({ project: { files: aliased, aliases: { '@/': 'lib/' } }, entries, commit: 'c2', previous: first.state });
+    expect(moved).toMatchObject({ ok: true, rebuilt: ['/a', '/b'] });
+    expect(JSON.stringify(moved.ok && moved.state.doc.pages)).not.toBe(JSON.stringify(first.state.doc.pages));
   });
 });

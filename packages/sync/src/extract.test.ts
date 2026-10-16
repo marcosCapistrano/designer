@@ -175,6 +175,12 @@ describe('Next routes', () => {
     expect(() => discoverNextRoutes({ files: { 'app/(a)/page.tsx': '', 'app/(b)/page.tsx': '' } })).toThrow('Duplicate route');
     expect(() => discoverNextRoutes({ files: { 'app/@modal/page.tsx': '' } })).toThrow('preview choice');
   });
+
+  it('discovers only included routes, without failing on routes outside the scope', () => {
+    const files = { 'app/layout.tsx': '', 'app/login/page.tsx': '', 'app/page.tsx': '', 'app/(a)/x/page.tsx': '', 'app/(b)/x/page.tsx': '', 'app/@modal/y/page.tsx': '' };
+    expect(discoverNextRoutes({ files }, 'app', ['/login'])).toEqual([{ route: '/login', file: 'app/login/page.tsx', layouts: ['app/layout.tsx'] }]);
+    expect(() => discoverNextRoutes({ files }, 'app', ['/x'])).toThrow('Duplicate route /x');
+  });
 });
 
 describe('path aliases and the document shell', () => {

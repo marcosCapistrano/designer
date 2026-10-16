@@ -3,12 +3,12 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { createSdkMcpServer, tool } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
-import { choicesProblem, synchronizePages, type PreviewChoice, type PreviewChoices, type SourceGap } from '@hub/sync';
+import { choicesProblem, synchronizePages, type PreviewChoice, type PreviewChoices, type SourceDiagnostic, type SourceGap, type SyncResult } from '@hub/sync';
 import type { ImportRequest, ImportResponse, SourcePreviewProposal, SourcePreviewResult, SourcePreviewState } from '@hub/protocol';
 import type { BuildService } from '../build/service.js';
 import { BuildError } from '../build/ci.js';
 import type { ClaudeRunner } from '../claude/runner.js';
-import type { SyncService } from './service.js';
+import { importApplied, SourceConfigError, type SyncService } from './service.js';
 
 export interface PreviewActions { source(file: string): Promise<string>; choose(key: string, choice: unknown): Promise<unknown>; gaps(): Promise<SourceGap[]> }
 export type PreviewMcpFactory = (actions: PreviewActions) => unknown;
@@ -17,6 +17,11 @@ export const previewMcp: PreviewMcpFactory = (actions) => createSdkMcpServer({ n
   tool('preview_get_source','Read a tracked source excerpt to choose representative preview data. Never execute it.',{file:z.string()},({file}) => reply(() => actions.source(file))),
   tool('preview_save_choice','Choose a JSON value or literal sample nodes for one reported dynamic source gap.',{key:z.string().regex(/^[a-f0-9]{64}$/),choice:z.unknown()},({key,choice}) => reply(() => actions.choose(key,choice))),
 ] });
+/** R7: source problems of a preparation, whether the whole import failed or only some routes did. */
+const problems = (result: SyncResult): SourceDiagnostic[] => result.ok ? result.failed.flatMap((failure) => failure.diagnostics) : result.kind === 'source' ? result.diagnostics : [];
+/** Unusable import configuration (adapters, tsconfig paths, design.include) is a source diagnostic naming the file. */
+const configFailure = (error: unknown): Exclude<ImportResponse,{ok:true}> => { if (error instanceof SourceConfigError) return {ok:false,kind:'source',diagnostics:[{file:error.file,message:error.message}]}; throw error; };
+const unsupported = (result: SyncResult): Set<string> => new Set(problems(result).filter((diagnostic) => !diagnostic.gap).map((diagnostic) => JSON.stringify(diagnostic)));
 interface Pending { app: string; request: ImportRequest; revision: string | null; choices: PreviewChoices; public: SourcePreviewProposal; expires: number }
 export class SourcePreview {
   private readonly pending = new Map<string,Pending>();
@@ -41,14 +46,18 @@ export class SourcePreview {
     const controller = new AbortController(); this.runs.set(app,controller);
     try {
       const previous = await this.sync.load(app);
-      const source = await this.sync.source(app,request);
+      const source = await this.sync.source(app,request).catch(configFailure);
+      if ('ok' in source) return source;
       let choices: PreviewChoices = {};
       let prepared = synchronizePages({...source,previous:previous?.state,choices});
       let failures = 0, session: string | undefined;
-      for (let pass=0;pass<20 && !prepared.ok;pass++) {
-        if (prepared.kind !== 'source' || prepared.diagnostics.some((diagnostic) => !diagnostic.gap)) return prepared;
+      // Routes failing for reasons other than a source gap stay failed; samples cannot fix them.
+      const known = unsupported(prepared);
+      for (let pass=0;pass<20;pass++) {
+        if (!prepared.ok && prepared.kind !== 'source') return prepared;
         const gaps = new Map<string,SourceGap>();
-        for (const diagnostic of prepared.diagnostics) if (diagnostic.gap) gaps.set(diagnostic.gap.key,diagnostic.gap);
+        for (const diagnostic of problems(prepared)) if (diagnostic.gap) gaps.set(diagnostic.gap.key,diagnostic.gap);
+        if (!gaps.size) break;
         if ([...gaps.values()].some((gap) => gap.expression.length>20_000) || JSON.stringify([...gaps.values()]).length>100_000) return {ok:false,kind:'source',diagnostics:[{file:'',message:'The dynamic source region is too large for one preview request. Extract smaller source components first.'}]};
         const actions: PreviewActions = {
           gaps: async()=>[...gaps.values()],
@@ -63,7 +72,8 @@ export class SourcePreview {
               if (chosen.kind !== gap.kind) throw new Error(`This gap requires a ${gap.kind} choice`);
               const next = {...choices,[key]:{...chosen,source:{file:gap.file,expression:gap.expression}}};
               const checked = synchronizePages({...source,previous:previous?.state,choices:next});
-              if (!checked.ok && checked.kind === 'source' && checked.diagnostics.some((diagnostic) => !diagnostic.gap)) throw new Error(checked.diagnostics.map((diagnostic) => diagnostic.message).join('\n'));
+              const added = [...unsupported(checked)].filter((item) => !known.has(item));
+              if (added.length) throw new Error(added.map((item) => (JSON.parse(item) as SourceDiagnostic).message).join('\n'));
               choices = next; return { saved:true };
             } catch (error) { failures++; throw error; }
           },
@@ -78,7 +88,7 @@ export class SourcePreview {
         if (!ok || controller.signal.aborted) return {ok:false,kind:'source',diagnostics:[{file:'',message:controller.signal.aborted?'Preview generation stopped.':error ?? 'Claude Code could not choose preview samples.'}]};
         const before = prepared;
         prepared = synchronizePages({...source,previous:previous?.state,choices});
-        if (!prepared.ok && JSON.stringify(prepared) === JSON.stringify(before)) return {ok:false,kind:'source',diagnostics:[{file:'',message:'No usable preview choice was supplied. Review the source or try a more specific sample.'}]};
+        if (JSON.stringify(problems(prepared)) === JSON.stringify(problems(before))) return {ok:false,kind:'source',diagnostics:[{file:'',message:'No usable preview choice was supplied. Review the source or try a more specific sample.'}]};
       }
       if (!prepared.ok) return prepared;
       if (controller.signal.aborted) return {ok:false,kind:'source',diagnostics:[{file:'',message:'Preview generation stopped.'}]};
@@ -97,14 +107,15 @@ export class SourcePreview {
       if (!item || item.app!==app || item.expires<=this.now()) throw new BuildError('Sample preview expired. Generate it again.',409);
       const previous = await this.sync.load(app);
       if ((previous?.revision ?? null)!==item.revision) throw new BuildError('Design changed. Generate the sample preview again.',409);
-      const source = await this.sync.source(app,item.request);
+      const source = await this.sync.source(app,item.request).catch(configFailure);
+      if ('ok' in source) return source;
       if (source.commit!==item.public.sourceCommit) throw new BuildError('Source changed. Generate the sample preview again.',409);
       const prepared = synchronizePages({...source,previous:previous?.state,choices:item.choices});
       if (!prepared.ok) return prepared;
       const revision = await this.sync.save(app,prepared.state,item.revision);
       const preview = await this.sync.preview(app,prepared.state.doc);
       this.pending.delete(id);
-      return {ok:true,revision,rebuilt:prepared.rebuilt,reused:prepared.reused,removed:prepared.removed,...preview};
+      return importApplied(prepared,revision,preview);
     });
   }
   cancel(app: string,id: string): void { if (this.pending.get(id)?.app===app) this.pending.delete(id); }

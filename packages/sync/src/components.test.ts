@@ -321,7 +321,7 @@ describe('inline fallback for components that cannot be shared yet (Ruling F)', 
 
   it('still fails every other shared-definition problem', () => {
     const project = { files: { ...files, 'b.tsx': `import './other.css'; import Button from './Button'; export default () => <main><Button label="Other" /></main>`, 'other.css': 'button { padding: 20px; }' } };
-    expect(synchronizePages({ project, entries: [entries[0]!, { route: '/b', file: 'b.tsx' }], commit: 'c1' })).toMatchObject({ ok: false, kind: 'source' });
+    expect(synchronizePages({ project, entries: [entries[0]!, { route: '/b', file: 'b.tsx' }], commit: 'c1' })).toMatchObject({ ok: true, failed: [{ route: '/b', diagnostics: [{ file: 'Button.tsx', message: expect.stringContaining('Shared component Button in Button.tsx differs between /a and /b at node s4876c63b548ad121 (CSS padding); button (other.css) match only one route') }] }] });
     expect(synchronizePages({ project: { files: { ...files, 'page.tsx': `import Button from './Button'; export default () => <main><Button label={4} /></main>` } }, entries, commit: 'c1' })).toMatchObject({ ok: false, diagnostics: expect.arrayContaining([expect.objectContaining({ message: 'Shared component preview props must be strings' })]) });
     expect(synchronizePages({ project: { files: { ...files, 'Button.tsx': 'export default function Button({label}) { return <main><Button label={label} /></main>; }' } }, entries, commit: 'c1' })).toMatchObject({ ok: false });
   });

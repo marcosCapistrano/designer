@@ -130,7 +130,7 @@ describe('tokens across routes', () => {
   it('fails a conflicting value naming the token and both files', () => {
     const message = 'Token --space-4 is 1rem in a/a.css but 2rem in b/b.css on another route';
     expect(extractPages(project(':root { --space-4: 2rem }'), entries)).toMatchObject({ ok: false, diagnostics: [{ file: 'b/b.css', message }] });
-    expect(synchronizePages({ project: project(':root { --space-4: 2rem }'), entries, commit: 'c' })).toMatchObject({ ok: false, kind: 'source', diagnostics: [{ file: 'b/b.css', message }] });
+    expect(synchronizePages({ project: project(':root { --space-4: 2rem }'), entries, commit: 'c' })).toMatchObject({ ok: true, rebuilt: ['/a'], failed: [{ route: '/b', diagnostics: [{ file: 'b/b.css', message }] }] });
   });
 
   it('fails an unrepresentable token name naming the file and property', () => {

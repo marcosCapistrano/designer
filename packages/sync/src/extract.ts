@@ -2,12 +2,12 @@ import ts from '@typescript/typescript6';
 import { canonicalStringify, validateDoc, type ComponentDef, type DesignDoc, type DesignNode, type ElementNode, type InstanceNode, type NodeStyle, type StyleMap } from '@hub/design-model';
 import { applyStyles, CssError, parseStyles, winningTokens, type Rule, type Token } from './css.js';
 import { mergeTokens } from './tokens.js';
-import type { ExtractOptions, ExtractResult, InlinedComponent, InlineReason, PreviewNode, RouteEntry, RouteInlining, SourceDiagnostic, SourceProject, TokenSource } from './types.js';
+import type { ComponentRules, ExtractOptions, ExtractResult, InlinedComponent, InlineReason, PreviewNode, RouteEntry, RouteInlining, SourceDiagnostic, SourceProject, TokenSource } from './types.js';
 import { choiceKey, choicesProblem, PreviewRequired } from './choices.js';
 import { ADAPTERS_FILE, adaptersIssue, findAdapter, ignoresStyle, type Adapter } from './adapters.js';
 
 // No ambient clock, filesystem or execution: extraction is a pure function of source text.
-function stableId(key: string): string {
+export function stableId(key: string): string {
   let a = 2166136261, b = 5381;
   for (const char of key) { a = Math.imul(a ^ char.charCodeAt(0), 16777619); b = Math.imul(b, 33) ^ char.charCodeAt(0); }
   return `${(a >>> 0).toString(16).padStart(8, '0')}${(b >>> 0).toString(16).padStart(8, '0')}`;
@@ -107,7 +107,7 @@ interface Module { source: ts.SourceFile; imports: Map<string, { file: string; n
 interface Occurrence { instance: InstanceNode; component: string; label: string }
 
 /** The name a source component is known by: its export name, or a default export's declared name, else its file. */
-function componentName(project: SourceProject, file: string, exportName: string): string {
+export function componentName(project: SourceProject, file: string, exportName: string): string {
   if (exportName !== 'default') return exportName;
   const source = ts.createSourceFile(file, project.files[file] ?? '', ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
   for (const statement of source.statements) {
@@ -140,6 +140,8 @@ function extractOnce(project: SourceProject, entries: RouteEntry[], options: Ext
   const doc: DesignDoc = { meta: { version: 1, seq: 0 }, pages: {}, components: {}, tokens: {} };
   const dependencies: Record<string, string[]> = {};
   const routeTokens: Record<string, TokenSource[]> = {};
+  const sourceOnly: Record<string, Record<string, number>> = {};
+  const componentRules: Record<string, ComponentRules> = {};
   const tokenOrigins = new Map<string, TokenSource>();
   const diagnostics: SourceDiagnostic[] = [];
   const choiceError = options.choices ? choicesProblem(options.choices) : null;
@@ -185,6 +187,7 @@ function extractOnce(project: SourceProject, entries: RouteEntry[], options: Ext
       const requirements = new Map<string, Set<string>>();
       const occurrences = new Map<ElementNode, Occurrence>();
       const layers: string[] = [];
+      const skipped: Record<string, number> = {};
       const nodeId = (file: string, path: string) => `s${stableId(`${idNamespace}:${file}:${path}`)}`;
       function reactHook(expression: ts.Expression, mod: Module, hook: string): boolean {
         if (ts.isIdentifier(expression)) { const imported=mod.imports.get(expression.text); return imported?.file==='react'&&imported.name===hook; }
@@ -249,6 +252,7 @@ function extractOnce(project: SourceProject, entries: RouteEntry[], options: Ext
                 } });
                 rules.push(...parsed.rules);
                 tokens.push(...parsed.tokens);
+                Object.assign(skipped, parsed.sourceOnlyFiles);
                 currentFile = file;
               }
               if (statement.importClause?.name) {
@@ -817,6 +821,9 @@ function extractOnce(project: SourceProject, entries: RouteEntry[], options: Ext
       doc.pages[id] = { id, name: entry.route, route: entry.route, root };
       dependencies[id] = [...files].sort();
       routeTokens[id] = resolved;
+      sourceOnly[id] = Object.fromEntries(Object.entries(skipped).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0));
+      const ruleKey = (rule: Rule) => `${rule.text} (${rule.file})`;
+      componentRules[id] = Object.fromEntries(Object.keys(definitions).sort().map((name) => [name, Object.fromEntries([...adopted.get(name)!].map(([node, { rules: list }]) => [node, list.map(ruleKey)]))]));
     } catch (error) {
       // Render the route again with the component inlined; nothing route-wide was written yet.
       if (error instanceof Inline && !inlineSet.has(error.key)) { inlineSet.set(error.key, error.reason); index--; continue; }
@@ -843,5 +850,5 @@ function extractOnce(project: SourceProject, entries: RouteEntry[], options: Ext
     inlining[id] = { encountered: keys, input: routeInline.map(({ key }) => key).filter((key) => !reasons.has(key)), inline: routeInline, reasons: Object.fromEntries([...reasons].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) };
   }
   inlined.sort((a, b) => a.route !== b.route ? (a.route < b.route ? -1 : 1) : a.component !== b.component ? (a.component < b.component ? -1 : 1) : a.file < b.file ? -1 : a.file > b.file ? 1 : 0);
-  return { ok: true, doc, dependencies, tokens: routeTokens, inlined, inlining };
+  return { ok: true, doc, dependencies, tokens: routeTokens, inlined, inlining, sourceOnly, componentRules };
 }
