@@ -45,4 +45,11 @@ describe('buildDocument', () => {
     expect(out).toContain('<\\/style><p>x</p>');
     expect((out.match(/<\/style>/g) ?? []).length).toBe(2);
   });
+
+  it('paints the canvas from html only, so a page html rule propagates and body never covers it (Ruling P)', () => {
+    expect(BASE_CSS).toContain('html{background:#ffffff;}');
+    expect(BASE_CSS).not.toMatch(/body[^{]*\{[^}]*background/);
+    const out = buildDocument('<div data-d-id="h" data-d-shell="html"></div>', 'html{background:red;font-size:62.5%;}', 'base');
+    expect(out.indexOf(BASE_CSS)).toBeLessThan(out.indexOf('html{background:red;font-size:62.5%;}'));
+  });
 });

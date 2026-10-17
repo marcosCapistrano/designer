@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import type { Device } from '@hub/protocol';
 import sharp from 'sharp';
 import { afterAll, beforeAll, describe, expect, test } from 'vitest';
+import { exportPage, type DesignDoc } from '@hub/design-model';
 import { capturePage } from './capture.js';
 import { BrowserPool } from './pool.js';
 
@@ -219,6 +220,29 @@ test('skips hidden and empty elements', async () => {
     '[data-d-id="h2"]{display:none}[data-d-id="h3"]{visibility:hidden}',
   );
   expect(result.hitMap.map((b) => b.nodeId)).toEqual(['a']);
+});
+
+// Ruling P: an imported page whose root was the source html element renders like the source document.
+test('a document-shell page resolves rem against the html font-size and paints the canvas with the body background', async () => {
+  const doc: DesignDoc = {
+    meta: { version: 1, seq: 1 }, components: {}, tokens: {},
+    pages: { home: { id: 'home', name: 'Home', route: '/', root: {
+      id: 'h', kind: 'element', tag: 'div', attrs: { 'data-d-shell': 'html' }, style: { base: { 'font-size': '62.5%' } },
+      children: [{ id: 'b', kind: 'element', tag: 'div', attrs: {}, style: { base: { 'background-color': 'rgb(0, 0, 255)', margin: '20px' } }, children: [
+        { id: 'x', kind: 'element', tag: 'p', attrs: {}, style: { base: { 'font-size': '1.6rem', width: '10em', height: '1em', margin: '0' } }, children: [] },
+      ] }],
+    } } },
+  };
+  const exported = exportPage(doc, 'home');
+  if (!exported.ok) throw new Error(exported.error);
+  const result = await cap(exported.value.html, exported.value.css);
+  const x = result.hitMap.find((b) => b.nodeId === 'x');
+  expect({ w: x?.w, h: x?.h }).toEqual({ w: 160, h: 16 });
+  // Below the content and inside body's margin, as the source browser paints them: the propagated body background.
+  for (const [left, top] of [[700, 800], [5, 25]] as const) {
+    const pixel = await sharp(result.png).extract({ left, top, width: 1, height: 1 }).raw().toBuffer();
+    expect([...pixel.subarray(0, 3)]).toEqual([0, 0, 255]);
+  }
 });
 
 test('tablet media query applies at 834px', async () => {

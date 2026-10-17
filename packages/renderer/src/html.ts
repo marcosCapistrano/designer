@@ -1,7 +1,9 @@
 import { DEVICE_WIDTH, type Device } from '@hub/protocol';
 
+// Only html paints the canvas white: body stays transparent, so a page's html rule (Ruling P: the propagated
+// background of a document-shell page) paints the whole canvas, as the source document's canvas would be.
 export const BASE_CSS =
-  'html,body{margin:0;padding:0;background:#ffffff;}*,*::before,*::after{animation:none!important;transition:none!important;caret-color:transparent!important;}';
+  'html,body{margin:0;padding:0;}html{background:#ffffff;}*,*::before,*::after{animation:none!important;transition:none!important;caret-color:transparent!important;}';
 
 const TABLET_PREFIX = '@media (max-width: 1023px){';
 const MOBILE_PREFIX = '@media (max-width: 599px){';
