@@ -172,7 +172,7 @@ describe('Build view state', () => {
   describe('live messages that change nothing', () => {
     it('returns the same view for render.ready and pong', () => {
       const v = view([msg(1)]);
-      expect(applyServerMsg(v, APP, { type: 'render.ready', app: APP, manifest: { version: 1, pages: [] } })).toBe(v);
+      expect(applyServerMsg(v, APP, { type: 'render.ready', app: APP, manifest: { version: 2, pages: [] } })).toBe(v);
       expect(applyServerMsg(v, APP, { type: 'pong', t: 1 })).toBe(v);
     });
 

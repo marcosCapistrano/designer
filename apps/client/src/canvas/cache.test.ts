@@ -48,17 +48,18 @@ describe('hashOfId', () => {
 describe('liveKeys', () => {
   it('collects every level key of every render', () => {
     const m: RenderManifest = {
-      version: 1,
+      version: 2,
       pages: [
         {
           pageId: 'p',
           name: 'P',
           route: '/',
           renders: {
-            base: {
+            '1440x900': {
               device: 'base',
               hash: 'h',
               width: 1440,
+              viewportHeight: 900,
               height: 900,
               levels: [
                 { zoom: 0.25, key: 'q', cols: 1, rows: 1 },

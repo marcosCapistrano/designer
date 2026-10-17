@@ -450,7 +450,7 @@ describe('hub app', () => {
     expect(denied.status).toBe(401);
     const res = await app.request('/api/apps/demo/render/manifest.json', { headers: await cookie() });
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ version: 1, pages: [] });
+    expect(await res.json()).toEqual({ version: 2, pages: [] });
     const unknown = await app.request('/api/apps/nope/render/manifest.json', { headers: await cookie() });
     expect(unknown.status).toBe(404);
   });

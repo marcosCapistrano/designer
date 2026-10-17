@@ -95,15 +95,6 @@ test('drag in select tool selects a box', async ({ page }) => {
   await expect.poll(async () => (await selection(page))?.nodeIds).toEqual(['n2']);
 });
 
-test('device toggle hides frames', async ({ page }) => {
-  await page.goto('/harness.html?debug=1');
-  await ready(page);
-  await page.getByTestId('device-mobile').click();
-  await expect.poll(() => frameCount(page)).toBe(100);
-  await page.getByTestId('device-mobile').click();
-  await expect.poll(() => frameCount(page)).toBe(150);
-});
-
 test('reload serves visible tiles from IndexedDB', async ({ page }) => {
   await page.goto('/harness.html?debug=1');
   await ready(page);

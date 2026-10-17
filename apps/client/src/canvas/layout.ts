@@ -1,53 +1,66 @@
-// Device frame layout for the canvas: one row per manifest page, one frame per
-// visible device, in world px. Frames only carry geometry and their render
+// Frame layout for the canvas: one Frame per saved CanvasFrame whose page is in
+// the manifest, in world px. Frames only carry geometry and their render
 // metadata; tiles and hit maps are looked up elsewhere by `render`.
 
-import {
-  DEVICES,
-  DEVICE_VIEWPORT_HEIGHT,
-  DEVICE_WIDTH,
-} from '@hub/protocol';
-import type { Device, PageRender, RenderManifest } from '@hub/protocol';
+import { sizeKey, tierForWidth } from '@hub/protocol';
+import type { CanvasFrame, Device, PageRender, RenderManifest } from '@hub/protocol';
 import type { Point, Rect } from './geom.js';
 
 export interface Frame {
+  frameId: string;
   pageId: string;
   name: string;
+  /** The style tier the frame's width gets. */
   device: Device;
   x: number;
   y: number;
   w: number;
   h: number;
+  viewportHeight: number;
+  /** The render of this page at this frame's size, or null while there is none. */
   render: PageRender | null;
+  /** While pending, the last render this frame showed, drawn pinned to its top-left. */
+  stale: PageRender | null;
+  pending: boolean;
 }
 
-export const FRAME_GAP = 80; // world px between frames in a row
-export const ROW_GAP = 200; // world px between rows
-
-export function layoutFrames(m: RenderManifest, visible: ReadonlySet<Device>): Frame[] {
-  const devices = DEVICES.filter((d) => visible.has(d));
-  if (devices.length === 0) return [];
-
-  const frames: Frame[] = [];
-  let rowY = 0;
-  for (const page of m.pages) {
-    let x = 0;
-    let rowH = 0;
-    for (const device of devices) {
-      const render = page.renders[device] ?? null;
-      const w = DEVICE_WIDTH[device];
-      const h = render && render.height > 0 ? render.height : DEVICE_VIEWPORT_HEIGHT[device];
-      frames.push({ pageId: page.pageId, name: page.name, device, x, y: rowY, w, h, render });
-      x += w + FRAME_GAP;
-      rowH = Math.max(rowH, h);
-    }
-    rowY += rowH + ROW_GAP;
-  }
-  return frames;
-}
-
-export function frameAt(frames: readonly Frame[], p: Point): Frame | null {
+/** `lastRenders` maps a frame id to the last render it was laid out with. */
+export function layoutFrames(
+  frames: readonly CanvasFrame[],
+  m: RenderManifest,
+  lastRenders?: ReadonlyMap<string, PageRender>,
+): Frame[] {
+  const pages = new Map(m.pages.map((p) => [p.pageId, p]));
+  const out: Frame[] = [];
   for (const f of frames) {
+    const page = pages.get(f.pageId);
+    if (page === undefined) continue;
+    const render = page.renders[sizeKey(f)] ?? null;
+    const pending = render === null;
+    const stale = pending ? lastRenders?.get(f.id) ?? null : null;
+    out.push({
+      frameId: f.id,
+      pageId: f.pageId,
+      name: page.name,
+      device: tierForWidth(f.width),
+      x: f.x,
+      y: f.y,
+      w: f.width,
+      // A pending frame keeps its stale render's height, so its pinned tiles are not cut off at the fold.
+      h: Math.max((render ?? stale)?.height ?? 0, f.viewportHeight),
+      viewportHeight: f.viewportHeight,
+      render,
+      stale,
+      pending,
+    });
+  }
+  return out;
+}
+
+/** The frame under `p`. Frames are painted in order, so where they overlap the last one is on top and wins. */
+export function frameAt(frames: readonly Frame[], p: Point): Frame | null {
+  for (let i = frames.length - 1; i >= 0; i--) {
+    const f = frames[i]!;
     if (f.x <= p.x && p.x < f.x + f.w && f.y <= p.y && p.y < f.y + f.h) return f;
   }
   return null;

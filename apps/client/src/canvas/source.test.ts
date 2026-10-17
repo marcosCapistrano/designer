@@ -11,7 +11,7 @@ function fakeFetch(body: BodyInit, status = 200) {
   return { urls, fetchFn };
 }
 
-const manifest: RenderManifest = { version: 1, pages: [] };
+const manifest: RenderManifest = { version: 2, pages: [] };
 
 describe('StaticTileSource', () => {
   it('manifest fetches manifest.json and returns the parsed object', async () => {

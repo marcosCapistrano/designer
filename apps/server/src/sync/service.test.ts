@@ -28,7 +28,7 @@ async function setup(files: Record<string, string> = { 'app/page.tsx': 'export d
     store: () => store,
     readSource: vi.fn(async () => source),
     hub: { broadcast: (message) => { messages.push(message); } },
-    render: vi.fn(async () => ({ manifest: { version: 1 as const, pages: [] }, warnings: [] })),
+    render: vi.fn(async () => ({ manifest: { version: 2 as const, pages: [] }, warnings: [] })),
   };
   const service = new SyncService(deps);
   return { service, deps, store, source, messages };
@@ -60,9 +60,12 @@ describe('import service', () => {
   it('keeps saved design on render failure and lets the user retry preview', async () => {
     const s = await setup();
     s.deps.render = async () => { throw new Error('browser unavailable'); };
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
     expect(await s.service.import('demo', { mode: 'next' })).toMatchObject({ ok: true, manifest: null, warnings: [expect.stringContaining('Preview')] });
     expect(await s.store.load()).not.toBeNull();
-    s.deps.render = async () => ({ manifest: { version: 1, pages: [] }, warnings: [] });
+    expect(errors).toHaveBeenCalledWith(expect.stringContaining('browser unavailable'));
+    errors.mockRestore();
+    s.deps.render = async () => ({ manifest: { version: 2, pages: [] }, warnings: [] });
     expect(await s.service.retryPreview('demo')).toMatchObject({ warnings: [] });
     await s.service.close();
   });
@@ -144,5 +147,52 @@ describe('import service', () => {
     expect(await s.service.import('demo', { mode: 'next' })).toMatchObject({ ok: true, sourceOnlyRules: 2, inlined });
     expect(await s.service.summary('demo')).toMatchObject({ sourceOnlyRules: 2, inlined });
     await s.service.close();
+  });
+  it('ensureRendered runs one render at a time and re-checks once after a call during a render', async () => {
+    const s = await setup();
+    let missing = true;
+    const frames = { sizesByPage: vi.fn(), missingRenders: vi.fn(async () => missing) };
+    const service = new SyncService({ ...s.deps, frames: frames as never });
+    const gates: (() => void)[] = [];
+    const retry = vi.spyOn(service, 'retryPreview').mockImplementation(() => new Promise((resolve) => { gates.push(() => { resolve({ manifest: null, warnings: [] }); }); }));
+    service.ensureRendered('demo');
+    await vi.waitFor(() => expect(retry).toHaveBeenCalledTimes(1));
+    service.ensureRendered('demo'); // arrives during the render, e.g. a PUT adding a size
+    expect(retry).toHaveBeenCalledTimes(1);
+    gates[0]!(); // first render finishes; the new size is still missing
+    await vi.waitFor(() => expect(retry).toHaveBeenCalledTimes(2));
+    missing = false;
+    gates[1]!();
+    await service.whenRendered('demo');
+    expect(retry).toHaveBeenCalledTimes(2);
+    await service.close();
+    await s.service.close();
+  });
+  it('ensureRendered does not render again when nothing is missing after the render', async () => {
+    const s = await setup();
+    let missing = true;
+    const frames = { sizesByPage: vi.fn(), missingRenders: vi.fn(async () => missing) };
+    const service = new SyncService({ ...s.deps, frames: frames as never });
+    let finish!: () => void;
+    const retry = vi.spyOn(service, 'retryPreview').mockImplementation(() => new Promise((resolve) => { finish = () => { missing = false; resolve({ manifest: null, warnings: [] }); }; }));
+    service.ensureRendered('demo');
+    await vi.waitFor(() => expect(retry).toHaveBeenCalledTimes(1));
+    service.ensureRendered('demo');
+    finish();
+    await service.whenRendered('demo');
+    expect(retry).toHaveBeenCalledTimes(1);
+    await service.close();
+    await s.service.close();
+  });
+  it('ensureRendered swallows the no-import 409', async () => {
+    const s = await setup();
+    const frames = { sizesByPage: vi.fn(), missingRenders: vi.fn(async () => true) };
+    const service = new SyncService({ ...s.deps, frames: frames as never });
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+    service.ensureRendered('demo');
+    await service.whenRendered('demo');
+    expect(log).not.toHaveBeenCalled();
+    await service.close();
+    log.mockRestore();
   });
 });

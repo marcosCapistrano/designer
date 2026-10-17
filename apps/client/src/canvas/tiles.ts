@@ -4,8 +4,8 @@
 // at zoom z covers TILE_SIZE / z world px.
 
 import { TILE_SIZE, ZOOMS } from '@hub/protocol';
-import type { TileLevel, Zoom } from '@hub/protocol';
-import { rectsIntersect } from './geom.js';
+import type { PageRender, TileLevel, Zoom } from '@hub/protocol';
+import { intersectRect, rectsIntersect } from './geom.js';
 import type { Rect } from './geom.js';
 import type { Frame } from './layout.js';
 
@@ -31,8 +31,13 @@ export function pickZoom(scale: number, dpr: number): Zoom {
   return ZOOMS.find((z) => z >= need) ?? 1;
 }
 
+/** The render whose tiles a frame shows: its own, or while pending the stale one pinned to its top-left. */
+export function shownRender(frame: Frame): PageRender | null {
+  return frame.render ?? frame.stale;
+}
+
 export function levelOf(frame: Frame, zoom: Zoom): TileLevel | undefined {
-  return frame.render?.levels.find((l) => l.zoom === zoom);
+  return shownRender(frame)?.levels.find((l) => l.zoom === zoom);
 }
 
 function tileRef(frame: Frame, level: TileLevel, zoom: Zoom, tx: number, ty: number): TileRef {
@@ -46,11 +51,14 @@ function tileRef(frame: Frame, level: TileLevel, zoom: Zoom, tx: number, ty: num
   };
 }
 
-// Tiles of `frame` at `zoom` that overlap `area` (world px). Edges are
+// Tiles of `frame` at `zoom` that overlap `area` within the frame (world px). Edges are
 // exclusive: an area ending exactly on a tile boundary does not take the next tile.
-export function frameTiles(frame: Frame, zoom: Zoom, area: Rect): TileRef[] {
+export function frameTiles(frame: Frame, zoom: Zoom, within: Rect): TileRef[] {
   const level = levelOf(frame, zoom);
   if (!level) return [];
+  // A stale render can be larger than the frame; nothing past the frame's edges is shown.
+  const area = intersectRect(within, frame);
+  if (area === null) return [];
   const size = TILE_SIZE / zoom;
   const x0 = Math.max(0, Math.floor((area.x - frame.x) / size));
   const x1 = Math.min(level.cols - 1, Math.ceil((area.x + area.w - frame.x) / size) - 1);

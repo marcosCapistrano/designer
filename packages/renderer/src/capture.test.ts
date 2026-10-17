@@ -1,7 +1,7 @@
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { Device } from '@hub/protocol';
+import type { FrameSize } from '@hub/protocol';
 import sharp from 'sharp';
 import { afterAll, beforeAll, describe, expect, test } from 'vitest';
 import { exportPage, type DesignDoc } from '@hub/design-model';
@@ -18,8 +18,11 @@ afterAll(async () => {
   await pool.close();
 });
 
-const cap = (html: string, css: string, device: Device = 'base') =>
-  pool.withPage((p) => capturePage(p, { html, css, device }));
+const BASE: FrameSize = { width: 1440, viewportHeight: 900 };
+const TABLET: FrameSize = { width: 834, viewportHeight: 1194 };
+const MOBILE: FrameSize = { width: 390, viewportHeight: 844 };
+const cap = (html: string, css: string, size: FrameSize = BASE) =>
+  pool.withPage((p) => capturePage(p, { html, css, size }));
 
 test('full height at device width', async () => {
   const result = await cap('<main data-d-id="a"></main>', '[data-d-id="a"]{height:2000px}');
@@ -31,7 +34,7 @@ test('full height at device width', async () => {
 });
 
 test('short page uses the device viewport height', async () => {
-  const result = await cap('<main data-d-id="a"></main>', '[data-d-id="a"]{height:100px}', 'mobile');
+  const result = await cap('<main data-d-id="a"></main>', '[data-d-id="a"]{height:100px}', MOBILE);
   expect({ width: result.width, height: result.height }).toEqual({ width: 390, height: 844 });
 });
 
@@ -256,8 +259,8 @@ test('a dark color-scheme propagated to html paints the dark scheme canvas, as t
 test('tablet media query applies at 834px', async () => {
   const css = '[data-d-id="b"]{width:100px;height:10px}\n@media (max-width: 1023px){[data-d-id="b"]{width:200px;}}';
   const html = '<div data-d-id="b"></div>';
-  const tablet = await cap(html, css, 'tablet');
-  const base = await cap(html, css, 'base');
+  const tablet = await cap(html, css, TABLET);
+  const base = await cap(html, css, BASE);
   expect(tablet.hitMap.find((b) => b.nodeId === 'b')?.w).toBe(200);
   expect(base.hitMap.find((b) => b.nodeId === 'b')?.w).toBe(100);
 });
@@ -267,7 +270,7 @@ test('blocks network and scripts', async () => {
     await capturePage(p, {
       html: '<img data-d-id="i" src="https://example.invalid/x.png" width="10" height="10"><script>document.body.setAttribute("data-ran","1")</script>',
       css: '',
-      device: 'base',
+      size: BASE,
     });
     expect(await p.evaluate('document.body.getAttribute("data-ran")')).toBeNull();
   });
@@ -374,7 +377,7 @@ describe('hostile document tags', () => {
         const result = await capturePage(p, {
           html: `<img data-d-id="i" src="${imgUrl}" width="20" height="20" style="display:block">`,
           css: '',
-          device: 'base',
+          size: BASE,
         });
         expect(await p.evaluate('document.images[0].naturalWidth')).toBe(0);
         const box = result.hitMap.find((b) => b.nodeId === 'i') as NonNullable<(typeof result.hitMap)[number]>;
@@ -387,12 +390,33 @@ describe('hostile document tags', () => {
         const result = await capturePage(p, {
           html: `<iframe data-d-id="f" src="${frameUrl}" style="display:block;border:0;width:100px;height:100px"></iframe>`,
           css: '',
-          device: 'base',
+          size: BASE,
         });
         expect(p.frames().map((f) => f.url())).not.toContain(frameUrl);
         const box = result.hitMap.find((b) => b.nodeId === 'f') as NonNullable<(typeof result.hitMap)[number]>;
         expect(hasRed(await regionPixels(result.png, box))).toBe(false);
       });
     });
+  });
+});
+
+describe('frames of any size', () => {
+  const flex =
+    '<div data-d-id="r"><div data-d-id="a"></div><div data-d-id="b"></div><div data-d-id="c"></div></div>';
+  const flexCss =
+    '[data-d-id="r"]{display:flex;flex-wrap:wrap}[data-d-id="a"],[data-d-id="b"],[data-d-id="c"]{width:800px;height:100px;flex:none}';
+
+  test('content reflows by width', async () => {
+    const narrow = await cap(flex, flexCss, { width: 1000, viewportHeight: 150 });
+    expect(narrow.height).toBe(300);
+    const wide = await cap(flex, flexCss, { width: 1700, viewportHeight: 150 });
+    expect(wide.height).toBe(200);
+  });
+
+  test('vh follows the viewport height', async () => {
+    // 200vh, not 100vh: the page is at least viewportHeight tall anyway, so 100vh could not catch a smaller vh.
+    const result = await cap('<div style="height:200vh"></div>', '', { width: 800, viewportHeight: 700 });
+    expect(result.height).toBe(1400);
+    expect(result.width).toBe(800);
   });
 });

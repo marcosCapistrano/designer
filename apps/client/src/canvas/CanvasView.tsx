@@ -1,18 +1,20 @@
 // The canvas component: owns the two paint layers, wires DOM events into the
-// controller, and renders the device and tool toolbar. Source, cache, onSelect
-// and debug are read once at mount; the app passes stable values.
+// controller, and renders the tool toolbar. Source, frames, framesEditable, cache,
+// onSelect and debug are read once at mount; the app passes stable values.
 
 import { useEffect, useRef, useState } from 'preact/hooks';
 import type { JSX } from 'preact';
-import { DEVICES, DEVICE_LABEL } from '@hub/protocol';
-import type { Device, NodeSelection } from '@hub/protocol';
+import type { CanvasFrame, NodeSelection } from '@hub/protocol';
 import type { CanvasController, ControllerStats } from './controller.js';
 import type { BlobCache } from './cache.js';
+import type { FrameStore } from './frames.js';
 import type { Camera } from './geom.js';
+import { FrameMenu } from './FrameMenu.js';
 import type { PointerIn, Tool, WheelIn } from './gestures.js';
 import type { Frame } from './layout.js';
 import { COLORS } from './painter.js';
 import type { LoaderStats } from './loader.js';
+import type { CanvasRuntime } from './runtime.js';
 import { createCanvasRuntime } from './runtime.js';
 import type { TileSource } from './source.js';
 
@@ -25,6 +27,13 @@ export interface CanvasViewProps {
    * own, with `createIdbCache(name)`.
    */
   cache: BlobCache;
+  /** The frame layout to draw the manifest's pages in. */
+  frames: FrameStore;
+  /**
+   * Whether frames can be moved, resized and opened in the frame menu (default true). Preview
+   * canvases turn it off: their manifest is a fixed snapshot, so a change there could not render.
+   */
+  framesEditable?: boolean;
   onSelect?: (s: NodeSelection | null) => void;
   debug?: boolean;
 }
@@ -62,24 +71,29 @@ function buttonStyle(pressed: boolean): string {
     : 'font:inherit;min-height:44px;padding:6px 10px;border:1px solid #dadce0;border-radius:6px;background:#fff;color:#202124;cursor:pointer';
 }
 
-export function CanvasView({ source, cache, onSelect, debug = false }: CanvasViewProps): JSX.Element {
+const MENU_WIDTH = 340;
+
+/** The menu's box: at the tap, moved back inside the canvas, scrolling when it is taller than the canvas. */
+function menuPanelStyle(at: { x: number; y: number }, root: HTMLElement | null): string {
+  const w = root?.clientWidth ?? 800;
+  const h = root?.clientHeight ?? 600;
+  const width = Math.min(MENU_WIDTH, w - 16);
+  const left = Math.max(8, Math.min(at.x, w - width - 8));
+  const top = Math.max(8, Math.min(at.y, h - 120));
+  return `position:absolute;left:${left}px;top:${top}px;width:${width}px;max-height:${h - top - 8}px;overflow-y:auto;box-sizing:border-box;background:#fff;border-radius:10px;box-shadow:0 2px 12px rgba(0,0,0,.3);touch-action:pan-y`;
+}
+
+export function CanvasView({ source, cache, frames, framesEditable = true, onSelect, debug = false }: CanvasViewProps): JSX.Element {
   const rootRef = useRef<HTMLDivElement>(null);
   const layersRef = useRef<HTMLDivElement>(null);
   const baseRef = useRef<HTMLCanvasElement>(null);
   const spareRef = useRef<HTMLCanvasElement>(null);
   const overlayRef = useRef<HTMLCanvasElement>(null);
   const controllerRef = useRef<CanvasController | null>(null);
-  const [visible, setVisible] = useState<Set<Device>>(() => new Set(DEVICES));
+  const runtimeRef = useRef<CanvasRuntime | null>(null);
+  const [menu, setMenu] = useState<{ frameId: string; x: number; y: number } | null>(null);
   const [tool, setToolState] = useState<Tool>('pan');
   const [error, setError] = useState<string | null>(null);
-
-  const toggleDevice = (device: Device): void => {
-    const next = new Set(visible);
-    if (next.has(device)) next.delete(device);
-    else next.add(device);
-    setVisible(next);
-    controllerRef.current?.setDevices(next);
-  };
 
   const chooseTool = (t: Tool): void => {
     setToolState(t);
@@ -115,13 +129,17 @@ export function CanvasView({ source, cache, onSelect, debug = false }: CanvasVie
         layers.style.transform = t === null ? '' : `translate(${t.x}px,${t.y}px) scale(${t.scale})`;
       },
       source,
+      frames,
       cache,
       requestFrame: (cb) => requestAnimationFrame(() => cb()),
       now: () => performance.now(),
       onSelect,
       onError: setError,
+      onFrameMenu: (frameId, p) => setMenu({ frameId, x: p.x, y: p.y }),
+      framesEditable,
     });
     const { controller, loader } = runtime;
+    runtimeRef.current = runtime;
     controllerRef.current = controller;
 
     const sizeToRoot = (): void => {
@@ -207,9 +225,22 @@ export function CanvasView({ source, cache, onSelect, debug = false }: CanvasVie
       root.removeEventListener('wheel', onWheel);
       observer.disconnect();
       controllerRef.current = null;
+      runtimeRef.current = null;
       if (debug) delete window.__hubCanvas;
     };
   }, []);
+
+  useEffect(() => {
+    if (menu === null) return;
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape') setMenu(null);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [menu !== null]);
+
+  const menuFrames: CanvasFrame[] = menu === null ? [] : (controllerRef.current?.canvasLayout ?? []);
+  const menuFrame = menu === null ? undefined : menuFrames.find((f) => f.id === menu.frameId);
 
   return (
     <div
@@ -231,22 +262,37 @@ export function CanvasView({ source, cache, onSelect, debug = false }: CanvasVie
           {error}
         </div>
       )}
+      {menu !== null && menuFrame !== undefined && (
+        <>
+          <div
+            data-testid="frame-menu-backdrop"
+            style="position:absolute;inset:0"
+            onPointerDown={(e) => {
+              e.stopPropagation();
+              setMenu(null);
+            }}
+          />
+          <div
+            data-testid="frame-menu-panel"
+            style={menuPanelStyle(menu, rootRef.current)}
+            onPointerDown={(e) => e.stopPropagation()}
+            // The canvas zooms on wheel; over the menu the wheel scrolls the menu instead.
+            onWheel={(e) => e.stopPropagation()}
+          >
+            <FrameMenu
+              key={menuFrame.id}
+              frame={menuFrame}
+              frames={menuFrames}
+              onChange={(next) => {
+                runtimeRef.current?.changeFrames(next);
+                setMenu(null);
+              }}
+              onClose={() => setMenu(null)}
+            />
+          </div>
+        </>
+      )}
       <div style={TOOLBAR_STYLE} onPointerDown={(e) => e.stopPropagation()}>
-        {DEVICES.map((device) => {
-          const on = visible.has(device);
-          return (
-            <button
-              key={device}
-              type="button"
-              data-testid={`device-${device}`}
-              aria-pressed={on ? 'true' : 'false'}
-              style={buttonStyle(on)}
-              onClick={() => toggleDevice(device)}
-            >
-              {DEVICE_LABEL[device]}
-            </button>
-          );
-        })}
         {TOOLS.map(({ tool: t, label }) => {
           const on = tool === t;
           return (

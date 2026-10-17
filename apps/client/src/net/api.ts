@@ -11,6 +11,7 @@ import type {
   NodeSelection, DesignSelection, DesignEditResult,
   DesignChatState, DesignChatResult,
   SourcePreviewState, SourcePreviewResult,
+  CanvasFrame,
 } from '@hub/protocol';
 
 /** A non-OK API response. `message` is the server's `error` text when it sent one. */
@@ -32,7 +33,7 @@ export interface ApiClientOptions {
 }
 
 interface RequestOptions {
-  method?: 'GET' | 'POST';
+  method?: 'GET' | 'POST' | 'PUT';
   body?: unknown;
   /** false skips onUnauthorized; only login uses it. */
   checkAuth?: boolean;
@@ -128,6 +129,21 @@ export class ApiClient {
   applySourcePreview(app: string,id: string): Promise<ImportResponse> { return this.json(`${appPath(app)}/design/source-preview/apply`, {method:'POST',body:{id}}); }
   cancelSourcePreview(app: string,id: string): Promise<unknown> { return this.json(`${appPath(app)}/design/source-preview/cancel`, {method:'POST',body:{id}}); }
   stopSourcePreview(app: string): Promise<StopResponse> { return this.json(`${appPath(app)}/design/source-preview/stop`, {method:'POST'}); }
+
+  /**
+   * The app's canvas layout; the hub lays out pages that have no frames yet. `provisional` is set while some of
+   * those were placed before their pages' heights were known, and so were not saved: ask again after a render.
+   */
+  async designFrames(app: string): Promise<{ frames: CanvasFrame[]; provisional: boolean }> {
+    const res = await this.json<{ frames: CanvasFrame[]; provisional?: boolean }>(`${appPath(app)}/design/frames`);
+    return { frames: res.frames, provisional: res.provisional === true };
+  }
+
+  /** Replaces the app's canvas layout; resolves with the layout the hub stored. */
+  async saveDesignFrames(app: string, frames: readonly CanvasFrame[]): Promise<CanvasFrame[]> {
+    const res = await this.json<{ frames: CanvasFrame[] }>(`${appPath(app)}/design/frames`, { method: 'PUT', body: { frames } });
+    return res.frames;
+  }
 
   buildState(app: string, after?: number): Promise<BuildState> {
     const query = after === undefined ? '' : `?after=${after}`;

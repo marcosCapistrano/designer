@@ -2,7 +2,8 @@ import { useEffect, useMemo, useState } from 'preact/hooks';
 import type { JSX } from 'preact';
 import type { DesignEditResult, DesignProposal, DesignSelection, NodeSelection } from '@hub/protocol';
 import type { ApiClient } from '../../net/api.js';
-import { CanvasView } from '../../canvas/index.js';
+import { ServerFrameStore } from '../../net/frame-store.js';
+import { CanvasView, readOnlyFrameStore } from '../../canvas/index.js';
 import { createNullCache } from '../../canvas/cache.js';
 import type { TileSource } from '../../canvas/source.js';
 import type { WsClient } from '../../net/ws.js';
@@ -20,6 +21,9 @@ export function EditorPanel({ app, api, ws, source, selection, revision, disable
   const [error, setError] = useState<string | null>(null);
   const [proposal, setProposal] = useState<DesignProposal | null>(null);
   const previewCache = useMemo(() => createNullCache(), []);
+  // The preview shows the saved layout but never writes it: its manifest is a fixed snapshot, so a frame
+  // changed there would never render, and the main canvas's next save would undo the change anyway.
+  const previewFrames = useMemo(() => readOnlyFrameStore(new ServerFrameStore(app, api)), [app, api]);
   const previewSource = useMemo<TileSource | null>(() => proposal?.manifest ? {
     manifest: async () => proposal.manifest!, tile: (key, x, y) => source.tile(key, x, y), hitMap: (hash) => source.hitMap(hash), subscribe: () => () => {},
   } : null, [proposal, source]);
@@ -73,7 +77,7 @@ export function EditorPanel({ app, api, ws, source, selection, revision, disable
     {proposal && <div class="design-proposal" role="region" aria-label="Edit preview">
       <h2>Review changes</h2><ul>{proposal.descriptions.map((description, index) => <li key={index}>{description}</li>)}</ul>
       {proposal.warnings.length > 0 && <p role="alert">{proposal.warnings.join(' ')}</p>}
-      {previewSource && <div class="design-preview-canvas"><CanvasView key={proposal.id} source={previewSource} cache={previewCache} /></div>}
+      {previewSource && <div class="design-preview-canvas"><CanvasView key={proposal.id} source={previewSource} cache={previewCache} frames={previewFrames} framesEditable={false} /></div>}
       <button class="shell-button" disabled={locked} onClick={() => void action(() => api.applyDesign(app, proposal.id))}>Apply changes</button>
       <button class="shell-button" disabled={locked} onClick={() => { void api.cancelDesign(app, proposal.id).then(() => setProposal(null)).catch((error) => setError(String(error))); }}>Cancel preview</button>
     </div>}

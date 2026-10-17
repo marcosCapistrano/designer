@@ -11,7 +11,7 @@ async function setup(code='const user=loadUser();export default () => <main><h1>
   const store=new FsSyncStore(dir);
   const source:{project:{files:Record<string,string>};commit:string;config?:Record<string,string>}={project:{files:{'app/page.tsx':code,...extra}},commit:'one'};
   const build={withCheckout:async<T>(_app:string,action:()=>Promise<T>)=>action()};
-  const sync=new SyncService({dataDir:dir,build,registry:{get:async name=>name==='demo'?{name,dir,adopted:false,manifest:null,manifestError:null}:null},hub:{broadcast:()=>{}},store:()=>store,readSource:async()=>source,render:async()=>({manifest:{version:1,pages:[]},warnings:[]})});
+  const sync=new SyncService({dataDir:dir,build,registry:{get:async name=>name==='demo'?{name,dir,adopted:false,manifest:null,manifestError:null}:null},hub:{broadcast:()=>{}},store:()=>store,readSource:async()=>source,render:async()=>({manifest:{version:2,pages:[]},warnings:[]})});
   let actions!:PreviewActions;
   const scripts:FakeStep[][]=[];const runner=new FakeClaudeRunner(scripts);
   const preview=new SourcePreview(sync,build,runner,dir,callbacks=>{actions=callbacks;return{fake:true}});

@@ -18,7 +18,7 @@ function setup(shared = false, extra: Record<string, string> = {}) {
       if (!decoded.ok) throw new Error(decoded.error);
       saved = { state: decoded.value, revision: `revision-${++writes}` }; return saved.revision;
     },
-    preview: async (_app: string, _doc: unknown, publish = true) => { if (publish) renders++; return { manifest: { version: 1 as const, pages: [] }, warnings: [] }; },
+    preview: async (_app: string, _doc: unknown, publish = true) => { if (publish) renders++; return { manifest: { version: 2 as const, pages: [] }, warnings: [] }; },
   };
   const build = { withCheckout: async <T>(_app: string, action: () => Promise<T>) => action() };
   const editing = new DesignEditing(sync, build, () => time);

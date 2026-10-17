@@ -19,6 +19,8 @@ import { syncRoutes } from './sync/routes.js';
 import type { SyncService } from './sync/service.js';
 import type { DesignEditing } from './design/editing.js';
 import { designRoutes } from './design/routes.js';
+import { frameRoutes } from './design/frame-routes.js';
+import type { CanvasFrames } from './design/frames.js';
 import type { DesignChat } from './design/chat.js';
 import { designChatRoutes } from './design/chat-routes.js';
 import { previewRoutes } from './sync/preview-routes.js';
@@ -32,6 +34,7 @@ export interface AppDeps {
   build: BuildService;
   sync?: SyncService;
   editing?: DesignEditing;
+  frames?: CanvasFrames;
   designChat?: DesignChat;
   sourcePreview?: SourcePreview;
   dataDir: string;
@@ -162,6 +165,7 @@ export function createApp(deps: AppDeps): Hono {
   app.route('/api/apps', renderRoutes({ dataDir, hasApp }));
   if (deps.sync) app.route('/api/apps', syncRoutes(deps.sync));
   if (deps.editing) app.route('/api/apps', designRoutes(deps.editing));
+  if (deps.frames && deps.sync) app.route('/api/apps', frameRoutes({ frames: deps.frames, sync: deps.sync, hasApp }));
   if (deps.designChat) app.route('/api/apps', designChatRoutes(deps.designChat));
   if (deps.sourcePreview) app.route('/api/apps', previewRoutes(deps.sourcePreview));
   app.all('/api/*', (c) => c.json({ error: 'Not found' }, 404));

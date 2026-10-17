@@ -67,6 +67,16 @@ export class GestureTracker {
     this.getTool = getTool;
   }
 
+  /** Whether the tracker follows this pointer. */
+  holds(id: number): boolean {
+    return this.contacts.has(id);
+  }
+
+  /** Whether the tracker follows any pointer. */
+  get active(): boolean {
+    return this.contacts.size > 0;
+  }
+
   handle(ev: PointerIn): GestureAction[] {
     if (ev.kind === 'down') return this.down(ev);
     if (ev.kind === 'move') return this.move(ev);

@@ -3,8 +3,8 @@
 // frame; the frame paints the base layer, the overlay when it changed, and
 // requests the tiles the viewport needs.
 
-import { DEVICES, TILE_SIZE } from '@hub/protocol';
-import type { Device, HitBox, NodeSelection, RenderManifest, TileLevel } from '@hub/protocol';
+import { TILE_SIZE } from '@hub/protocol';
+import type { CanvasFrame, HitBox, NodeSelection, PageRender, RenderManifest, TileLevel } from '@hub/protocol';
 import {
   clampScale,
   expandRect,
@@ -18,16 +18,18 @@ import {
   zoomAt as zoomCamera,
 } from './geom.js';
 import type { Camera, Point, Rect, Size } from './geom.js';
+import { dragTo, hitHandle, settleFrame } from './frame-drag.js';
+import type { FrameDrag } from './frame-drag.js';
 import { boxSelect, hitTest, toPagePoint } from './hit.js';
 import type { Frame } from './layout.js';
 import { frameAt, layoutBounds, layoutFrames } from './layout.js';
 import type { TileImage, TileWant } from './loader.js';
-import { GestureTracker, wheelAction } from './gestures.js';
+import { GestureTracker, TAP_SLOP, wheelAction } from './gestures.js';
 import type { GestureAction, PointerIn, Tool, WheelIn } from './gestures.js';
 import { paintOverlay } from './overlay.js';
 import { BasePainter } from './painter.js';
 import type { BackBuffer, PaintInput, PaintStats } from './painter.js';
-import { pickZoom, visibleTiles } from './tiles.js';
+import { pickZoom, shownRender, visibleTiles } from './tiles.js';
 
 export interface ControllerDeps {
   base: CanvasRenderingContext2D;
@@ -45,6 +47,12 @@ export interface ControllerDeps {
   requestFrame: (cb: () => void) => void;
   now: () => number;
   onSelect?: (s: NodeSelection | null) => void;
+  /** A frame drag was released with the frame changed: the whole layout, to save. */
+  onFramesChange?: (frames: CanvasFrame[]) => void;
+  /** A tap (not a drag) on a frame's label band: the frame and the tap's screen point, to open its menu at. */
+  onFrameMenu?: (frameId: string, screen: Point) => void;
+  /** Whether frames can be moved, resized or opened in the menu (default true). Off, handles are neither drawn nor hit. */
+  framesEditable?: boolean;
 }
 
 /** Where the painted layers are shown: translate by (x, y) CSS px, then scale about the layer origin. */
@@ -84,6 +92,12 @@ interface IndexEntry {
 
 type MarqueeAction = Extract<GestureAction, { type: 'marquee' }>;
 
+/** What is selected: nodes of one frame's render. Reported to onSelect as a NodeSelection. */
+interface FrameSelection {
+  frameId: string;
+  nodeIds: string[];
+}
+
 /** The hash of the frame's render when it has tiles to draw, else null. */
 function renderHash(f: Frame): string | null {
   const r = f.render;
@@ -108,7 +122,7 @@ function largestOverlap(frames: readonly Frame[], r: Rect): Frame | null {
 function buildIndex(frames: readonly Frame[]): Map<string, IndexEntry[]> {
   const index = new Map<string, IndexEntry[]>();
   for (const frame of frames) {
-    for (const level of frame.render?.levels ?? []) {
+    for (const level of shownRender(frame)?.levels ?? []) {
       const entry: IndexEntry = { frame, level };
       const list = index.get(level.key);
       if (list) list.push(entry);
@@ -125,8 +139,10 @@ export class CanvasController {
 
   private toolValue: Tool = 'pan';
   private manifest: RenderManifest | null = null;
-  private devices: ReadonlySet<Device> = new Set(DEVICES);
+  private canvasFrames: readonly CanvasFrame[] = [];
   private layout: readonly Frame[] = [];
+  /** Frame id to the last render that frame was laid out with, shown while its size is rendering. */
+  private lastRenders = new Map<string, PageRender>();
   private index = new Map<string, IndexEntry[]>();
 
   private cam: Camera = { x: 0, y: 0, scale: 1 };
@@ -139,12 +155,14 @@ export class CanvasController {
 
   private scheduled = false;
   private overlayDirty = false;
-  private selected: NodeSelection | null = null;
+  private selected: FrameSelection | null = null;
   private marquee: Rect | null = null;
+  /** A move or resize of a frame by its handle; its pointer never reaches the gesture tracker. */
+  private drag: FrameDrag | null = null;
   /** Bumped by every tap, box select and relayout; a stale async result is dropped. */
   private selectToken = 0;
-  /** Bumped by every setManifest; a hit-map load started under an older manifest must not touch the selection. */
-  private manifestGen = 0;
+  /** Bumped by every setManifest and setFrames; a hit-map load started under an older layout must not touch the selection. */
+  private layoutGen = 0;
 
   private framesPainted = 0;
   private tilesDrawn = 0;
@@ -162,31 +180,15 @@ export class CanvasController {
   setManifest(m: RenderManifest): void {
     if (this.manifest === null && !this.cameraSet) this.needsFit = true;
     this.manifest = m;
-    const gen = ++this.manifestGen;
-    this.relayout();
+    this.relayoutKeepingSelection();
+  }
 
-    const sel = this.selected;
-    if (sel !== null) {
-      const frame = this.findFrame(sel.pageId, sel.device);
-      const hash = frame ? renderHash(frame) : null;
-      if (frame && hash !== null) {
-        // Both handlers ignore a load that a later manifest has superseded, so a
-        // stale rejection cannot clear a selection that a newer manifest kept.
-        void this.deps.hitMaps.load(hash).then(
-          () => {
-            if (gen !== this.manifestGen) return;
-            this.overlayDirty = true;
-            this.schedule();
-          },
-          () => {
-            if (gen === this.manifestGen && this.selected === sel) this.select(null);
-          },
-        );
-      } else {
-        this.select(null);
-      }
-    }
-    this.schedule();
+  /** Lays the canvas out from these frames (the whole layout). */
+  setFrames(frames: readonly CanvasFrame[]): void {
+    // A layout from outside wins over a drag in progress, whose frame may be gone.
+    this.drag = null;
+    this.canvasFrames = frames.map((f) => ({ ...f }));
+    this.relayoutKeepingSelection();
   }
 
   resize(w: number, h: number, dpr: number): void {
@@ -206,15 +208,6 @@ export class CanvasController {
     this.schedule();
   }
 
-  setDevices(visible: ReadonlySet<Device>): void {
-    this.devices = new Set(visible);
-    this.relayout();
-    const sel = this.selected;
-    if (sel !== null && this.findFrame(sel.pageId, sel.device) === undefined) this.select(null);
-    this.painter.invalidate();
-    this.schedule();
-  }
-
   setTool(t: Tool): void {
     this.toolValue = t;
   }
@@ -225,6 +218,7 @@ export class CanvasController {
 
   /** Forgets in-progress gestures whose pointer-ups were lost (window blur, tab hidden). */
   resetGestures(): void {
+    this.cancelDrag();
     for (const action of this.gestures.reset()) this.apply(action);
   }
 
@@ -240,15 +234,21 @@ export class CanvasController {
     this.schedule();
   }
 
+  /** The frame layout as the canvas holds it, mid-drag changes included. */
+  get canvasLayout(): CanvasFrame[] {
+    return this.canvasFrames.map((f) => ({ ...f }));
+  }
+
   get frames(): readonly Frame[] {
     return this.layout;
   }
 
   get selection(): NodeSelection | null {
-    return this.selected;
+    return this.reported(this.selected);
   }
 
   pointer(ev: PointerIn): void {
+    if (this.frameDragStep(ev)) return;
     for (const action of this.gestures.handle(ev)) this.apply(action);
   }
 
@@ -286,7 +286,7 @@ export class CanvasController {
       return;
     }
     const id = hitTest(map, toPagePoint(frame, world));
-    this.select(id === null ? null : { pageId: frame.pageId, device: frame.device, nodeIds: [id] });
+    this.select(id === null ? null : { frameId: frame.frameId, nodeIds: [id] });
   }
 
   /** `a` and `b` are screen CSS px corners. */
@@ -309,7 +309,7 @@ export class CanvasController {
     }
     const pageRect = { x: clipped.x - frame.x, y: clipped.y - frame.y, w: clipped.w, h: clipped.h };
     const nodeIds = boxSelect(map, pageRect);
-    this.select(nodeIds.length > 0 ? { pageId: frame.pageId, device: frame.device, nodeIds } : null);
+    this.select(nodeIds.length > 0 ? { frameId: frame.frameId, nodeIds } : null);
   }
 
   tileLoaded(key: string, x: number, y: number): void {
@@ -343,6 +343,8 @@ export class CanvasController {
       frames: this.layout,
       zoom,
       smoothing,
+      readout: this.drag?.moved ? { frameId: this.drag.frameId, kind: this.drag.kind } : null,
+      handles: this.deps.framesEditable !== false,
     };
     // While zooming, the last painted image is scaled on the compositor; the repaint comes at settle.
     const preview = smoothing ? null : this.previewOf(input);
@@ -424,14 +426,65 @@ export class CanvasController {
 
   /** Recomputes frames and the tile index. Pending taps are invalidated since their frames may be gone. */
   private relayout(): void {
-    this.layout = this.manifest === null ? [] : layoutFrames(this.manifest, this.devices);
+    this.layout = this.manifest === null ? [] : layoutFrames(this.canvasFrames, this.manifest, this.lastRenders);
+    const last = new Map<string, PageRender>();
+    for (const f of this.layout) {
+      const r = f.render ?? f.stale;
+      if (r !== null) last.set(f.frameId, r);
+    }
+    this.lastRenders = last;
     this.index = buildIndex(this.layout);
     this.overlayDirty = true;
     this.selectToken++;
   }
 
-  private findFrame(pageId: string, device: Device): Frame | undefined {
-    return this.layout.find((f) => f.pageId === pageId && f.device === device);
+  /**
+   * Relayout, then keep the selection if its frame still has a render (reloading that render's hit
+   * map, which may be new), else clear it.
+   */
+  private relayoutKeepingSelection(): void {
+    const gen = ++this.layoutGen;
+    const reportedBefore = this.reported(this.selected);
+    this.relayout();
+
+    const sel = this.selected;
+    if (sel !== null) {
+      const frame = this.findFrame(sel.frameId);
+      const hash = frame ? renderHash(frame) : null;
+      if (frame && hash !== null) {
+        // A resize across a tier boundary changes which styles an edit of the selection applies to.
+        const now = this.reported(sel);
+        if (now !== null && (now.device !== reportedBefore?.device || now.pageId !== reportedBefore.pageId)) {
+          this.deps.onSelect?.(now);
+        }
+        // Both handlers ignore a load that a later layout has superseded, so a
+        // stale rejection cannot clear a selection that a newer layout kept.
+        void this.deps.hitMaps.load(hash).then(
+          () => {
+            if (gen !== this.layoutGen) return;
+            this.overlayDirty = true;
+            this.schedule();
+          },
+          () => {
+            if (gen === this.layoutGen && this.selected === sel) this.select(null);
+          },
+        );
+      } else {
+        this.select(null);
+      }
+    }
+    this.schedule();
+  }
+
+  private findFrame(frameId: string): Frame | undefined {
+    return this.layout.find((f) => f.frameId === frameId);
+  }
+
+  /** The selection as the app sees it: the frame's page and style tier. */
+  private reported(sel: FrameSelection | null): NodeSelection | null {
+    if (sel === null) return null;
+    const frame = this.findFrame(sel.frameId);
+    return frame ? { pageId: frame.pageId, device: frame.device, nodeIds: sel.nodeIds } : null;
   }
 
   /** Waits for the first page to have frames, so an empty layout never fits to the origin. */
@@ -444,17 +497,17 @@ export class CanvasController {
     this.needsFit = false;
   }
 
-  private select(s: NodeSelection | null): void {
+  private select(s: FrameSelection | null): void {
     this.selected = s;
     this.overlayDirty = true;
-    this.deps.onSelect?.(s);
+    this.deps.onSelect?.(this.reported(s));
     this.schedule();
   }
 
   private highlight(): { frame: Frame; boxes: readonly HitBox[] } | null {
     const sel = this.selected;
     if (sel === null) return null;
-    const frame = this.findFrame(sel.pageId, sel.device);
+    const frame = this.findFrame(sel.frameId);
     const hash = frame ? renderHash(frame) : null;
     if (!frame || hash === null) return null;
     const map = this.deps.hitMaps.get(hash);
@@ -486,6 +539,69 @@ export class CanvasController {
         this.marqueeStep(a);
         return;
     }
+  }
+
+  /**
+   * Feeds a pointer event to a frame drag: starts one on a primary press on a handle (any tool,
+   * any pointer type) unless another pointer is already in a gesture, and while one runs takes
+   * every pointer event. Returns whether the event was taken.
+   */
+  private frameDragStep(ev: PointerIn): boolean {
+    const d = this.drag;
+    if (d !== null) {
+      if (ev.id !== d.pointerId) return true;
+      if (ev.kind === 'move') {
+        const next = dragTo(d, ev, this.cam.scale, TAP_SLOP);
+        if (next !== null) this.replaceFrame(next);
+        return true;
+      }
+      if (ev.kind === 'up') {
+        this.drag = null;
+        // A release without movement is a tap on the handle, which moves nothing.
+        if (d.moved) this.settleDrag(d);
+        else {
+          this.schedule();
+          if (d.kind === 'move') this.deps.onFrameMenu?.(d.frameId, { x: ev.x, y: ev.y });
+        }
+        return true;
+      }
+      // A cancel, or a down for this pointer whose up was lost.
+      this.cancelDrag();
+      if (ev.kind === 'cancel') return true;
+    }
+    if (ev.kind !== 'down' || ev.button !== 0 || this.deps.framesEditable === false) return false;
+    if (this.gestures.holds(ev.id)) this.resetGestures();
+    if (this.gestures.active) return false;
+    const hit = hitHandle(this.layout, screenToWorld(this.cam, ev), this.cam.scale);
+    const origin = hit ? this.canvasFrames.find((f) => f.id === hit.frameId) : undefined;
+    if (!hit || !origin) return false;
+    this.drag = { pointerId: ev.id, frameId: hit.frameId, kind: hit.kind, start: { x: ev.x, y: ev.y }, origin, moved: false };
+    return true;
+  }
+
+  private settleDrag(d: FrameDrag): void {
+    const current = this.canvasFrames.find((f) => f.id === d.frameId);
+    if (current === undefined) return;
+    const settled = settleFrame(current);
+    this.replaceFrame(settled);
+    const o = d.origin;
+    if (settled.x !== o.x || settled.y !== o.y || settled.width !== o.width || settled.viewportHeight !== o.viewportHeight) {
+      this.deps.onFramesChange?.(this.canvasFrames.map((f) => ({ ...f })));
+    }
+  }
+
+  /** Puts a dragged frame back as it was before the drag. */
+  private cancelDrag(): void {
+    const d = this.drag;
+    if (d === null) return;
+    this.drag = null;
+    if (d.moved) this.replaceFrame(d.origin);
+    else this.schedule();
+  }
+
+  private replaceFrame(next: CanvasFrame): void {
+    this.canvasFrames = this.canvasFrames.map((f) => (f.id === next.id ? next : f));
+    this.relayoutKeepingSelection();
   }
 
   private marqueeStep(a: MarqueeAction): void {

@@ -5,8 +5,9 @@ import { fakeCtx, img, type Call } from './test-utils.js';
 import type { Frame } from './layout.js';
 
 const lv = (zoom: Zoom, key: string, cols: number, rows: number) => ({ zoom, key, cols, rows });
-const frame = (over: Partial<Frame> = {}): Frame => ({ pageId: 'p', name: 'P', device: 'base', x: 0, y: 0, w: 1440, h: 1000,
-  render: { device: 'base', hash: 'h', width: 1440, height: 1000, levels: [lv(0.25, 'q', 1, 1), lv(0.5, 'k', 2, 1), lv(1, 'h', 3, 2)] }, ...over });
+const frame = (over: Partial<Frame> = {}): Frame => ({ frameId: 'f', pageId: 'p', name: 'P', device: 'base', x: 0, y: 0, w: 1440, h: 1000,
+  viewportHeight: 900, stale: null, pending: false,
+  render: { device: 'base', hash: 'h', width: 1440, viewportHeight: 900, height: 1000, levels: [lv(0.25, 'q', 1, 1), lv(0.5, 'k', 2, 1), lv(1, 'h', 3, 2)] }, ...over });
 const tilesOf = (...ids: string[]) => { const m = new Map(ids.map(id => [id, img(id)])); return { get: (k: string, x: number, y: number) => m.get(`${k}/${x}_${y}`) }; };
 const input = (frames: Frame[], over: Partial<PaintInput> = {}): PaintInput =>
   ({ camera: { x: 0, y: 0, scale: 0.5 }, viewport: { w: 800, h: 600 }, dpr: 1, frames, zoom: 0.5, smoothing: true, ...over });
@@ -30,7 +31,48 @@ describe('BasePainter', () => {
     painter.paint(input([frame()], { camera: { x: 0, y: -40, scale: 0.5 } }));
     const label = calls.find(c => c.m === 'fillText');
     expect(label).toMatchObject({ fill: '#5f6368' });
-    expect(label?.a).toEqual(['P · Desktop', 0, 14]);
+    expect(label?.a).toEqual(['P · 1440 × 900 · Desktop styles', 0, 14]);
+  });
+
+  it('labels a frame with its page, size and style tier', () => {
+    const { ctx, calls } = fakeCtx();
+    const painter = new BasePainter(ctx, tilesOf());
+    painter.paint(input([frame({ name: '/ads', w: 1600 })], { camera: { x: 0, y: -40, scale: 0.5 } }));
+    expect(calls.find(c => c.m === 'fillText')?.a[0]).toBe('/ads · 1600 × 900 · Desktop styles');
+  });
+
+  it('labels a frame whose size has no render yet as rendering', () => {
+    const { ctx, calls } = fakeCtx();
+    const painter = new BasePainter(ctx, tilesOf());
+    painter.paint(input([frame({ name: '/ads', w: 700, device: 'tablet', h: 900, render: null, pending: true })], { camera: { x: 0, y: -40, scale: 0.5 } }));
+    expect(calls.find(c => c.m === 'fillText')?.a[0]).toBe('/ads · 700 × 900 · Tablet styles · Rendering…');
+  });
+
+  it('draws a pending frame\'s stale tiles at their own size from its top-left, clipped to the frame', () => {
+    const { ctx, calls } = fakeCtx();
+    const painter = new BasePainter(ctx, tilesOf('k/0_0', 'k/1_0'));
+    const stale = frame().render!;
+    const pending = frame({ x: 100, y: 100, w: 700, h: 900, device: 'tablet', render: null, stale, pending: true });
+    const stats = painter.paint(input([pending]));
+    // The second column starts past the frame's right edge, so it is not drawn.
+    expect(draws(calls)).toEqual([['k/0_0', 50, 50, 512, 512]]);
+    expect(stats.tilesDrawn).toBe(1);
+    const clipAt = calls.findIndex(c => c.m === 'rect' && (c.a as number[]).join() === '50,50,350,450');
+    expect(clipAt).toBeGreaterThan(-1);
+    expect(calls[clipAt + 1]?.m).toBe('clip');
+  });
+
+  it('draws a dashed fold line at the viewport height of a frame taller than it', () => {
+    const { ctx, calls } = fakeCtx();
+    const painter = new BasePainter(ctx, tilesOf());
+    painter.paint(input([frame()]));
+    expect(calls.some(c => c.m === 'setLineDash' && (c.a[0] as number[]).length > 0)).toBe(true);
+    expect(calls.filter(c => c.m === 'moveTo').map(c => c.a)).toEqual([[0, 450]]);
+    expect(calls.filter(c => c.m === 'lineTo').map(c => c.a)).toEqual([[720, 450]]);
+
+    const short = fakeCtx();
+    new BasePainter(short.ctx, tilesOf()).paint(input([frame({ h: 900 })]));
+    expect(short.calls.filter(c => c.m === 'moveTo')).toEqual([]);
   });
 
   it('pan blits and repaints only the exposed strip', () => {
@@ -132,12 +174,13 @@ describe('BasePainter', () => {
     expect(draws(calls)).toContainEqual(['q/0_0', 128, 128, 128, 128, 512, 512, 512, 512]);
   });
 
-  it('failed render shows a badge', () => {
-    const { ctx, calls } = fakeCtx();
+  it('a failed render shows a badge on every frame of that size', () => {
+    const { ctx, calls } = fakeCtx(800, 1200);
     const painter = new BasePainter(ctx, tilesOf());
-    const failed = frame({ render: { ...frame().render!, error: 'boom' } });
-    painter.paint(input([failed]));
-    expect(calls.filter(c => c.m === 'fillRect' && c.fill === '#d93025').map(c => c.a)).toContainEqual([696, 8, 16, 16]);
+    const render = { ...frame().render!, error: 'boom' };
+    const failed = [frame({ frameId: 'a', render }), frame({ frameId: 'b', y: 1100, render })];
+    painter.paint(input(failed, { viewport: { w: 800, h: 1200 } }));
+    expect(calls.filter(c => c.m === 'fillRect' && c.fill === '#d93025').map(c => c.a)).toEqual([[696, 8, 16, 16], [696, 558, 16, 16]]);
   });
 
   it('smoothing off during interaction', () => {
@@ -204,7 +247,7 @@ describe('BasePainter', () => {
     const stats = painter.paint(input(narrow, { camera: { x: 0, y: -40, scale: 0.5 } }));
     expect(stats).toMatchObject({ mode: 'partial', blit: true, regions: 1 });
     expect(calls.filter(c => c.m === 'rect').map(c => c.a)).toEqual([[600, 0, 200, 600]]);
-    expect(calls.filter(c => c.m === 'fillText').map(c => c.a)).toEqual([['Narrow · Mobile', 0, 14]]);
+    expect(calls.filter(c => c.m === 'fillText').map(c => c.a)).toEqual([['Narrow · 100 × 900 · Mobile styles', 0, 14]]);
   });
 
   it('a missing tile falls back to zoom 0.5 before zoom 0.25 when both are loaded', () => {
@@ -350,6 +393,39 @@ describe('BasePainter with a back buffer', () => {
     expect(painter.paint(input(frames, { camera: { x: 20, y: 0, scale: 0.5 } }))).toMatchObject({ mode: 'full' });
     expect(front.calls.some(c => c.m === 'fillRect')).toBe(true);
     expect(back.calls).toEqual([]);
+  });
+});
+
+describe('BasePainter frame handles', () => {
+  it('draws the height tab outside the right edge at the viewport line', () => {
+    const { ctx, calls } = fakeCtx();
+    new BasePainter(ctx, tilesOf()).paint(input([frame()], { camera: { x: 0, y: 0, scale: 0.5 } }));
+    // Right edge at device x 720, viewport line at device y 450; the tab is 24 CSS px wide.
+    expect(calls.filter(c => c.m === 'fillRect' && c.fill === '#9aa0a6').map(c => c.a)).toContainEqual([720, 438, 24, 24]);
+  });
+
+  it('draws no handles when the frames are not editable', () => {
+    const { ctx, calls } = fakeCtx();
+    new BasePainter(ctx, tilesOf()).paint(input([frame()], { camera: { x: 0, y: 0, scale: 0.5 }, handles: false }));
+    expect(calls.filter(c => c.m === 'fillRect' && c.fill === '#9aa0a6')).toEqual([]);
+  });
+
+  it('draws the readout next to the handle being dragged', () => {
+    const { ctx, calls } = fakeCtx();
+    const f = frame({ w: 1640, render: null, pending: true, h: 900 });
+    new BasePainter(ctx, tilesOf()).paint(input([f], { camera: { x: 0, y: -40, scale: 0.5 }, readout: { frameId: 'f', kind: 'width' } }));
+    const text = calls.find(c => c.m === 'fillText' && c.a[0] === '1640 × 900 · Desktop');
+    expect(text).toBeDefined();
+    expect(text!.a[1]).toBeGreaterThan(820);
+  });
+
+  it('a readout change repaints in full, so the old readout is not left behind', () => {
+    const { ctx } = fakeCtx();
+    const painter = new BasePainter(ctx, tilesOf());
+    const frames = [frame()];
+    painter.paint(input(frames, { readout: { frameId: 'f', kind: 'width' } }));
+    expect(painter.paint(input(frames, { readout: null })).mode).toBe('full');
+    expect(painter.paint(input(frames)).mode).toBe('none');
   });
 });
 

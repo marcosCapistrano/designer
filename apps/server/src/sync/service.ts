@@ -3,13 +3,14 @@ import type { DesignDoc } from '@hub/design-model';
 import { ADAPTERS_FILE, FsSyncStore, countSourceOnly, discoverNextRoutes, projectAliases, synchronizePages, type SyncResult, type SyncState, type SyncStore } from '@hub/sync';
 import { APP_MANIFEST_FILE, APP_NAME_RE, routeIncluded } from '@hub/protocol/manifest';
 import { parseAdapters } from '@hub/protocol/adapters';
-import type { DesignSummary, ImportRequest, ImportResponse, RenderManifest } from '@hub/protocol';
+import { DEFAULT_FRAME_SIZES, type DesignSummary, type ImportRequest, type ImportResponse, type RenderManifest } from '@hub/protocol';
 import { BrowserPool, FsTileStore, renderDoc } from '@hub/renderer';
 import type { AppRegistry } from '../apps/registry.js';
 import { BuildError } from '../build/ci.js';
 import type { BuildService } from '../build/service.js';
 import type { WsHub } from '../ws/hub.js';
 import { renderDir } from '../design/render-files.js';
+import type { CanvasFrames } from '../design/frames.js';
 import { readSourceProject } from './source.js';
 
 /** Import configuration that cannot be used; the diagnostic names the file. */
@@ -30,11 +31,14 @@ export interface SyncDeps {
   dataDir: string;
   readSource?: typeof readSourceProject;
   store?: (app: string) => SyncStore;
+  frames?: Pick<CanvasFrames, 'sizesByPage' | 'missingRenders'>;
   render?: (app: string, doc: DesignDoc) => Promise<{ manifest: RenderManifest; warnings: string[] }>;
 }
 export class SyncService {
   private readonly stores = new Map<string, SyncStore>();
   private readonly pool = new BrowserPool();
+  private readonly rendering = new Map<string, Promise<void>>();
+  private readonly dirty = new Set<string>();
   constructor(private readonly deps: SyncDeps) {}
   async close(): Promise<void> { await this.pool.close(); }
   async load(app: string) { await this.entry(app); return this.store(app).load(); }
@@ -102,13 +106,16 @@ export class SyncService {
         return out;
       }
       const store = new FsTileStore(renderDir(this.deps.dataDir, app));
-      const out = await renderDoc(this.pool, doc, { devices: ['base', 'tablet', 'mobile'], prev: await store.readManifest(), store });
+      const out = await renderDoc(this.pool, doc, { sizes: this.deps.frames ? await this.deps.frames.sizesByPage(app) : () => DEFAULT_FRAME_SIZES, prev: await store.readManifest(), store });
       if (publish) {
         await store.writeManifest(out.manifest);
         this.deps.hub.broadcast({ type: 'render.ready', app, manifest: out.manifest });
       }
       return { manifest: out.manifest, warnings: out.failed.map((key) => `Preview failed for ${key}; the last good image is retained.`) };
-    } catch { return { manifest: null, warnings: ['Design saved. Preview could not be updated; retry the preview.'] }; }
+    } catch (error) {
+      console.error(`Preview render failed for ${app}: ${JSON.stringify(error instanceof Error ? error.message.slice(0, 500) : String(error))}`);
+      return { manifest: null, warnings: ['Design saved. Preview could not be updated; retry the preview.'] };
+    }
   }
   async retryPreview(app: string) {
     return this.deps.build.withCheckout(app, async () => {
@@ -118,4 +125,29 @@ export class SyncService {
       return this.preview(app, saved.state.doc);
     });
   }
+  /**
+   * Starts a background render when the saved frame layout has sizes the manifest lacks. One runs at a time per
+   * app; a call during a render marks the app dirty and the layout is checked again when that render finishes.
+   */
+  ensureRendered(app: string): void {
+    const frames = this.deps.frames;
+    if (!frames) return;
+    if (this.rendering.has(app)) { this.dirty.add(app); return; }
+    const run = (async () => {
+      try {
+        do {
+          this.dirty.delete(app);
+          try {
+            const manifest = await new FsTileStore(renderDir(this.deps.dataDir, app)).readManifest();
+            if (await frames.missingRenders(app, manifest)) await this.retryPreview(app);
+          } catch (error) {
+            if (!(error instanceof BuildError && error.status === 409)) console.error(`Frame render failed for ${app}: ${JSON.stringify(error instanceof Error ? error.message.slice(0, 500) : String(error))}`);
+          }
+        } while (this.dirty.has(app));
+      } finally { this.rendering.delete(app); this.dirty.delete(app); }
+    })();
+    this.rendering.set(app, run);
+  }
+  /** Resolves when no background frame render is running for the app (for tests). */
+  async whenRendered(app: string): Promise<void> { await this.rendering.get(app); }
 }

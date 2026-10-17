@@ -12,14 +12,16 @@ test('authenticated import renders pages, reuses baseline and preserves design o
   const manifest = await page.request.get('/api/apps/demo/render/manifest.json');
   const rendered = await manifest.json();
   expect(rendered.pages).toHaveLength(1);
-  expect(rendered.pages[0].renders.base.levels.length).toBeGreaterThan(0);
-  expect(rendered.pages[0].renders.base.error).toBeUndefined();
+  expect(rendered.pages[0].renders['1440x900'].levels.length).toBeGreaterThan(0);
+  expect(rendered.pages[0].renders['1440x900'].error).toBeUndefined();
   await page.getByRole('button', { name: 'Import pages' }).click();
   await expect(page.getByRole('status')).toContainText('Imported 0 pages; reused 1.');
   await page.getByRole('combobox', { name: 'Source', exact: true }).selectOption('react');
   await page.getByLabel('Entry file').fill('missing.tsx');
   await page.getByRole('button', { name: 'Import pages' }).click();
-  await expect(page.getByRole('alert')).toContainText('previous design and edits are preserved');
+  // Since the real-app import work, a missing entry is a failed route of an applied import, not a refused import.
+  await expect(page.getByRole('alert')).toContainText('These routes were not imported. Each keeps its previous version');
+  await expect(page.getByRole('alert')).toContainText('Missing source missing.tsx');
   expect((await (await page.request.get('/api/apps/demo/design')).json()).pages).toHaveLength(1);
 });
 
@@ -73,13 +75,16 @@ test('tap editing supports immediate instance edits, undo/redo and shared previe
   const initialPending = (await (await page.request.get('/api/apps/demo/design')).json()).pending;
   const selectButton = async () => {
     const manifest = await (await page.request.get('/api/apps/demo/render/manifest.json')).json();
-    const boxes = await (await page.request.get(`/api/apps/demo/render/hitmaps/${manifest.pages[0].renders.base.hash}.json`)).json();
+    const boxes = await (await page.request.get(`/api/apps/demo/render/hitmaps/${manifest.pages[0].renders['1440x900'].hash}.json`)).json();
     const box = boxes[boxes.length - 1];
     const canvas = page.getByTestId('canvas').first();
     const bounds = await canvas.boundingBox();
     if (!bounds) throw new Error('No canvas');
-    const camera = fitRect(layoutBounds(layoutFrames(manifest, new Set(['base', 'tablet', 'mobile']))), { w: bounds.width, h: bounds.height }, 40);
-    const point = worldToScreen(camera, { x: box.x + box.w / 2, y: box.y + box.h / 2 });
+    const { frames } = await (await page.request.get('/api/apps/demo/design/frames')).json();
+    const firstPage = layoutFrames(frames, manifest).filter((f) => f.pageId === manifest.pages[0].pageId);
+    const camera = fitRect(layoutBounds(firstPage), { w: bounds.width, h: bounds.height }, 40);
+    const desktop = firstPage.find((f) => f.w === 1440 && f.viewportHeight === 900)!;
+    const point = worldToScreen(camera, { x: desktop.x + box.x + box.w / 2, y: desktop.y + box.y + box.h / 2 });
     await page.getByTestId('tool-select').first().click();
     await canvas.click({ position: point });
     await expect(page.getByRole('combobox', { name: 'Edit target' })).toBeVisible();

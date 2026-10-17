@@ -1,6 +1,6 @@
 import { resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { DEVICES } from '@hub/protocol';
+import { DEFAULT_FRAME_SIZES } from '@hub/protocol';
 import { BrowserPool, FsTileStore, renderDoc } from '@hub/renderer';
 import { generateDoc } from './generate.js';
 
@@ -61,7 +61,7 @@ export async function renderFixtures(opts: FixtureOptions): Promise<FixtureSumma
   const prev = await store.readManifest();
   const pool = new BrowserPool({ size: poolSize });
   try {
-    const res = await renderDoc(pool, doc, { devices: DEVICES, prev, store, concurrency: poolSize });
+    const res = await renderDoc(pool, doc, { sizes: () => DEFAULT_FRAME_SIZES, prev, store, concurrency: poolSize });
     await store.writeManifest(res.manifest);
     return {
       pages: Object.keys(doc.pages).length,

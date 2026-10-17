@@ -7,6 +7,7 @@ const render: PageRender = {
   device: 'base',
   hash: 'h',
   width: 1440,
+  viewportHeight: 900,
   height: 3000,
   levels: [
     { zoom: 0.25, key: 'q', cols: 1, rows: 2 },
@@ -16,6 +17,10 @@ const render: PageRender = {
 };
 
 const F: Frame = {
+  frameId: 'f',
+  viewportHeight: 900,
+  stale: null,
+  pending: false,
   pageId: 'p1',
   name: 'Home',
   device: 'base',
