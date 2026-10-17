@@ -50,7 +50,7 @@ describe('buildDocument', () => {
     // Canvas is white under the default scheme and follows a propagated color-scheme.
     expect(BASE_CSS).toContain('html{background:Canvas;}');
     expect(BASE_CSS).not.toMatch(/body[^{]*\{[^}]*background/);
-    const out = buildDocument('<div data-d-id="h" data-d-shell="html"></div>', 'html{background:red;font-size:62.5%;}', 'base');
+    const out = buildDocument('<div data-d-id="h" data-d-shell="html"></div>', 'html{background:red;font-size:62.5%;}', 1440);
     expect(out.indexOf(BASE_CSS)).toBeLessThan(out.indexOf('html{background:red;font-size:62.5%;}'));
   });
 });
