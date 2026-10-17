@@ -172,9 +172,9 @@ describe('describeOp', () => {
       expect(describeOp(sampleDoc(), op)).toBe('Home › Header › LoginButton: setAttr');
     });
 
-    test('setName falls back to label and op kind', () => {
+    test('setName names the data-name it sets', () => {
       const op: Op = { op: 'setName', node: 'n3', name: 'Login' };
-      expect(describeOp(sampleDoc(), op)).toBe('Home › Header › LoginButton: setName');
+      expect(describeOp(sampleDoc(), op)).toBe('Home › Header › LoginButton: set data-name to "Login"');
     });
 
     test('wrapNodes is labelled by its first node', () => {
