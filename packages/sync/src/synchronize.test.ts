@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { applyOp, canonicalStringify, type Op } from '@hub/design-model';
-import { synchronizePages, type SyncState } from './index.js';
+import { SYNC_VERSION, synchronizePages, type SyncState } from './index.js';
 
 const files = {
   'a.tsx': `import './a.css'; import Button from './Button'; export default () => <main><Button /></main>`,
@@ -69,6 +69,34 @@ describe('incremental source synchronization', () => {
     previous.baseline.version = 0;
     const version = sync(files, previous);
     expect(version.ok && version.rebuilt).toEqual(['/a', '/b']);
+  });
+
+  // Bump SYNC_VERSION (and this pin) whenever extraction output changes for the same source. 9: Ruling P shell marker,
+  // Ruling Q static states and hover media, React prop-name mapping, aria/data booleans, declaration-order and
+  // resting pseudo-element failures. A saved baseline from the version before is never reused.
+  it('SYNC_VERSION is 9, and a baseline from an earlier version is rebuilt with the current semantics', () => {
+    expect(SYNC_VERSION).toBe(9);
+    const shell = {
+      'app/layout.tsx': `import './globals.css'; export default ({ children }: { children: unknown }) => <html><body>{children}</body></html>;`,
+      'app/globals.css': 'html { font-size: 62.5% } @media (hover: hover) { .x { color: red } }',
+      'app/page.tsx': `export default () => <p className="x" data-on={true}>x</p>`,
+    };
+    const routes = [{ route: '/', file: 'app/page.tsx', layouts: ['app/layout.tsx'] }];
+    const first = synchronizePages({ project: { files: shell }, entries: routes, commit: 'one' });
+    if (!first.ok) throw new Error(JSON.stringify(first));
+    expect(synchronizePages({ project: { files: shell }, entries: routes, commit: 'two', previous: first.state })).toMatchObject({ ok: true, reused: ['/'], rebuilt: [] });
+    // Simulate a baseline saved before this version: an unmarked root and dropped hover/boolean semantics.
+    const old = structuredClone(first.state);
+    old.baseline.version = SYNC_VERSION - 1;
+    const page = Object.values(old.baseline.pages)[0]!.page;
+    page.root.attrs = {};
+    const again = synchronizePages({ project: { files: shell }, entries: routes, commit: 'two', previous: old });
+    expect(again).toMatchObject({ ok: true, reused: [], rebuilt: ['/'] });
+    if (!again.ok) return;
+    const root = Object.values(again.state.doc.pages)[0]!.root;
+    expect(root.attrs).toEqual({ 'data-d-shell': 'html' });
+    const p = root.children[0]!.kind === 'element' ? root.children[0]!.children[0]! : null;
+    expect(p).toMatchObject({ attrs: { 'data-on': 'true' }, style: { base: { color: 'red' } } });
   });
 
   it('replays from the clean baseline even on unchanged pages, without duplicating inserts', () => {
