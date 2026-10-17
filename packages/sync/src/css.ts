@@ -198,6 +198,13 @@ export function applyStyles(root: ElementNode, rules: Rule[], inline: Map<string
         set(inline.get(node.id), null);
         // Canonical style maps sort properties on export. Where one declaration sets or resets a longhand of another,
         // their cascade order must be their sorted order, or the exported page would resolve them differently.
+        // Logical properties are mapped for horizontal writing (shorthands.ts), so any other writing mode fails.
+        const mode = style['writing-mode'];
+        if (mode !== undefined && !/^(?:horizontal-tb|initial|inherit|unset|revert|revert-layer)$/i.test(mode.trim())) {
+          const rule = origin.get('writing-mode');
+          const message = `Unsupported CSS writing-mode ${mode.trim()} in ${rule ? rule.text : 'inline style'}`;
+          throw rule ? new CssError(rule.file, message) : new Error(message);
+        }
         const order = Object.keys(style);
         order.forEach((earlier, i) => order.slice(i + 1).forEach((later) => {
           if (earlier < later || !overlaps(earlier, later)) return;

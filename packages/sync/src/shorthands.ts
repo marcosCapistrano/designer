@@ -1,13 +1,23 @@
 // Which longhands each CSS shorthand sets or resets. The design model sorts declarations on export, so two
 // declarations that touch a common longhand must cascade in their sorted order, or the export changes the result.
-// Logical sides are mapped as in horizontal-tb, ltr writing (inline-start is left, block-start is top).
+// Leaves are physical longhands. A logical property names every physical longhand it can resolve to whatever the
+// direction (inline-start is left or right), so the check holds in rtl documents too; block maps to top/bottom and
+// inline-size to width, which assumes horizontal writing (css.ts fails on any other writing-mode).
 
 const SIDES = ['top', 'right', 'bottom', 'left'] as const;
 const LOGICAL: Record<string, readonly string[]> = {
   block: ['top', 'bottom'], inline: ['left', 'right'],
-  'block-start': ['top'], 'block-end': ['bottom'], 'inline-start': ['left'], 'inline-end': ['right'],
+  'block-start': ['top'], 'block-end': ['bottom'], 'inline-start': ['left', 'right'], 'inline-end': ['left', 'right'],
 };
-const CORNERS: Record<string, string> = { 'start-start': 'top-left', 'start-end': 'top-right', 'end-start': 'bottom-left', 'end-end': 'bottom-right' };
+const CORNERS: Record<string, readonly string[]> = {
+  'start-start': ['top-left', 'top-right'], 'start-end': ['top-left', 'top-right'], 'end-start': ['bottom-left', 'bottom-right'], 'end-end': ['bottom-left', 'bottom-right'],
+};
+// Legacy names the browser parses as another property (besides `-webkit-X`, which is read as `X` below).
+const ALIASES: Record<string, string> = {
+  'word-wrap': 'overflow-wrap', 'font-width': 'font-stretch',
+  'page-break-before': 'break-before', 'page-break-after': 'break-after', 'page-break-inside': 'break-inside',
+  'column-break-before': 'break-before', 'column-break-after': 'break-after', 'column-break-inside': 'break-inside',
+};
 
 const TABLE = new Map<string, string[]>();
 const define = (shorthand: string, longhands: string[]) => TABLE.set(shorthand, longhands);
@@ -30,13 +40,13 @@ for (const [logical, sides] of Object.entries(LOGICAL)) {
   for (const part of BORDER_PARTS) define(`border-${logical}-${part}`, sides.map((side) => `border-${side}-${part}`));
 }
 define('border-radius', ['top-left', 'top-right', 'bottom-right', 'bottom-left'].map((corner) => `border-${corner}-radius`));
-for (const [logical, corner] of Object.entries(CORNERS)) define(`border-${logical}-radius`, [`border-${corner}-radius`]);
+for (const [logical, corners] of Object.entries(CORNERS)) define(`border-${logical}-radius`, corners.map((corner) => `border-${corner}-radius`));
 
 define('outline', ['outline-color', 'outline-style', 'outline-width']);
 define('background', ['background-color', 'background-image', 'background-position-x', 'background-position-y', 'background-size', 'background-repeat', 'background-attachment', 'background-origin', 'background-clip']);
 define('background-position', ['background-position-x', 'background-position-y']);
 const FONT_VARIANT = ['font-variant-caps', 'font-variant-ligatures', 'font-variant-numeric', 'font-variant-east-asian', 'font-variant-alternates', 'font-variant-position', 'font-variant-emoji'];
-define('font', ['font-style', ...FONT_VARIANT, 'font-weight', 'font-stretch', 'font-size', 'line-height', 'font-family', 'font-size-adjust', 'font-kerning', 'font-optical-sizing', 'font-feature-settings', 'font-variation-settings', 'font-language-override']);
+define('font', ['font-style', ...FONT_VARIANT, 'font-weight', 'font-stretch', 'font-size', 'line-height', 'font-family', 'font-size-adjust', 'font-kerning', 'font-optical-sizing', 'font-feature-settings', 'font-variation-settings', 'font-language-override', 'font-synthesis-weight', 'font-synthesis-style', 'font-synthesis-small-caps', 'font-synthesis-position']);
 define('font-variant', FONT_VARIANT);
 define('flex', ['flex-grow', 'flex-shrink', 'flex-basis']);
 define('flex-flow', ['flex-direction', 'flex-wrap']);
@@ -70,29 +80,39 @@ define('mask-position', ['mask-position-x', 'mask-position-y']);
 define('mask-border', ['mask-border-source', 'mask-border-slice', 'mask-border-width', 'mask-border-outset', 'mask-border-repeat', 'mask-border-mode']);
 define('container', ['container-name', 'container-type']);
 define('contain-intrinsic-size', ['contain-intrinsic-width', 'contain-intrinsic-height']);
+define('font-synthesis', ['font-synthesis-weight', 'font-synthesis-style', 'font-synthesis-small-caps', 'font-synthesis-position']);
+define('overscroll-behavior', ['overscroll-behavior-x', 'overscroll-behavior-y']);
+define('overscroll-behavior-inline', ['overscroll-behavior-x']);
+define('overscroll-behavior-block', ['overscroll-behavior-y']);
+define('marker', ['marker-start', 'marker-mid', 'marker-end']);
+define('scroll-timeline', ['scroll-timeline-name', 'scroll-timeline-axis']);
+define('view-timeline', ['view-timeline-name', 'view-timeline-axis', 'view-timeline-inset']);
+define('text-box', ['text-box-trim', 'text-box-edge']);
+define('text-stroke', ['text-stroke-width', 'text-stroke-color']);
+define('position-try', ['position-try-order', 'position-try-fallbacks']);
+// The logical sizing properties (horizontal writing).
+for (const [prefix, axis] of [['', ''], ['min-', 'min-'], ['max-', 'max-']] as const) {
+  define(`${prefix}inline-size`, [`${axis}width`]);
+  define(`${prefix}block-size`, [`${axis}height`]);
+}
+define('contain-intrinsic-inline-size', ['contain-intrinsic-width']);
+define('contain-intrinsic-block-size', ['contain-intrinsic-height']);
 define('offset', ['offset-position', 'offset-path', 'offset-distance', 'offset-rotate', 'offset-anchor']);
 
-// Logical longhands name the same physical longhand, so `padding-left` and `padding-inline-start` overlap.
-function physical(property: string): string {
-  for (const box of ['margin', 'padding', 'scroll-margin', 'scroll-padding', 'inset']) {
-    for (const [logical, sides] of Object.entries(LOGICAL)) {
-      if (sides.length === 1 && property === `${box}-${logical}`) return box === 'inset' ? sides[0]! : `${box}-${sides[0]}`;
-    }
-  }
-  for (const [logical, sides] of Object.entries(LOGICAL)) {
-    for (const part of BORDER_PARTS) if (sides.length === 1 && property === `border-${logical}-${part}`) return `border-${sides[0]}-${part}`;
-  }
-  for (const [logical, corner] of Object.entries(CORNERS)) if (property === `border-${logical}-radius`) return `border-${corner}-radius`;
-  return property;
+/** The property a declaration is parsed as: `-webkit-X` as `X` (Chromium's prefixed aliases), legacy names as their successor. */
+function canonical(property: string): string {
+  const name = property.startsWith('-webkit-') ? property.slice(8) : property;
+  return ALIASES[name] ?? name;
 }
 
 const cache = new Map<string, ReadonlySet<string>>();
-/** The longhands a declaration of `property` sets: its table entry, or the property itself. */
+/** The physical longhands a declaration of `property` may set: its table entry, or the property itself. */
 export function longhands(property: string): ReadonlySet<string> {
   let found = cache.get(property);
   if (!found) {
-    const own = physical(property);
-    found = new Set(TABLE.has(own) && own === property ? TABLE.get(own)!.map(physical) : [own]);
+    const own = canonical(property);
+    const expand = (name: string): string[] => TABLE.has(name) ? TABLE.get(name)!.flatMap(expand) : [name];
+    found = new Set(expand(own));
     cache.set(property, found);
   }
   return found;

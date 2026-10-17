@@ -173,6 +173,17 @@ describe('stylesheet parsing', () => {
     ['.a { white-space: nowrap; text-wrap: balance }', 'white-space before text-wrap'],
     ['.a { margin-left: 2px; margin: 4px }', 'margin-left before margin'],
     ['.a { padding-left: 2px; padding-inline: 4px }', 'padding-left before padding-inline'],
+    ['.a { width: 10px } p.a { inline-size: 20px }', 'width before inline-size'],
+    ['.a { height: 10px; block-size: 20px }', 'height before block-size'],
+    ['.a { max-height: 10px; max-block-size: 20px }', 'max-height before max-block-size'],
+    ['.a { min-width: 10px; min-inline-size: 20px }', 'min-width before min-inline-size'],
+    ['.a { word-wrap: break-word; overflow-wrap: normal }', 'word-wrap before overflow-wrap'],
+    ['.a { mask-image: none; -webkit-mask-image: url(x.png) }', 'mask-image before -webkit-mask-image'],
+    ['.a { appearance: none; -webkit-appearance: auto }', 'appearance before -webkit-appearance'],
+    ['.a { font-synthesis-weight: none; font-synthesis: style }', 'font-synthesis-weight before font-synthesis'],
+    ['.a { padding-right: 2px; padding-inline-start: 4px }', 'padding-right before padding-inline-start'],
+    ['.a { page-break-before: always; break-before: auto }', 'page-break-before before break-before'],
+    ['.a { margin-inline-start: 1px; margin-inline-end: 2px }', 'margin-inline-start before margin-inline-end'],
   ])('rejects %s, whose sorted export would change the result', (text, order) => {
     expect(() => style(text)).toThrow(`Unsupported CSS declaration order: ${order} in `);
   });
@@ -188,6 +199,9 @@ describe('stylesheet parsing', () => {
     ['.a { margin: 4px; margin-left: 2px }', { margin: '4px', 'margin-left': '2px' }],
     ['.a { column-gap: 16px; gap: 8px }', { 'column-gap': '16px', gap: '8px' }],
     ['.a { inset: 0; left: 4px }', { inset: '0', left: '4px' }],
+    ['.a { -webkit-appearance: none; appearance: none }', { '-webkit-appearance': 'none', appearance: 'none' }],
+    ['.a { inline-size: 100%; block-size: auto; max-inline-size: 100% }', { 'inline-size': '100%', 'block-size': 'auto', 'max-inline-size': '100%' }],
+    ['.a { width: 10px; height: 20px }', { width: '10px', height: '20px' }],
   ])('accepts %s, unrelated or in sorted order', (text, base) => {
     expect(style(text).base).toEqual(base);
   });
@@ -225,5 +239,10 @@ describe('stylesheet parsing', () => {
     ['@-webkit-keyframes spin { from { color: red } }', 'Unsupported CSS at-rule @-webkit-keyframes'],
   ])('rejects %s', (text, message) => {
     expect(() => parse(text)).toThrow(message);
+  });
+
+  it('fails on a vertical writing-mode, which the logical property mapping assumes horizontal', () => {
+    expect(() => style('.a { writing-mode: vertical-rl }')).toThrow('Unsupported CSS writing-mode vertical-rl in .a');
+    expect(style('.a { writing-mode: horizontal-tb }').base).toEqual({ 'writing-mode': 'horizontal-tb' });
   });
 });
