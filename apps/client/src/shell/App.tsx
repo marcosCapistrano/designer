@@ -12,7 +12,7 @@ import { Login } from './Login.js';
 import { INITIAL_AUTH, withAuth, withLogoutError } from './auth.js';
 import type { Auth } from './auth.js';
 import { LOGOUT_ERROR_TEXT, logoutLocks } from './logout.js';
-import { parseHash } from './route.js';
+import { parseHash, shellClass } from './route.js';
 import type { Route } from './route.js';
 import { SessionCheck } from './session-check.js';
 
@@ -131,7 +131,7 @@ export function App(): JSX.Element {
   }
 
   return (
-    <div class="shell">
+    <div class={shellClass(route)}>
       <header class="shell-header">
         <span class="shell-title">Hub</span>
         <div class="shell-header-actions">

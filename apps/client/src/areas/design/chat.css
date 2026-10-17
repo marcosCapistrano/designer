@@ -4,7 +4,7 @@
   left: 0;
   right: 0;
   bottom: 0;
-  z-index: 15;
+  z-index: 22;
   display: flex;
   flex-direction: column;
   gap: var(--s2);
@@ -17,8 +17,6 @@
   color: var(--text);
 }
 .chat-sheet-open { background: var(--surface); }
-/* Docked under the inspector: same column, inspector above. */
-.chat-sheet-docked { left: auto; width: 360px; border-left: 1px solid var(--border); }
 .chat-messages { display: flex; flex-direction: column; gap: var(--s2); flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding-top: var(--s2); }
 .chat-empty { margin: 0; color: var(--text-2); font-size: var(--text-m); }
 .chat-msg { display: flex; flex-direction: column; align-items: flex-start; gap: var(--s1); max-width: 85%; }

@@ -3,7 +3,7 @@ import { useEffect, useMemo, useState } from 'preact/hooks';
 
 export const TOAST_MS = 4000;
 
-export interface ToastInput { kind: 'ok' | 'error' | 'info'; text: string; sticky?: boolean; action?: { label: string; run(): void } }
+export interface ToastInput { kind: 'ok' | 'warning' | 'error' | 'info'; text: string; sticky?: boolean; action?: { label: string; run(): void } }
 export interface ToastItem extends ToastInput { id: number }
 
 export interface ToastTimers { setTimer(fn: () => void, ms: number): number; clearTimer(id: number): void }

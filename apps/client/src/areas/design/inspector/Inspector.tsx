@@ -118,9 +118,11 @@ export interface InspectorProps {
   disabled: boolean;
   onResult(result: DesignEditResult): void;
   onClose(): void;
+  /** The active target's name ("h3", "AdListCard"), or null while none is loaded. */
+  onLabel?(label: string | null): void;
 }
 
-export function Inspector({ app, api, selection, revision, disabled, onResult, onClose }: InspectorProps): JSX.Element {
+export function Inspector({ app, api, selection, revision, disabled, onResult, onClose, onLabel }: InspectorProps): JSX.Element {
   const [, rerender] = useState(0);
   const resultRef = useRef(onResult);
   resultRef.current = onResult;
@@ -129,9 +131,13 @@ export function Inspector({ app, api, selection, revision, disabled, onResult, o
   const [linked, setLinked] = useState<Record<SideKind, boolean>>({ padding: false, margin: false });
   useEffect(() => model.subscribe(() => rerender((n) => n + 1)), [model]);
   useEffect(() => { void model.select(selection); }, [model, selection, revision]);
+  const state = model.state();
+  const active = state.info?.targets.find((t) => t.id === state.targetId);
+  const label = active ? (active.tag ?? active.component ?? active.kind) : null;
+  useEffect(() => { onLabel?.(label); }, [label, onLabel]);
   return (
     <InspectorView
-      state={model.state()}
+      state={state}
       sections={sections}
       linked={linked}
       locked={disabled}

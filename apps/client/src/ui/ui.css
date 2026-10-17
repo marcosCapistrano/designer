@@ -280,3 +280,4 @@
   outline-offset: 1px;
 }
 .ui-input-muted { color: var(--text-3); }
+.ui-toast-warning { border-left: 4px solid var(--warning); }
