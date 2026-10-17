@@ -24,14 +24,20 @@ export const HANDLE_PX = 24;
 /** Height in CSS px of the label band above a frame, which is its move handle. */
 export const LABEL_BAND_PX = 20;
 
+/** Below this camera scale frame labels and handles are not drawn, so there are no handles to hit. */
+export const LABEL_MIN_SCALE = 0.04;
+
 export interface HandleHit {
   frameId: string;
   kind: HandleKind;
 }
 
-/** The handle under world point `p` at camera scale `scale`, or null. A point inside any frame is never a handle. */
+/**
+ * The handle under world point `p` at camera scale `scale`, or null. A point inside any frame is
+ * never a handle, and below LABEL_MIN_SCALE (where none are drawn) nothing is.
+ */
 export function hitHandle(frames: readonly Frame[], p: Point, scale: number): HandleHit | null {
-  if (frameAt(frames, p) !== null) return null;
+  if (scale < LABEL_MIN_SCALE || frameAt(frames, p) !== null) return null;
   const band = HANDLE_PX / scale;
   const label = LABEL_BAND_PX / scale;
   for (const f of frames) {

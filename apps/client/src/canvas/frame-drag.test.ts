@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { CanvasFrame } from '@hub/protocol';
-import { HANDLE_PX, dragFrame, hitHandle, settleFrame } from './frame-drag.js';
+import { HANDLE_PX, LABEL_MIN_SCALE, dragFrame, hitHandle, settleFrame } from './frame-drag.js';
 import type { Frame } from './layout.js';
 
 const frame = (over: Partial<Frame> = {}): Frame => ({
@@ -42,6 +42,13 @@ describe('hitHandle', () => {
     expect(hitHandle(frames, { x: 1530, y: 500 }, 0.25)).toEqual({ frameId: 'fa', kind: 'width' });
     expect(hitHandle(frames, { x: 1530, y: 990 }, 0.25)).toEqual({ frameId: 'fa', kind: 'height' });
     expect(hitHandle(frames, { x: 1540, y: 500 }, 0.25)).toBeNull();
+  });
+
+  it('there are no handles below the scale where they are drawn', () => {
+    expect(LABEL_MIN_SCALE).toBe(0.04);
+    expect(hitHandle(frames, { x: 100, y: -300 }, 0.03)).toBeNull();
+    expect(hitHandle(frames, { x: 1600, y: 500 }, 0.03)).toBeNull();
+    expect(hitHandle(frames, { x: 100, y: -300 }, LABEL_MIN_SCALE)).toEqual({ frameId: 'fa', kind: 'move' });
   });
 
   it('a point inside a frame is never a handle, even inside another frame\'s band', () => {

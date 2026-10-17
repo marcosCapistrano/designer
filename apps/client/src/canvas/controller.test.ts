@@ -852,10 +852,26 @@ describe('CanvasController frame drags', () => {
     const cam = c.camera;
     const touch = (kind: PointerIn['kind'], x: number, y: number): PointerIn => ({ ...pen(kind, x, y), pointerType: 'touch' });
     c.pointer(touch('down', 450, 500));
-    c.pointer(touch('move', 450, 600));
-    c.pointer(touch('up', 450, 600));
+    c.pointer(touch('move', 550, 500));
+    expect(baseOf(c).w).toBe(1540);
+    c.pointer(touch('up', 550, 500));
     expect(c.camera).toEqual(cam);
-    expect(baseOf(c).w).toBe(1440);
+    expect(onFramesChange).toHaveBeenCalledTimes(1);
+    expect((onFramesChange.mock.calls[0]![0] as CanvasFrame[])[0]).toMatchObject({ width: 1540 });
+  });
+
+  it('below the scale where handles are drawn, a touch drag in a label band pans and leaves the frames alone', () => {
+    const { c, flush, onFramesChange } = ready();
+    // Scale 0.03: the base frame's label band (20 CSS px, 667 world px) would start at screen y 10.
+    c.setCamera({ x: 0, y: -1000, scale: 0.03 });
+    flush();
+    const before = c.frames.map((f) => ({ ...f }));
+    const touch = (kind: PointerIn['kind'], x: number, y: number): PointerIn => ({ ...pen(kind, x, y), pointerType: 'touch' });
+    c.pointer(touch('down', 15, 21));
+    c.pointer(touch('move', 115, 21));
+    c.pointer(touch('up', 115, 21));
+    expect(c.camera.x).toBeCloseTo(-100 / 0.03);
+    expect(c.frames.map((f) => ({ ...f }))).toEqual(before);
     expect(onFramesChange).not.toHaveBeenCalled();
   });
 

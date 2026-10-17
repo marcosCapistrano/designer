@@ -11,7 +11,7 @@ import { DEVICE_LABEL, ZOOMS } from '@hub/protocol';
 import type { Zoom } from '@hub/protocol';
 import { rectsIntersect, snapCamera, worldToDevice } from './geom.js';
 import type { Camera, Rect, Size } from './geom.js';
-import { HANDLE_PX, LABEL_BAND_PX, readoutText } from './frame-drag.js';
+import { HANDLE_PX, LABEL_BAND_PX, LABEL_MIN_SCALE, readoutText } from './frame-drag.js';
 import type { HandleKind } from './frame-drag.js';
 import type { Frame } from './layout.js';
 import { fallbackFor, frameTiles } from './tiles.js';
@@ -56,7 +56,7 @@ export interface BackBuffer {
 }
 
 export const COLORS = { bg: '#e9e9ec', frame: '#ffffff', label: '#5f6368', badge: '#d93025', fold: '#9aa0a6', readout: '#1a73e8' } as const;
-export const LABEL_MIN_SCALE = 0.04;
+export { LABEL_MIN_SCALE };
 
 /** The text above a frame: page, size and style tier, and whether its size is still rendering. */
 export function frameLabel(f: Frame): string {
