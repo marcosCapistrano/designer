@@ -95,6 +95,7 @@ function harness(now: () => number = () => 0, hitMaps: ControllerDeps['hitMaps']
   const overlay = fakeCtx();
   const tiles = { get: () => undefined, request: vi.fn() };
   const onSelect = vi.fn();
+  const onFramesChange = vi.fn();
   const c = new CanvasController({
     base: base.ctx,
     overlay: overlay.ctx,
@@ -105,8 +106,9 @@ function harness(now: () => number = () => 0, hitMaps: ControllerDeps['hitMaps']
     },
     now,
     onSelect,
+    onFramesChange,
   });
-  return { c, q, flush, base, overlay, tiles, onSelect };
+  return { c, q, flush, base, overlay, tiles, onSelect, onFramesChange };
 }
 
 function ready(now: () => number = () => 0, hitMaps?: ControllerDeps['hitMaps']) {
@@ -774,5 +776,211 @@ describe('CanvasController frames of any size', () => {
     flush();
     const wants = tiles.request.mock.lastCall?.[0] as readonly TileWant[];
     expect(wants.some((w) => w.key.startsWith('w16'))).toBe(true);
+  });
+});
+
+describe('CanvasController frame drags', () => {
+  const pen = (kind: PointerIn['kind'], x: number, y: number, id = 7): PointerIn => ({
+    id,
+    kind,
+    x,
+    y,
+    pointerType: 'pen',
+    button: 0,
+  });
+  const baseOf = (c: CanvasController) => c.frames.find((f) => f.frameId === MF[0]!.id)!;
+  const texts = (calls: Call[]) => calls.filter((call) => call.m === 'fillText').map((call) => call.a[0] as string);
+
+  /** Scale 1 with the base frame's right edge at screen x 440 and its top at screen y 40. */
+  function atRightEdge() {
+    const h = ready();
+    h.c.setCamera({ x: 1000, y: -40, scale: 1 });
+    h.flush();
+    h.onSelect.mockClear();
+    return h;
+  }
+
+  it('a pen drag on the right band in select tool resizes live, draws the readout, and reports the layout once on release', async () => {
+    const { c, flush, base, overlay, onSelect, onFramesChange } = atRightEdge();
+    c.setTool('select');
+    const cam = c.camera;
+    c.pointer(pen('down', 450, 500));
+    c.pointer(pen('move', 550, 500));
+    c.pointer(pen('move', 650, 500));
+    expect(baseOf(c).w).toBe(1640);
+    base.calls.length = 0;
+    overlay.calls.length = 0;
+    flush();
+    expect(texts(base.calls)).toContain('1640 × 900 · Desktop');
+    // No marquee, no pan, no selection.
+    expect(overlay.calls.filter((call) => call.m === 'strokeRect')).toEqual([]);
+    expect(c.camera).toEqual(cam);
+    expect(onFramesChange).not.toHaveBeenCalled();
+
+    c.pointer(pen('up', 650, 500));
+    await settle();
+    expect(onSelect).not.toHaveBeenCalled();
+    expect(onFramesChange).toHaveBeenCalledTimes(1);
+    const saved = onFramesChange.mock.calls[0]![0] as CanvasFrame[];
+    expect(saved).toEqual(MF.map((f, i) => (i === 0 ? { ...f, width: 1640 } : f)));
+    base.calls.length = 0;
+    flush();
+    expect(texts(base.calls).some((t) => t.startsWith('1640 × 900 ·'))).toBe(false);
+
+    // Once the new size has a render, a tap inside the frame still selects a node.
+    c.setManifest({
+      version: 2,
+      pages: [{ ...M.pages[0]!, renders: { ...M.pages[0]!.renders, '1640x900': { ...render('base', 'hb'), width: 1640 } } }],
+    });
+    c.pointer(pen('down', -970, 70));
+    c.pointer(pen('up', -970, 70));
+    await settle();
+    expect(onSelect).toHaveBeenLastCalledWith({ pageId: 'home', device: 'base', nodeIds: ['n3'] });
+  });
+
+  it('a resized frame keeps its pre-drag render as stale while it has none', () => {
+    const { c } = atRightEdge();
+    const before = baseOf(c).render;
+    c.pointer(pen('down', 450, 500));
+    c.pointer(pen('move', 650, 500));
+    expect(baseOf(c)).toMatchObject({ pending: true, render: null });
+    expect(baseOf(c).stale).toBe(before);
+  });
+
+  it('a touch drag on a handle in pan tool resizes instead of panning', () => {
+    const { c, onFramesChange } = atRightEdge();
+    const cam = c.camera;
+    const touch = (kind: PointerIn['kind'], x: number, y: number): PointerIn => ({ ...pen(kind, x, y), pointerType: 'touch' });
+    c.pointer(touch('down', 450, 500));
+    c.pointer(touch('move', 450, 600));
+    c.pointer(touch('up', 450, 600));
+    expect(c.camera).toEqual(cam);
+    expect(baseOf(c).w).toBe(1440);
+    expect(onFramesChange).not.toHaveBeenCalled();
+  });
+
+  it('the height tab changes the viewport height', () => {
+    const { c, onFramesChange } = atRightEdge();
+    // The viewport line of the base frame is at world y 900, screen y 940.
+    c.pointer(pen('down', 450, 940));
+    c.pointer(pen('move', 450, 1040));
+    c.pointer(pen('up', 450, 1040));
+    expect((onFramesChange.mock.calls[0]![0] as CanvasFrame[])[0]).toMatchObject({ width: 1440, viewportHeight: 1000 });
+  });
+
+  it('a label drag moves the frame and snaps it to the grid on release', () => {
+    const { c, onFramesChange } = atRightEdge();
+    c.pointer(pen('down', 100, 30));
+    c.pointer(pen('move', 113, 25));
+    expect(baseOf(c)).toMatchObject({ x: 13, y: -5 });
+    c.pointer(pen('up', 113, 25));
+    expect(baseOf(c)).toMatchObject({ x: 16, y: -8 });
+    expect((onFramesChange.mock.calls[0]![0] as CanvasFrame[])[0]).toMatchObject({ x: 16, y: -8, width: 1440 });
+  });
+
+  it('a tap on the label without movement leaves the frame where it is and selects nothing', async () => {
+    const { c, onSelect, onFramesChange } = atRightEdge();
+    c.setTool('select');
+    c.pointer(pen('down', 100, 30));
+    c.pointer(pen('move', 103, 31));
+    c.pointer(pen('up', 103, 31));
+    await settle();
+    expect(baseOf(c)).toMatchObject({ x: 0, y: 0 });
+    expect(onFramesChange).not.toHaveBeenCalled();
+    expect(onSelect).not.toHaveBeenCalled();
+  });
+
+  it('pointercancel restores the pre-drag frame and reports nothing', async () => {
+    const { c, onSelect, onFramesChange } = atRightEdge();
+    c.pointer(pen('down', 450, 500));
+    c.pointer(pen('move', 650, 500));
+    c.pointer(pen('cancel', 650, 500));
+    await settle();
+    expect(baseOf(c)).toMatchObject({ w: 1440, pending: false });
+    expect(onFramesChange).not.toHaveBeenCalled();
+    expect(onSelect).not.toHaveBeenCalled();
+  });
+
+  it('resetGestures restores a frame being dragged', () => {
+    const { c, onFramesChange } = atRightEdge();
+    c.pointer(pen('down', 450, 500));
+    c.pointer(pen('move', 650, 500));
+    c.resetGestures();
+    expect(baseOf(c).w).toBe(1440);
+    c.pointer(pen('up', 650, 500));
+    expect(onFramesChange).not.toHaveBeenCalled();
+  });
+
+  it('a second finger during a drag is ignored', () => {
+    const { c, onFramesChange } = atRightEdge();
+    const cam = c.camera;
+    const touch = (kind: PointerIn['kind'], x: number, y: number, id: number): PointerIn => ({ ...pen(kind, x, y, id), pointerType: 'touch' });
+    c.pointer(touch('down', 450, 500, 1));
+    c.pointer(touch('down', 100, 300, 2));
+    c.pointer(touch('move', 650, 500, 1));
+    c.pointer(touch('move', 200, 300, 2));
+    c.pointer(touch('up', 650, 500, 1));
+    c.pointer(touch('up', 200, 300, 2));
+    expect(c.camera).toEqual(cam);
+    expect((onFramesChange.mock.calls[0]![0] as CanvasFrame[])[0]).toMatchObject({ width: 1640 });
+  });
+
+  describe('across a tier boundary', () => {
+    const hit = (nodeId: string): HitBox[] => [{ nodeId, x: 0, y: 0, w: 1023, h: 768 }];
+    const sized = (device: Device, hash: string, width: number): PageRender => ({ ...render(device, hash), width, viewportHeight: 768 });
+    const T: RenderManifest = {
+      version: 2,
+      pages: [
+        {
+          pageId: 'p1',
+          name: '/',
+          route: '/',
+          renders: { '1024x768': sized('base', 'd1024', 1024), '1023x768': sized('tablet', 't1023', 1023) },
+        },
+      ],
+    };
+    const F: CanvasFrame[] = [{ id: 'f0000000000001024', pageId: 'p1', x: 0, y: 0, width: 1024, viewportHeight: 768 }];
+    const tierMaps: Record<string, HitBox[]> = { d1024: hit('a'), t1023: hit('a') };
+    const hitMaps: ControllerDeps['hitMaps'] = { get: (hh) => tierMaps[hh], load: async (hh) => tierMaps[hh] ?? [] };
+
+    function tierReady() {
+      const h = harness(() => 0, hitMaps);
+      h.c.resize(800, 600, 1);
+      h.c.setManifest(T);
+      h.c.setFrames(F);
+      h.flush();
+      // The right edge is at screen x 524.
+      h.c.setCamera({ x: 500, y: -40, scale: 1 });
+      h.flush();
+      return h;
+    }
+
+    it('a width drag from 1024 to 1023 then a tap selects with tablet styles', async () => {
+      const { c, onSelect, onFramesChange } = tierReady();
+      c.setTool('select');
+      c.pointer(pen('down', 530, 300));
+      c.pointer(pen('move', 510, 300));
+      c.pointer(pen('move', 529, 300));
+      c.pointer(pen('up', 529, 300));
+      expect((onFramesChange.mock.calls[0]![0] as CanvasFrame[])[0]).toMatchObject({ width: 1023 });
+      expect(c.frames[0]).toMatchObject({ w: 1023, device: 'tablet', pending: false });
+      c.pointer(pen('down', 30, 80));
+      c.pointer(pen('up', 30, 80));
+      await settle();
+      expect(onSelect).toHaveBeenLastCalledWith({ pageId: 'p1', device: 'tablet', nodeIds: ['a'] });
+    });
+
+    it('a kept selection whose frame changes tier is reported again with the new tier', async () => {
+      const { c, onSelect } = tierReady();
+      await c.tap(30, 80);
+      expect(onSelect).toHaveBeenLastCalledWith({ pageId: 'p1', device: 'base', nodeIds: ['a'] });
+      c.setFrames([{ ...F[0]!, width: 1023 }]);
+      expect(onSelect).toHaveBeenLastCalledWith({ pageId: 'p1', device: 'tablet', nodeIds: ['a'] });
+      expect(c.selection).toEqual({ pageId: 'p1', device: 'tablet', nodeIds: ['a'] });
+      const calls = onSelect.mock.calls.length;
+      // A relayout that does not change the tier reports nothing.
+      c.setFrames([{ ...F[0]!, width: 1023, x: 8 }]);
+      expect(onSelect.mock.calls.length).toBe(calls);
+    });
   });
 });

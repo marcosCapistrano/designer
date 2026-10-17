@@ -396,6 +396,33 @@ describe('BasePainter with a back buffer', () => {
   });
 });
 
+describe('BasePainter frame handles', () => {
+  it('draws the height tab outside the right edge at the viewport line', () => {
+    const { ctx, calls } = fakeCtx();
+    new BasePainter(ctx, tilesOf()).paint(input([frame()], { camera: { x: 0, y: 0, scale: 0.5 } }));
+    // Right edge at device x 720, viewport line at device y 450; the tab is 24 CSS px wide.
+    expect(calls.filter(c => c.m === 'fillRect' && c.fill === '#9aa0a6').map(c => c.a)).toContainEqual([720, 438, 24, 24]);
+  });
+
+  it('draws the readout next to the handle being dragged', () => {
+    const { ctx, calls } = fakeCtx();
+    const f = frame({ w: 1640, render: null, pending: true, h: 900 });
+    new BasePainter(ctx, tilesOf()).paint(input([f], { camera: { x: 0, y: -40, scale: 0.5 }, readout: { frameId: 'f', kind: 'width' } }));
+    const text = calls.find(c => c.m === 'fillText' && c.a[0] === '1640 × 900 · Desktop');
+    expect(text).toBeDefined();
+    expect(text!.a[1]).toBeGreaterThan(820);
+  });
+
+  it('a readout change repaints in full, so the old readout is not left behind', () => {
+    const { ctx } = fakeCtx();
+    const painter = new BasePainter(ctx, tilesOf());
+    const frames = [frame()];
+    painter.paint(input(frames, { readout: { frameId: 'f', kind: 'width' } }));
+    expect(painter.paint(input(frames, { readout: null })).mode).toBe('full');
+    expect(painter.paint(input(frames)).mode).toBe('none');
+  });
+});
+
 describe('BasePainter.previewOf', () => {
   it('is null before the first paint', () => {
     const { ctx } = fakeCtx();

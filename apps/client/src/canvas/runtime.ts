@@ -42,6 +42,9 @@ export interface CanvasRuntime {
   dispose(): void;
 }
 
+/** A changed layout is saved once it has been still this long; only the last of a burst is sent. */
+export const SAVE_DEBOUNCE_MS = 300;
+
 function errorMessage(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
@@ -81,6 +84,7 @@ export function createCanvasRuntime(opts: CanvasRuntimeOptions): CanvasRuntime {
     },
     now: opts.now,
     onSelect: opts.onSelect,
+    onFramesChange: (frames) => framesChanged(frames),
   });
 
   // Every manifest, initial or subscribed, goes through apply(). A request's
@@ -90,7 +94,9 @@ export function createCanvasRuntime(opts: CanvasRuntimeOptions): CanvasRuntime {
   let applied = 0;
   let manifestError: string | null = null;
   let framesError: string | null = null;
-  const report = (): void => opts.onError(manifestError ?? framesError);
+  /** Kept until a later save lands, so the reload that follows a failed save does not hide it. */
+  let saveError: string | null = null;
+  const report = (): void => opts.onError(manifestError ?? framesError ?? saveError);
 
   // The layout comes from the frames store. A page that is new to the manifest (an import) has
   // frames only once the store has laid it out, so such a manifest reloads the layout. A manifest
@@ -127,6 +133,39 @@ export function createCanvasRuntime(opts: CanvasRuntimeOptions): CanvasRuntime {
       },
     );
   };
+  // Saves send the whole layout, debounced; last write wins. A refused save (a stale layout, say)
+  // shows why and reloads the stored layout, dropping a change that was still waiting.
+  let unsaved: CanvasFrame[] | null = null;
+  let saveTimer: ReturnType<typeof setTimeout> | null = null;
+  const save = (): void => {
+    saveTimer = null;
+    const frames = unsaved;
+    unsaved = null;
+    if (frames === null) return;
+    opts.frames.save(frames).then(
+      () => {
+        if (disposed || saveError === null) return;
+        saveError = null;
+        report();
+      },
+      (e: unknown) => {
+        if (disposed) return;
+        if (saveTimer !== null) clearTimeout(saveTimer);
+        saveTimer = null;
+        unsaved = null;
+        saveError = `Could not save the canvas frames: ${errorMessage(e)}`;
+        report();
+        loadFrames();
+      },
+    );
+  };
+  const framesChanged = (frames: CanvasFrame[]): void => {
+    layout = frames;
+    unsaved = frames;
+    if (saveTimer !== null) clearTimeout(saveTimer);
+    saveTimer = setTimeout(save, SAVE_DEBOUNCE_MS);
+  };
+
   const framesFor = (m: RenderManifest): void => {
     manifest = m;
     if (loading) recheck = true;
@@ -170,6 +209,11 @@ export function createCanvasRuntime(opts: CanvasRuntimeOptions): CanvasRuntime {
     controller,
     loader,
     dispose(): void {
+      // A change still waiting is saved now rather than lost; its result no longer matters.
+      if (saveTimer !== null) {
+        clearTimeout(saveTimer);
+        save();
+      }
       disposed = true;
       unsubscribe();
       loader.dispose();

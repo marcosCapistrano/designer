@@ -11,6 +11,8 @@ import { DEVICE_LABEL, ZOOMS } from '@hub/protocol';
 import type { Zoom } from '@hub/protocol';
 import { rectsIntersect, snapCamera, worldToDevice } from './geom.js';
 import type { Camera, Rect, Size } from './geom.js';
+import { HANDLE_PX, LABEL_BAND_PX, readoutText } from './frame-drag.js';
+import type { HandleKind } from './frame-drag.js';
 import type { Frame } from './layout.js';
 import { fallbackFor, frameTiles } from './tiles.js';
 import type { TileImage } from './loader.js';
@@ -22,6 +24,13 @@ export interface PaintInput {
   frames: readonly Frame[];
   zoom: Zoom;
   smoothing: boolean;
+  /** The handle being dragged, whose readout (size and style tier) is drawn next to it. */
+  readout?: Readout | null;
+}
+
+export interface Readout {
+  frameId: string;
+  kind: HandleKind;
 }
 
 export interface PaintStats {
@@ -46,7 +55,7 @@ export interface BackBuffer {
   present(shown: CanvasRenderingContext2D): void;
 }
 
-export const COLORS = { bg: '#e9e9ec', frame: '#ffffff', label: '#5f6368', badge: '#d93025', fold: '#9aa0a6' } as const;
+export const COLORS = { bg: '#e9e9ec', frame: '#ffffff', label: '#5f6368', badge: '#d93025', fold: '#9aa0a6', readout: '#1a73e8' } as const;
 export const LABEL_MIN_SCALE = 0.04;
 
 /** The text above a frame: page, size and style tier, and whether its size is still rendering. */
@@ -66,6 +75,11 @@ interface Last {
   frames: readonly Frame[];
   zoom: Zoom;
   smoothing: boolean;
+  readout: Readout | null;
+}
+
+function sameReadout(a: Readout | null, b: Readout | null): boolean {
+  return a === b || (a !== null && b !== null && a.frameId === b.frameId && a.kind === b.kind);
 }
 
 interface Pass {
@@ -76,6 +90,7 @@ interface Pass {
   frames: readonly Frame[];
   zoom: Zoom;
   smoothing: boolean;
+  readout: Readout | null;
 }
 
 interface Counts {
@@ -95,6 +110,36 @@ function invalidRegion(r: Rect, cam: Camera, s: number, width: number, height: n
   const y1 = clamp(Math.ceil((r.y + r.h - cam.y) * s), 0, height);
   if (x1 <= x0 || y1 <= y0) return null;
   return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+}
+
+/** Device y of a frame's viewport line (the height tab) and of the middle of its viewport (the width grip). */
+function handleYs(frame: Frame, cam: Camera, dpr: number): { fold: number; mid: number } {
+  const at = (y: number) => worldToDevice({ x: frame.x, y, w: 0, h: 0 }, cam, dpr).y;
+  return { fold: at(frame.y + frame.viewportHeight), mid: at(frame.y + frame.viewportHeight / 2) };
+}
+
+/** The height tab at the viewport line and a grip for the width band, both outside the right edge. */
+function paintHandles(ctx: CanvasRenderingContext2D, r: Rect, fr: Rect, ys: { fold: number; mid: number }, dpr: number): void {
+  const tab: Rect = { x: fr.x + fr.w, y: ys.fold - (HANDLE_PX / 2) * dpr, w: HANDLE_PX * dpr, h: HANDLE_PX * dpr };
+  const grip: Rect = { x: fr.x + fr.w + 10 * dpr, y: ys.mid - 16 * dpr, w: 4 * dpr, h: 32 * dpr };
+  ctx.fillStyle = COLORS.fold;
+  if (rectsIntersect(tab, r)) ctx.fillRect(tab.x, tab.y, tab.w, tab.h);
+  if (rectsIntersect(grip, r)) ctx.fillRect(grip.x, grip.y, grip.w, grip.h);
+}
+
+/** The dragged frame's size and style tier, next to the handle being dragged. */
+function paintReadout(ctx: CanvasRenderingContext2D, pass: Pass, readout: Readout): void {
+  const frame = pass.frames.find((f) => f.frameId === readout.frameId);
+  if (frame === undefined) return;
+  const { cam, dpr } = pass;
+  const fr = worldToDevice(frame, cam, dpr);
+  const ys = handleYs(frame, cam, dpr);
+  const x = fr.x + fr.w + (HANDLE_PX + 8) * dpr;
+  const y = readout.kind === 'height' ? ys.fold : readout.kind === 'width' ? ys.mid : fr.y - LABEL_BAND_PX * dpr - 4 * dpr;
+  ctx.fillStyle = COLORS.readout;
+  ctx.font = `600 ${13 * dpr}px system-ui, sans-serif`;
+  ctx.textBaseline = readout.kind === 'move' ? 'bottom' : 'middle';
+  ctx.fillText(readoutText(frame.w, frame.viewportHeight), readout.kind === 'move' ? fr.x : x, y);
 }
 
 export class BasePainter {
@@ -146,6 +191,7 @@ export class BasePainter {
     const cam = snapCamera(input.camera, input.dpr);
     const s = cam.scale * input.dpr;
     const last = this.last;
+    const readout = input.readout ?? null;
     front.setTransform(1, 0, 0, 1, 0, 0);
 
     const dx = last === null ? 0 : Math.round((last.cam.x - cam.x) * s);
@@ -160,6 +206,7 @@ export class BasePainter {
       input.frames !== last.frames ||
       input.zoom !== last.zoom ||
       (input.smoothing && !last.smoothing) ||
+      !sameReadout(readout, last.readout) ||
       Math.abs(dx) >= width ||
       Math.abs(dy) >= height;
 
@@ -192,7 +239,7 @@ export class BasePainter {
       }
     }
 
-    const pass: Pass = { cam, s, dpr: input.dpr, width, frames: input.frames, zoom: input.zoom, smoothing: input.smoothing };
+    const pass: Pass = { cam, s, dpr: input.dpr, width, frames: input.frames, zoom: input.zoom, smoothing: input.smoothing, readout };
     const counts: Counts = { tilesDrawn: 0, missing: 0 };
     for (const r of regions) this.paintRegion(target, r, pass, counts);
 
@@ -201,7 +248,7 @@ export class BasePainter {
       this.front = target;
       this.present?.(target);
     }
-    this.last = { cam, width, height, dpr: input.dpr, frames: input.frames, zoom: input.zoom, smoothing: input.smoothing };
+    this.last = { cam, width, height, dpr: input.dpr, frames: input.frames, zoom: input.zoom, smoothing: input.smoothing, readout };
     this.invalidated = false;
     this.dirty = [];
     return {
@@ -282,14 +329,16 @@ export class BasePainter {
         }
         // The label text may run past the frame's right edge, so its cull band
         // extends to the canvas edge rather than the frame width.
-        const labelBand: Rect = { x: fr.x, y: fr.y - 20 * dpr, w: Math.max(0, width - fr.x), h: 20 * dpr };
+        const labelBand: Rect = { x: fr.x, y: fr.y - LABEL_BAND_PX * dpr, w: Math.max(0, width - fr.x), h: LABEL_BAND_PX * dpr };
         if (cam.scale >= LABEL_MIN_SCALE && rectsIntersect(labelBand, r)) {
           ctx.fillStyle = COLORS.label;
           ctx.font = `${12 * dpr}px system-ui, sans-serif`;
           ctx.textBaseline = 'bottom';
           ctx.fillText(frameLabel(frame), fr.x, fr.y - 6 * dpr);
         }
+        if (cam.scale >= LABEL_MIN_SCALE) paintHandles(ctx, r, fr, handleYs(frame, cam, dpr), dpr);
       }
+      if (pass.readout !== null) paintReadout(ctx, pass, pass.readout);
     } finally {
       ctx.restore();
     }

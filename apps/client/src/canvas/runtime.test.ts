@@ -374,3 +374,78 @@ describe('createCanvasRuntime frames', () => {
     expect(h.rt.controller.frames).toEqual([]);
   });
 });
+
+describe('createCanvasRuntime frame saves', () => {
+  /** A width drag of `dx` CSS px on the last (rightmost) frame's right edge (the camera is at x 1000, scale 1). */
+  const widen = (h: ReturnType<typeof harness>, dx: number): void => {
+    const c = h.rt.controller;
+    const f = c.frames.at(-1)!;
+    const x0 = f.x + f.w - 1000 + 10;
+    const at = (kind: 'down' | 'move' | 'up', x: number) => c.pointer({ id: 1, kind, x, y: 300, pointerType: 'pen', button: 0 });
+    at('down', x0);
+    at('move', x0 + dx);
+    at('up', x0 + dx);
+  };
+
+  async function ready(overrides: Partial<CanvasRuntimeOptions> = {}) {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const h = harness(overrides);
+    h.resolveManifest(manifestOf('a'));
+    await vi.advanceTimersByTimeAsync(0);
+    h.rt.controller.resize(800, 600, 1);
+    h.rt.controller.setCamera({ x: 1000, y: -40, scale: 1 });
+    return h;
+  }
+
+  it('three quick changes produce one save of the last layout, 300 ms after the last', async () => {
+    try {
+      const h = await ready();
+      widen(h, 100);
+      await vi.advanceTimersByTimeAsync(100);
+      widen(h, 100);
+      await vi.advanceTimersByTimeAsync(100);
+      widen(h, 100);
+      await vi.advanceTimersByTimeAsync(299);
+      expect(h.frameStore.save).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(h.frameStore.save).toHaveBeenCalledTimes(1);
+      expect(h.frameStore.save.mock.calls[0]![0][2]).toMatchObject({ width: 690 });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a rejected save shows the message, reloads the layout, and the message stays after the reload', async () => {
+    try {
+      const h = await ready();
+      h.frameStore.save.mockRejectedValueOnce(new Error('HTTP 409'));
+      widen(h, 100);
+      await vi.advanceTimersByTimeAsync(300);
+      expect(h.onError).toHaveBeenLastCalledWith('Could not save the canvas frames: HTTP 409');
+      expect(h.frameStore.load).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(h.rt.controller.frames.at(-1)).toMatchObject({ w: 390 });
+      expect(h.onError).toHaveBeenLastCalledWith('Could not save the canvas frames: HTTP 409');
+
+      // The next save that lands clears it.
+      widen(h, 100);
+      await vi.advanceTimersByTimeAsync(300);
+      expect(h.onError).toHaveBeenLastCalledWith(null);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a change still waiting for its save is saved on dispose', async () => {
+    try {
+      const h = await ready();
+      widen(h, 100);
+      h.rt.dispose();
+      expect(h.frameStore.save).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(300);
+      expect(h.frameStore.save).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
