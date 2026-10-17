@@ -145,4 +145,32 @@ describe('import service', () => {
     expect(await s.service.summary('demo')).toMatchObject({ sourceOnlyRules: 2, inlined });
     await s.service.close();
   });
+  it('renders from the saved frame sizes and ensureRendered runs one render at a time', async () => {
+    const s = await setup();
+    let missing = true;
+    const frames = { sizesByPage: vi.fn(async () => () => {return [{ width: 1280, viewportHeight: 800 }]; }), missingRenders: vi.fn(async () => missing) };
+    const service = new SyncService({ ...s.deps, frames: frames as never });
+    const retry2 = vi.spyOn(service, 'retryPreview').mockImplementation(async () => { await new Promise((r) => setTimeout(r, 20)); missing = false; return { manifest: null, warnings: [] }; });
+    service.ensureRendered('demo');
+    service.ensureRendered('demo');
+    await new Promise((r) => setTimeout(r, 60));
+    expect(retry2).toHaveBeenCalledTimes(1);
+    service.ensureRendered('demo');
+    await new Promise((r) => setTimeout(r, 30));
+    expect(retry2).toHaveBeenCalledTimes(1); // nothing missing now
+    await service.close();
+    await s.service.close();
+  });
+  it('ensureRendered swallows the no-import 409', async () => {
+    const s = await setup();
+    const frames = { sizesByPage: vi.fn(), missingRenders: vi.fn(async () => true) };
+    const service = new SyncService({ ...s.deps, frames: frames as never });
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+    service.ensureRendered('demo');
+    await new Promise((r) => setTimeout(r, 30));
+    expect(log).not.toHaveBeenCalled();
+    service.ensureRendered('demo');
+    await service.close();
+    log.mockRestore();
+  });
 });

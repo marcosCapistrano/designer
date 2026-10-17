@@ -11,6 +11,9 @@ import { type RunCommand, runCommand as defaultRunCommand } from './build/comman
 import { BuildService } from './build/service.js';
 import { BuildStore } from './build/store.js';
 import { SyncService } from './sync/service.js';
+import { CanvasFrames } from './design/frames.js';
+import { renderDir } from './design/render-files.js';
+import { FsTileStore } from '@hub/renderer';
 import { DesignEditing } from './design/editing.js';
 import { DesignChat, type DesignMcpFactory } from './design/chat.js';
 import { DesignChatStore } from './design/chat-store.js';
@@ -96,7 +99,12 @@ export async function startHub(opts: HubOptions): Promise<RunningHub> {
       onMerged: opts.onMerged,
     });
     const interrupted = build.recover();
-    const sync = new SyncService({ registry, build, hub, dataDir: config.dataDir });
+    const frames = new CanvasFrames({
+      db,
+      pages: async (app) => { const saved = await sync.load(app); return saved ? Object.values(saved.state.doc.pages).map(({ id }) => ({ pageId: id })) : null; },
+      manifest: (app) => new FsTileStore(renderDir(config.dataDir, app)).readManifest(),
+    });
+    const sync: SyncService = new SyncService({ registry, build, hub, dataDir: config.dataDir, frames });
     const editing = new DesignEditing(sync, build, now);
     const designChat = new DesignChat({ registry, build, sync, editing, runner: opts.designRunner ?? opts.runner, mcp: opts.designMcp, hub, dataDir: config.dataDir, store: new DesignChatStore(db, now) });
     const sourcePreview = new SourcePreview(sync,build,opts.previewRunner ?? opts.runner,config.dataDir,opts.previewMcp,now);
@@ -112,6 +120,7 @@ export async function startHub(opts: HubOptions): Promise<RunningHub> {
       build,
       sync,
       editing,
+      frames,
       designChat,
       sourcePreview,
       dataDir: config.dataDir,

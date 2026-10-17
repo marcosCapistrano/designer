@@ -10,6 +10,7 @@ import { BuildError } from '../build/ci.js';
 import type { BuildService } from '../build/service.js';
 import type { WsHub } from '../ws/hub.js';
 import { renderDir } from '../design/render-files.js';
+import type { CanvasFrames } from '../design/frames.js';
 import { readSourceProject } from './source.js';
 
 /** Import configuration that cannot be used; the diagnostic names the file. */
@@ -30,11 +31,13 @@ export interface SyncDeps {
   dataDir: string;
   readSource?: typeof readSourceProject;
   store?: (app: string) => SyncStore;
+  frames?: Pick<CanvasFrames, 'sizesByPage' | 'missingRenders'>;
   render?: (app: string, doc: DesignDoc) => Promise<{ manifest: RenderManifest; warnings: string[] }>;
 }
 export class SyncService {
   private readonly stores = new Map<string, SyncStore>();
   private readonly pool = new BrowserPool();
+  private readonly rendering = new Set<string>();
   constructor(private readonly deps: SyncDeps) {}
   async close(): Promise<void> { await this.pool.close(); }
   async load(app: string) { await this.entry(app); return this.store(app).load(); }
@@ -102,7 +105,7 @@ export class SyncService {
         return out;
       }
       const store = new FsTileStore(renderDir(this.deps.dataDir, app));
-      const out = await renderDoc(this.pool, doc, { sizes: () => DEFAULT_FRAME_SIZES, prev: await store.readManifest(), store });
+      const out = await renderDoc(this.pool, doc, { sizes: this.deps.frames ? await this.deps.frames.sizesByPage(app) : () => DEFAULT_FRAME_SIZES, prev: await store.readManifest(), store });
       if (publish) {
         await store.writeManifest(out.manifest);
         this.deps.hub.broadcast({ type: 'render.ready', app, manifest: out.manifest });
@@ -117,5 +120,19 @@ export class SyncService {
       if (!saved) throw new BuildError('Import pages first.', 409);
       return this.preview(app, saved.state.doc);
     });
+  }
+  /** Starts a background render when the saved frame layout has sizes the manifest lacks; one at a time per app. */
+  ensureRendered(app: string): void {
+    const frames = this.deps.frames;
+    if (!frames || this.rendering.has(app)) return;
+    this.rendering.add(app);
+    void (async () => {
+      try {
+        const manifest = await new FsTileStore(renderDir(this.deps.dataDir, app)).readManifest();
+        if (await frames.missingRenders(app, manifest)) await this.retryPreview(app);
+      } catch (error) {
+        if (!(error instanceof BuildError && error.status === 409)) console.error(`Frame render failed for ${app}: ${JSON.stringify(error instanceof Error ? error.message.slice(0, 500) : String(error))}`);
+      } finally { this.rendering.delete(app); }
+    })();
   }
 }

@@ -23,6 +23,7 @@ CREATE INDEX build_messages_app ON build_messages (app, id);`,
   `CREATE TABLE design_chats (app TEXT PRIMARY KEY, claude_session_id TEXT);
 CREATE TABLE design_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, app TEXT NOT NULL, kind TEXT NOT NULL, text TEXT NOT NULL, at INTEGER NOT NULL);
 CREATE INDEX design_messages_app ON design_messages(app,id);`,
+  `CREATE TABLE canvas_frames (app TEXT NOT NULL, id TEXT NOT NULL, page_id TEXT NOT NULL, x INTEGER NOT NULL, y INTEGER NOT NULL, width INTEGER NOT NULL, viewport_height INTEGER NOT NULL, PRIMARY KEY (app, id));`,
 ];
 
 function readVersion(db: Db): number {
