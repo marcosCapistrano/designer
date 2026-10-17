@@ -9,8 +9,12 @@ type Specificity = [number, number, number];
 // States the resting frame never shows (R2). States decidable from static attributes are matched structurally (Ruling Q).
 const STATE = /^(?:hover|focus.*|active|visited|target)$/;
 const STATIC_STATE = new Set(['disabled', 'enabled', 'checked', 'required', 'optional', 'read-only', 'read-write', 'placeholder-shown']);
-// Pseudo-elements that render at rest; a rule for one fails when it applies to an element in the tree (Ruling Q).
-const RESTING_PSEUDO = new Set(['placeholder', 'marker', 'first-line', 'first-letter', 'file-selector-button']);
+// Pseudo-elements the resting frame never shows (the renderer hides scrollbars). Every other pseudo-element is taken
+// to render at rest, so a rule for one fails when it applies to an element in the tree (Ruling Q); before/after are
+// handled by their content.
+const SOURCE_PSEUDO = /^(?:selection|backdrop|target-text|spelling-error|grammar-error|-webkit-scrollbar(?:-.+)?|-webkit-resizer|-webkit-inner-spin-button|-webkit-outer-spin-button|-webkit-search-cancel-button)$/;
+// Legacy names of standard pseudo-elements.
+const PSEUDO_ALIASES: Record<string, string> = { '-webkit-input-placeholder': 'placeholder', '-webkit-file-upload-button': 'file-selector-button' };
 const LOGICAL = new Set(['is', 'where', 'not']);
 const STRUCTURAL = new Set(['first-child', 'last-child', 'root']);
 
@@ -54,15 +58,20 @@ export function isSourceOnly(selector: SelectorAst, content = true): boolean {
   return state;
 }
 
-/** The resting-visible pseudo-element a selector styles, or null (Ruling Q). */
+/** The pseudo-element a selector styles that may render at rest, or null (Ruling Q). */
 export function restingPseudoElement(selector: SelectorAst): string | null {
   let found: string | null = null;
-  selector.children.forEach((part) => { if (part.type === 'PseudoElementSelector' && RESTING_PSEUDO.has(part.name)) found = part.name; });
+  selector.children.forEach((part) => {
+    if (part.type === 'PseudoElementSelector' && part.name !== 'before' && part.name !== 'after' && !SOURCE_PSEUDO.test(part.name)) found = part.name;
+  });
   return found;
 }
 
 /** Whether `pseudo` exists on the element: ::placeholder needs a placeholder text, ::file-selector-button a file input. */
-export function hasPseudoElement(node: TreeNode, pseudo: string): boolean {
+export function hasPseudoElement(node: TreeNode, name: string): boolean {
+  const pseudo = PSEUDO_ALIASES[name] ?? name;
+  if (pseudo === '-webkit-details-marker') return node.tag === 'summary';
+  if (pseudo === '-webkit-search-decoration' || pseudo === '-webkit-search-results-button') return node.tag === 'input' && node.attrs['type']?.toLowerCase() === 'search';
   if (pseudo === 'placeholder') return (node.tag === 'input' || node.tag === 'textarea') && !!node.attrs['placeholder'];
   if (pseudo === 'file-selector-button') return node.tag === 'input' && node.attrs['type']?.toLowerCase() === 'file';
   return true;
@@ -83,7 +92,8 @@ function isDisabled(node: TreeNode): boolean {
   if (node.tag === 'optgroup') return false;
   for (let child = node, up = node.parent; up; child = up, up = up.parent) {
     if (up.tag !== 'fieldset' || !has(up, 'disabled')) continue;
-    if (child.tag === 'legend' && (up.tags ? up.tags.indexOf('legend') === child.index : child.index === 0)) return false;
+    // Inside the first legend this fieldset does not disable it; an outer disabled fieldset still may.
+    if (child.tag === 'legend' && (up.tags ? up.tags.indexOf('legend') === child.index : child.index === 0)) continue;
     return true;
   }
   return false;
@@ -107,8 +117,7 @@ function staticState(node: TreeNode, name: string): boolean {
     case 'required':
     case 'optional': {
       const applies = node.tag === 'select' || node.tag === 'textarea' || (node.tag === 'input' && !REQUIRED_NOT_APPLICABLE.has(inputType(node)));
-      const form = node.tag === 'select' || node.tag === 'textarea' || node.tag === 'input';
-      return name === 'required' ? applies && has(node, 'required') : form && !(applies && has(node, 'required'));
+      return applies && has(node, 'required') === (name === 'required');
     }
     case 'read-write':
     case 'read-only': {

@@ -78,5 +78,11 @@ describe('selectors', () => {
     expect(match(':placeholder-shown', { ...tree('textarea', { placeholder: 'Note' }), text: 'typed' })).toBe(false);
     expect(match(':placeholder-shown', { ...tree('textarea', { placeholder: 'Note' }), text: '' })).toBe(true);
     expect(match('.a:not(:disabled)', tree('button', { class: 'a' }))).toBe(true);
+    // :optional applies only where required does (M3); the first-legend exemption is per fieldset (M6).
+    expect(match(':optional', tree('input', { type: 'range' }))).toBe(false);
+    expect(match(':required', tree('input', { type: 'range', required: '' }))).toBe(false);
+    const outer = { ...tree('fieldset', { disabled: '' }), tags: ['div'] };
+    const inner = { ...tree('fieldset', { disabled: '' }, tree('div', {}, outer, 0, 1)), tags: ['legend'] };
+    expect(match(':disabled', tree('input', {}, tree('legend', {}, inner, 0, 1)))).toBe(true);
   });
 });

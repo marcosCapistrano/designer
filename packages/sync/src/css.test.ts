@@ -106,6 +106,14 @@ describe('stylesheet parsing', () => {
       expect(error).toMatchObject({ file: 'app/globals.css', message: `Unsupported CSS pseudo-element ::${pseudo} in .f::${pseudo}: it renders at rest on a matched element` });
     }
     expect(() => applyStyles(input({ type: 'file' }), parse('.f::file-selector-button { color: gray }').rules, new Map())).toThrow('Unsupported CSS pseudo-element ::file-selector-button');
+    // Unknown and legacy pseudo-elements fail closed; only known non-resting ones stay source-only (M2).
+    expect(() => applyStyles(input({ placeholder: 'Search' }), parse('.f::-webkit-input-placeholder { color: gray }').rules, new Map())).toThrow('Unsupported CSS pseudo-element ::-webkit-input-placeholder');
+    expect(() => applyStyles(input({ type: 'file' }), parse('.f::-webkit-file-upload-button { color: gray }').rules, new Map())).toThrow('Unsupported CSS pseudo-element ::-webkit-file-upload-button');
+    expect(() => applyStyles(el('summary', 'f'), parse('.f::-webkit-details-marker { display: none }').rules, new Map())).toThrow('Unsupported CSS pseudo-element ::-webkit-details-marker');
+    const scrolled = el('div', 'f');
+    const quiet = parse('.f { color: black } .f::-webkit-scrollbar { display: none } .f::-webkit-scrollbar-thumb { color: red } .f::selection { color: red } .f::-webkit-input-placeholder { color: red }');
+    applyStyles(scrolled, quiet.rules, new Map());
+    expect([quiet.sourceOnly, scrolled.style.base]).toEqual([4, { color: 'black' }]);
     const plain = input({});
     applyStyles(plain, parse('.f { color: black } .f::placeholder { color: gray } ::file-selector-button { color: red }').rules, new Map());
     expect(plain.style.base).toEqual({ color: 'black' });
