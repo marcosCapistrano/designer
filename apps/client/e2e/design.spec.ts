@@ -19,7 +19,9 @@ test('authenticated import renders pages, reuses baseline and preserves design o
   await page.getByRole('combobox', { name: 'Source', exact: true }).selectOption('react');
   await page.getByLabel('Entry file').fill('missing.tsx');
   await page.getByRole('button', { name: 'Import pages' }).click();
-  await expect(page.getByRole('alert')).toContainText('previous design and edits are preserved');
+  // Since the real-app import work, a missing entry is a failed route of an applied import, not a refused import.
+  await expect(page.getByRole('alert')).toContainText('These routes were not imported. Each keeps its previous version');
+  await expect(page.getByRole('alert')).toContainText('Missing source missing.tsx');
   expect((await (await page.request.get('/api/apps/demo/design')).json()).pages).toHaveLength(1);
 });
 
