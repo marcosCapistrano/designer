@@ -107,7 +107,7 @@ export class DesignEditing {
     }
     const applied = applyBatch(saved.state.doc, ops);
     if (!applied.ok) throw new BuildError(applied.error, 400);
-    if (!forcePreview && selection && (inScope || classifyBatch(saved.state.doc, ops) === 'immediate')) return this.commit(app, saved, ops, applied.value.doc);
+    if (!forcePreview && selection && classifyBatch(saved.state.doc, ops, inScope ? scope : undefined) === 'immediate') return this.commit(app, saved, ops, applied.value.doc);
     for (const [id, proposal] of this.proposals) if (proposal.expires <= this.now() || proposal.app === app) this.proposals.delete(id);
     if (this.proposals.size >= 100) throw new BuildError('Too many pending previews.', 409);
     const id = randomUUID();

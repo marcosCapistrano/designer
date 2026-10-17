@@ -125,6 +125,18 @@ describe('validated design editing', () => {
     expect(out.mode).toBe('applied');
     expect(s.saved().state.doc.components[s.child.component]!.root.style.base['color']).toBe('red');
   });
+  it('component scope applies only single property edits at once; structural or multi-op edits still preview', async () => {
+    const s = setup(true);
+    if (s.child.kind !== 'instance') throw new Error('missing instance');
+    const def = s.saved().state.doc.components[s.child.component]!;
+    const hit = { ...s.selection, nodeIds: [`${s.child.id}/${def.root.id}`] };
+    const scope = { component: s.child.component };
+    const two = [{ op: 'setStyle', node: def.root.id, device: 'base', prop: 'color', value: 'red' }, { op: 'setStyle', node: def.root.id, device: 'base', prop: 'padding', value: '4px' }];
+    expect((await s.editing.edit('demo', 'one', two, hit, false, scope)).mode).toBe('preview');
+    const text = def.root.children[0]!;
+    expect((await s.editing.edit('demo', 'one', [{ op: 'removeNode', node: text.id }], hit, false, scope)).mode).toBe('preview');
+    expect(s.saved().state.pending).toEqual([]);
+  });
   it('component scope rejects ops outside the definition', async () => {
     const s = setup(true);
     if (s.child.kind !== 'instance') throw new Error('missing instance');

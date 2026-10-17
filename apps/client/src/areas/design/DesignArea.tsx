@@ -12,6 +12,7 @@ import type { TileSource } from '../../canvas/source.js';
 import { CanvasView, readOnlyFrameStore } from '../../canvas/index.js';
 import type { CanvasHandle } from '../../canvas/CanvasView.js';
 import { prefixOf } from '../../canvas/scope.js';
+import { DOUBLE_TAP_MS } from '../../canvas/controller.js';
 import type { FrameStore } from '../../canvas/index.js';
 import { formatRoute } from '../../shell/route.js';
 import type { Area } from '../../shell/route.js';
@@ -247,7 +248,12 @@ export function DesignArea({ app, api, ws, source, cache }: DesignAreaProps): JS
   // auto: the panel follows the selection (wide screens); open/closed: the user's choice from the Layers button.
   const [layersPref, setLayersPref] = useState<'auto' | 'open' | 'closed'>('auto');
   const docked = layersLayout(width) === 'docked';
-  const layersVisible = layersPref === 'open' || (docked && layersPref === 'auto' && selection !== null);
+  // The docked panel follows the selection one double-tap window late: opening at once would slide the canvas out
+  // from under a finger about to tap the second time.
+  const [settled, setSettled] = useState(false);
+  const settleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => { if (settleTimer.current) clearTimeout(settleTimer.current); }, []);
+  const layersVisible = layersPref === 'open' || (docked && layersPref === 'auto' && selection !== null && settled);
   // The canvas reads its callbacks once, at mount: they reach the current state through this ref.
   const live = useRef({ layers, page, mode, docked, fromLayers: false });
   live.current = { ...live.current, layers, page, mode, docked };
@@ -354,6 +360,9 @@ export function DesignArea({ app, api, ws, source, cache }: DesignAreaProps): JS
   const onCanvasSelect = useCallback((s: NodeSelection | null) => {
     setSelection(s);
     if (s) setPage(s.pageId);
+    if (settleTimer.current) clearTimeout(settleTimer.current);
+    if (!s) setSettled(false);
+    else settleTimer.current = setTimeout(() => setSettled(true), DOUBLE_TAP_MS);
     // A tap on the canvas closes the layers sheet on narrow screens; a row tap keeps it.
     if (!live.current.fromLayers && !live.current.docked) setLayersPref((p) => (p === 'open' ? 'auto' : p));
   }, []);

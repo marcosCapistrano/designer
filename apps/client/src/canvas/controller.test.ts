@@ -1224,6 +1224,17 @@ describe('CanvasController component scope', () => {
     expect(onDoubleTap).toHaveBeenCalledWith({ pageId: 'home', device: 'base', nodeIds: ['a'] });
   });
 
+  it('a double tap whose second tap selects something else is not reported', async () => {
+    let t = 0;
+    const { c, onDoubleTap } = setup(() => t);
+    await c.tap(15, 15); // a
+    t = 100;
+    c.setCamera({ x: 1290, y: 890, scale: 0.5 }); // the canvas moved under the finger (a panel opened): now over 'far'
+    await c.tap(15, 15);
+    expect(c.selection?.nodeIds).toEqual(['far']);
+    expect(onDoubleTap).not.toHaveBeenCalled();
+  });
+
   it('box select dedupes scoped ids', async () => {
     const { c } = setup();
     await c.selectBox({ x: 0, y: 0 }, { x: 300, y: 60 });

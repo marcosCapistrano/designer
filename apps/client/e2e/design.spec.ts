@@ -204,3 +204,19 @@ test('on a tablet, a double tap enters a component and a tap outside leaves it; 
   await canvas.click({ position: { x: 600, y: point.y } });
   await expect(page.getByTestId('layers')).toHaveCount(0);
 });
+
+test('on a wide screen, a double tap enters a component even though the first tap opens the layers panel', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await openDesign(page, 'demo');
+  await importPages(page);
+  await expect(toasts(page)).toContainText('Imported');
+  const point = await lastBoxPoint(page);
+  expect(point.x).toBeLessThan(320); // under where the docked panel opens
+  await page.getByTestId('tool-select').first().click();
+  const bounds = (await page.getByTestId('canvas').first().boundingBox())!;
+  // A finger's double tap: two taps about 200ms apart, at one point on the screen.
+  await page.mouse.click(bounds.x + point.x, bounds.y + point.y);
+  await page.waitForTimeout(200);
+  await page.mouse.click(bounds.x + point.x, bounds.y + point.y);
+  await expect(page.getByTestId('mode-chip')).toBeVisible();
+});

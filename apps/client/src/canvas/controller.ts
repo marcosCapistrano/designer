@@ -173,7 +173,8 @@ export class CanvasController {
   /** Component mode: the instance path being edited ('' outside) and its page. */
   private scope = '';
   private scopePage: string | null = null;
-  private lastTap: { x: number; y: number; t: number } | null = null;
+  /** The last tap, and once it has resolved, what it selected (a double tap must select the same node twice). */
+  private lastTap: { x: number; y: number; t: number; id?: string } | null = null;
   private marquee: Rect | null = null;
   /** A move or resize of a frame by its handle; its pointer never reaches the gesture tracker. */
   private drag: FrameDrag | null = null;
@@ -322,7 +323,8 @@ export class CanvasController {
     const at = this.deps.now();
     const last = this.lastTap;
     const double = last !== null && at - last.t <= DOUBLE_TAP_MS && Math.hypot(x - last.x, y - last.y) <= DOUBLE_TAP_SLOP;
-    this.lastTap = double ? null : { x, y, t: at };
+    const mine: { x: number; y: number; t: number; id?: string } | null = double ? null : { x, y, t: at };
+    this.lastTap = mine;
     const world = screenToWorld(this.cam, { x, y });
     const frame = frameAt(this.layout, world);
     const hash = frame ? renderHash(frame) : null;
@@ -345,8 +347,10 @@ export class CanvasController {
       return;
     }
     this.select({ frameId: frame.frameId, nodeIds: [id] });
+    if (mine !== null && this.lastTap === mine) mine.id = id;
     const reported = this.reported(this.selected);
-    if (double && reported !== null) this.deps.onDoubleTap?.(reported);
+    // The canvas can move between the taps (a panel opening): a second tap on something else is a new tap.
+    if (double && (last?.id === undefined || last.id === id) && reported !== null) this.deps.onDoubleTap?.(reported);
   }
 
   /** In component mode, a selection outside the instance: the app steps out. */
