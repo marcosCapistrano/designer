@@ -1,0 +1,37 @@
+/* Design chat sheet: a bar at the bottom of the canvas, history above it when expanded. */
+.chat-sheet {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 15;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  max-height: 60%;
+  padding: var(--s2) var(--s3) calc(var(--s2) + env(safe-area-inset-bottom, 0px));
+  border-top: 1px solid var(--border);
+  background: var(--overlay);
+  -webkit-backdrop-filter: blur(14px);
+  backdrop-filter: blur(14px);
+  color: var(--text);
+}
+.chat-sheet-open { background: var(--surface); }
+/* Docked under the inspector: same column, inspector above. */
+.chat-sheet-docked { left: auto; width: 360px; border-left: 1px solid var(--border); }
+.chat-messages { display: flex; flex-direction: column; gap: var(--s2); flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding-top: var(--s2); }
+.chat-empty { margin: 0; color: var(--text-2); font-size: var(--text-m); }
+.chat-msg { display: flex; flex-direction: column; align-items: flex-start; gap: var(--s1); max-width: 85%; }
+.chat-msg-text { margin: 0; padding: var(--s2) var(--s3); border-radius: 14px; font-size: var(--text-m); line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; }
+.chat-msg-user { align-self: flex-end; align-items: flex-end; }
+.chat-msg-user .chat-msg-text { background: var(--accent); color: var(--accent-text); border-bottom-right-radius: 4px; }
+.chat-msg-assistant .chat-msg-text { background: var(--surface-2); border-bottom-left-radius: 4px; }
+.chat-msg-error .chat-msg-text { background: rgba(255, 107, 107, 0.12); color: var(--danger); }
+.chat-tag { padding: 2px 8px; border: 1px solid var(--border); border-radius: 999px; background: transparent; color: var(--ok); font: inherit; font-size: 12px; font-weight: 600; }
+.chat-tag-preview { color: var(--warning); cursor: pointer; min-height: 28px; }
+.chat-error { margin: 0; color: var(--danger); font-size: var(--text-s); }
+.chat-chip { display: inline-flex; align-items: center; gap: var(--s1); align-self: flex-start; padding: 2px 2px 2px var(--s2); border: 1px solid var(--accent); border-radius: 999px; background: var(--accent-soft); font-size: var(--text-s); }
+.chat-chip-x { display: grid; place-items: center; width: 32px; height: 32px; padding: 0; border: 0; border-radius: 50%; background: transparent; color: var(--text-2); cursor: pointer; }
+.chat-chip-x svg { width: 16px; height: 16px; }
+.chat-bar { display: flex; align-items: center; gap: var(--s1); }
+.chat-input { flex: 1; border-radius: 22px; padding: 0 var(--s3); }
