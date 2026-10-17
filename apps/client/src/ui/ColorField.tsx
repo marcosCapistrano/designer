@@ -8,12 +8,14 @@ export interface ColorFieldProps {
   placeholder?: string;
   disabled?: boolean;
   busy?: boolean;
+  /** The value is inherited from another tier: shown dimmed, still editable. */
+  muted?: boolean;
   onCommit(value: string | null): void;
   'data-testid'?: string;
 }
 
 /** A swatch and a text field. The swatch previews literal colors only; six-digit hex also opens the native picker. */
-export function ColorField({ value, label, placeholder, disabled, busy, onCommit, 'data-testid': id = 'color' }: ColorFieldProps): JSX.Element {
+export function ColorField({ value, label, placeholder, disabled, busy, muted, onCommit, 'data-testid': id = 'color' }: ColorFieldProps): JSX.Element {
   const literal = isLiteralColor(value);
   const off = Boolean(disabled || busy);
   return (
@@ -26,7 +28,7 @@ export function ColorField({ value, label, placeholder, disabled, busy, onCommit
               onChange={(event) => onCommit((event as unknown as { currentTarget: { value: string } }).currentTarget.value)} />
           )}
         </span>
-        <input key={value} class="ui-input ui-mono" data-testid={`${id}-input`} defaultValue={value} placeholder={placeholder} disabled={off} aria-label={label} {...commitHandlers(value, onCommit)} />
+        <input key={value} class={muted ? 'ui-input ui-mono ui-input-muted' : 'ui-input ui-mono'} data-testid={`${id}-input`} defaultValue={value} placeholder={placeholder} disabled={off} aria-label={label} {...commitHandlers(value, onCommit)} />
       </span>
     </label>
   );

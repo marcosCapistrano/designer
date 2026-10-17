@@ -279,3 +279,4 @@
   outline: 2px solid var(--accent);
   outline-offset: 1px;
 }
+.ui-input-muted { color: var(--text-3); }
