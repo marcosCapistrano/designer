@@ -11,7 +11,7 @@ import { type RunCommand, runCommand as defaultRunCommand } from './build/comman
 import { BuildService } from './build/service.js';
 import { BuildStore } from './build/store.js';
 import { SyncService } from './sync/service.js';
-import { CanvasFrames } from './design/frames.js';
+import { CanvasFrames, pagesInRouteOrder } from './design/frames.js';
 import { renderDir } from './design/render-files.js';
 import { FsTileStore } from '@hub/renderer';
 import { DesignEditing } from './design/editing.js';
@@ -101,7 +101,7 @@ export async function startHub(opts: HubOptions): Promise<RunningHub> {
     const interrupted = build.recover();
     const frames = new CanvasFrames({
       db,
-      pages: async (app) => { const saved = await sync.load(app); return saved ? Object.values(saved.state.doc.pages).map(({ id }) => ({ pageId: id })) : null; },
+      pages: async (app) => { const saved = await sync.load(app); return saved ? pagesInRouteOrder(saved.state.doc.pages) : null; },
       manifest: (app) => new FsTileStore(renderDir(config.dataDir, app)).readManifest(),
     });
     const sync: SyncService = new SyncService({ registry, build, hub, dataDir: config.dataDir, frames });

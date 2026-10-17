@@ -50,7 +50,10 @@ describe('frame routes', () => {
     const h = await auth();
     const res = await app.request('/api/apps/demo/design/frames', { headers: h });
     expect(res.status).toBe(200);
-    expect(((await res.json()) as { frames: unknown[] }).frames).toHaveLength(3);
+    const body = (await res.json()) as { frames: unknown[]; provisional: boolean };
+    expect(body.frames).toHaveLength(3);
+    // No render heights yet (no manifest), so the defaults are not saved and the client is told to ask again.
+    expect(body.provisional).toBe(true);
     expect(ensureRendered).toHaveBeenCalledTimes(1);
     expect(ensureRendered).toHaveBeenCalledWith('demo');
   });
@@ -63,7 +66,7 @@ describe('frame routes', () => {
     expect(await res.json()).toEqual({ frames });
     expect(ensureRendered).toHaveBeenCalledTimes(1);
     const got = await app.request('/api/apps/demo/design/frames', { headers: h });
-    expect(await got.json()).toEqual({ frames });
+    expect(await got.json()).toEqual({ frames, provisional: false });
   });
 
   it('PUT invalid is 400 with the validation message and no render', async () => {

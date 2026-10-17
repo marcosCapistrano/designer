@@ -1,4 +1,4 @@
-import { randomBytes } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import { DEFAULT_FRAME_SIZES, defaultFrames, sizeKey, validateFrames, type CanvasFrame, type FrameSize, type RenderManifest } from '@hub/protocol';
 import type { Db } from '../db.js';
 
@@ -6,8 +6,28 @@ export interface CanvasFramesDeps {
   db: Db;
   /** The pages of the saved design in order, or null when nothing is imported. */
   pages: (app: string) => Promise<{ pageId: string }[] | null>;
+  /** The published v2 manifest, or null (none yet, or an older version whose heights are not usable). */
   manifest: (app: string) => Promise<RenderManifest | null>;
-  newId?: () => string;
+}
+
+/** A layout and whether it is provisional: some default frames were placed without known render heights and were not saved. */
+export interface FrameLayout { frames: CanvasFrame[]; provisional: boolean }
+
+// Code-point order (UTF-8 byte order), as in the renderer; UTF-16 unit order differs.
+function byCodePoint(a: string, b: string): number {
+  return Buffer.compare(Buffer.from(a, 'utf8'), Buffer.from(b, 'utf8'));
+}
+
+/** A design's pages in the order default rows stack: by route, then id, as the renderer orders them. */
+export function pagesInRouteOrder(pages: Record<string, { id: string; route: string }>): { pageId: string }[] {
+  return Object.values(pages)
+    .sort((a, b) => byCodePoint(a.route, b.route) || byCodePoint(a.id, b.id))
+    .map(({ id }) => ({ pageId: id }));
+}
+
+/** A default frame's id, the same every time the page is laid out, so a provisional layout keeps its ids once it is saved. */
+function defaultFrameId(pageId: string, size: FrameSize): string {
+  return 'f' + createHash('sha256').update(`${pageId}\0${sizeKey(size)}`).digest('hex').slice(0, 16);
 }
 interface Row { id: string; page_id: string; x: number; y: number; width: number; viewport_height: number }
 
@@ -28,21 +48,39 @@ export class CanvasFrames {
     })();
   }
 
-  async list(app: string): Promise<CanvasFrame[]> {
+  /**
+   * The saved layout plus default frames for pages that have none. Defaults are stacked from the
+   * render heights in the v2 manifest; while any height they depend on is unknown (no manifest, a v1
+   * manifest, or a page not rendered at that size yet) they are returned but not saved, and the layout
+   * is marked provisional so the client asks again once renders land. Saving them with guessed
+   * heights would persist overlapping rows, because saved positions are never re-stacked.
+   */
+  async list(app: string): Promise<FrameLayout> {
     const pages = await this.deps.pages(app);
-    if (!pages) return [];
+    if (!pages) return { frames: [], provisional: false };
     const ids = new Set(pages.map((p) => p.pageId));
     const saved = this.load(app);
     const kept = saved.filter((f) => ids.has(f.pageId));
     const manifest = await this.deps.manifest(app);
     const heights = new Map<string, number>();
-    for (const page of manifest?.pages ?? []) for (const [key, render] of Object.entries(page.renders)) heights.set(`${page.pageId}/${key}`, render.height);
-    const heightOf = (pageId: string, size: FrameSize) => heights.get(`${pageId}/${sizeKey(size)}`) ?? size.viewportHeight;
-    const newId = this.deps.newId ?? (() => 'f' + randomBytes(8).toString('hex'));
-    const all = defaultFrames(pages, kept, heightOf, newId);
-    if (kept.length !== saved.length || all.length !== kept.length) this.save(app, all);
+    if (manifest?.version === 2) {
+      for (const page of manifest.pages) for (const [key, render] of Object.entries(page.renders)) heights.set(`${page.pageId}/${key}`, render.height);
+    }
+    let guessed = false;
+    const heightOf = (pageId: string, size: FrameSize) => {
+      const h = heights.get(`${pageId}/${sizeKey(size)}`);
+      if (h === undefined) guessed = true;
+      return Math.max(h ?? 0, size.viewportHeight);
+    };
+    const all = defaultFrames(pages, kept, heightOf, () => '');
+    for (let i = kept.length; i < all.length; i++) all[i] = { ...all[i]!, id: defaultFrameId(all[i]!.pageId, all[i]!) };
+    const added = all.length !== kept.length;
+    const provisional = added && guessed;
+    if (provisional) {
+      if (kept.length !== saved.length) this.save(app, kept);
+    } else if (kept.length !== saved.length || added) this.save(app, all);
     const order = new Map(pages.map((p, i) => [p.pageId, i]));
-    return [...all].sort((a, b) => order.get(a.pageId)! - order.get(b.pageId)! || a.x - b.x);
+    return { frames: [...all].sort((a, b) => order.get(a.pageId)! - order.get(b.pageId)! || a.x - b.x), provisional };
   }
 
   async replace(app: string, frames: unknown): Promise<{ ok: true; frames: CanvasFrame[] } | { ok: false; error: string }> {

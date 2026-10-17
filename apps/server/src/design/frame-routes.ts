@@ -17,9 +17,9 @@ export function frameRoutes({ frames, sync, hasApp }: FrameRouteDeps): Hono {
   routes.get('/:app/design/frames', async (c) => {
     const app = c.req.param('app');
     if (!(await hasApp(app))) return c.json({ error: 'Unknown app' }, 404);
-    const list = await frames.list(app);
+    const layout = await frames.list(app);
     sync.ensureRendered(app);
-    return c.json({ frames: list });
+    return c.json(layout);
   });
   routes.put('/:app/design/frames', async (c) => {
     const app = c.req.param('app');
