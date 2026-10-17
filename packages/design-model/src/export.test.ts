@@ -381,6 +381,15 @@ describe('document shell propagation', () => {
     ]);
   });
 
+  test('a background shorthand in a device block resets the earlier background longhands (R2-M1)', () => {
+    const { css } = exportOk(shellDoc({ base: { 'background-color': 'red' }, tablet: { background: 'none' } }, { base: { background: 'blue' } }));
+    expect(css.split('\n')).toEqual([
+      'html{background-color:red;}',
+      '[data-d-id="b"]{background:blue;}',
+      '@media (max-width: 1023px){html{background:blue;}[data-d-id="h"]{background:none;}[data-d-id="b"]{background:initial;}}',
+    ]);
+  });
+
   test('treats zero-alpha background colors as not painting', () => {
     for (const clear of ['rgba(0, 0, 0, 0)', '#0000', '#ff000000', 'rgb(0 0 0 / 0%)', 'hsla(0, 0%, 0%, 0.0)']) {
       const { css } = exportOk(shellDoc({ base: { 'background-color': clear } }, { base: { background: 'red' } }));

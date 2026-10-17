@@ -278,7 +278,13 @@ function propagateShell(root: ElementOut): Styles {
   const effective = (el: ElementOut | undefined) => {
     const out: StyleMap[] = [];
     let acc: StyleMap = {};
-    for (const device of devices) { acc = { ...acc, ...(el?.styles[device] ?? {}) }; out.push(acc); }
+    for (const device of devices) {
+      const map = el?.styles[device] ?? {};
+      // A background shorthand resets the background longhands set in earlier blocks.
+      if (Object.hasOwn(map, 'background')) acc = Object.fromEntries(Object.entries(acc).filter(([prop]) => !isBackground(prop)));
+      acc = { ...acc, ...map };
+      out.push(acc);
+    }
     return out;
   };
   const rootMaps = effective(root), bodyMaps = effective(body);
