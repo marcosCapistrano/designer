@@ -93,6 +93,18 @@ function domAttr(tag: string, name: string): string | null {
   return name.toLowerCase();
 }
 
+// As react-dom renders a boolean prop: HTML boolean attributes are present ('') or absent, aria-*, data-* and the
+// booleanish-string props render "true"/"false", and any other attribute given a boolean is dropped.
+const BOOLEAN_ATTRS = new Set(['allowfullscreen', 'async', 'autofocus', 'autoplay', 'capture', 'checked', 'controls', 'default', 'defer', 'disabled',
+  'disablepictureinpicture', 'disableremoteplayback', 'download', 'formnovalidate', 'hidden', 'inert', 'itemscope', 'loop', 'multiple', 'muted',
+  'nomodule', 'novalidate', 'open', 'playsinline', 'readonly', 'required', 'reversed', 'scoped', 'seamless', 'selected']);
+const BOOLEANISH_PROPS = new Set(['contentEditable', 'draggable', 'spellCheck', 'value', 'autoReverse', 'externalResourcesRequired', 'focusable', 'preserveAlpha']);
+function booleanAttr(prop: string, attr: string, on: boolean): string | null {
+  if (/^(?:aria|data)-/.test(attr) || BOOLEANISH_PROPS.has(prop)) return String(on);
+  if (BOOLEAN_ATTRS.has(attr)) return on ? '' : null;
+  return null;
+}
+
 class PropValue { constructor(readonly name: string) {} }
 type Value = string | number | boolean | null | undefined | Record<string, unknown> | unknown[] | PropValue;
 /** A local binding evaluated on first use, so a gap arises only for values the preview actually renders. */
@@ -757,10 +769,11 @@ function extractOnce(project: SourceProject, entries: RouteEntry[], options: Ext
               style[property.startsWith('--') ? property : property.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`)] = val;
             }
             inline.set(id, style);
-          } else if (literal !== false && literal !== null && literal !== undefined) {
+          } else if (literal !== null && literal !== undefined) {
             if (typeof literal === 'object') throw new Error(`Non-scalar attribute ${name}`);
             const attr = domAttr(tag, name);
-            if (attr !== null) attrs[attr] = literal === true ? '' : String(literal);
+            const rendered = attr === null ? null : typeof literal === 'boolean' ? booleanAttr(name, attr, literal) : String(literal);
+            if (attr !== null && rendered !== null) attrs[attr] = rendered;
           }
         }
         return [{ id, kind: 'element', tag, attrs, style: { base: {} }, children: nodes }];

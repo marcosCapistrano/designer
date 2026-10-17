@@ -147,6 +147,18 @@ describe('static import', () => {
     ]) expect(extractPages({ files: { 'page.tsx': `export default () => ${source}` } }, [{ route: '/', file: 'page.tsx' }])).toMatchObject({ ok: false, diagnostics: [{ file: 'page.tsx', message: expect.stringContaining(message!) }] });
   });
 
+  it('renders boolean JSX props as react-dom does, so attribute selectors match', () => {
+    const page = `import './style.css'; export default () => <div><p className="a" data-empty={false} aria-selected={true} data-on draggable={false} hidden={false} title={true}>x</p><input disabled readOnly={false} /></div>`;
+    const result = extractPages({ files: { 'page.tsx': page, 'style.css': '.a { color: black } .a[data-empty="false"][aria-selected="true"] { color: red }' } }, [{ route: '/', file: 'page.tsx' }]);
+    expect(result.ok, JSON.stringify(result)).toBe(true);
+    if (!result.ok) return;
+    const root = Object.values(result.doc.pages)[0]!.root;
+    expect(root.children[0]).toMatchObject({ attrs: { 'data-empty': 'false', 'aria-selected': 'true', 'data-on': 'true', draggable: 'false' }, style: { base: { color: 'red' } } });
+    expect(root.children[0]!.kind === 'element' && Object.keys(root.children[0]!.attrs).sort()).toEqual(['aria-selected', 'data-empty', 'data-on', 'draggable']);
+    expect(root.children[1]).toMatchObject({ attrs: { disabled: '' } });
+    expect(root.children[1]!.kind === 'element' && root.children[1]!.attrs).toEqual({ disabled: '' });
+  });
+
   it('rejects ambiguous shorthand ordering rather than changing the appearance', () => {
     const result = extractPages({ files: { 'page.tsx': `import './style.css'; export default () => <p>Hi</p>`, 'style.css': 'p { margin-left: 2px; margin: 4px; }' } }, [{ route: '/', file: 'page.tsx' }]);
     expect(result.ok).toBe(false);
