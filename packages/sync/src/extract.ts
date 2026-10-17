@@ -1,5 +1,5 @@
 import ts from '@typescript/typescript6';
-import { canonicalStringify, validateDoc, type ComponentDef, type DesignDoc, type DesignNode, type ElementNode, type InstanceNode, type NodeStyle, type StyleMap } from '@hub/design-model';
+import { canonicalStringify, SVG_CASED_ATTRS, validateDoc, type ComponentDef, type DesignDoc, type DesignNode, type ElementNode, type InstanceNode, type NodeStyle, type StyleMap } from '@hub/design-model';
 import { applyStyles, CssError, parseStyles, winningTokens, type Rule, type Token } from './css.js';
 import { mergeTokens } from './tokens.js';
 import type { ComponentRules, ExtractOptions, ExtractResult, InlinedComponent, InlineReason, PreviewNode, RouteEntry, RouteInlining, SourceDiagnostic, SourceProject, TokenSource } from './types.js';
@@ -62,7 +62,36 @@ function resolveFile(project: SourceProject, from: string, specifier: string): s
 
 // R5: the root layout's document shell is matched as html/body, then emitted as divs without document-only attributes.
 const SHELL_TAGS = new Set(['html', 'body']);
-const DOCUMENT_ATTRS = ['lang', 'xmlns', 'suppressHydrationWarning'];
+const DOCUMENT_ATTRS = ['lang', 'xmlns'];
+
+// React's DOM props whose attribute names differ from the prop name, beyond the kebab-case SVG props below.
+const REACT_ATTRS: Record<string, string> = { className: 'class', htmlFor: 'for', httpEquiv: 'http-equiv', acceptCharset: 'accept-charset', defaultValue: 'value', defaultChecked: 'checked', panose1: 'panose-1' };
+// React's SVG props that render as kebab-case attributes (`strokeWidth` is `stroke-width`), as react-dom maps them.
+const SVG_KEBAB = new Set(['accentHeight', 'alignmentBaseline', 'arabicForm', 'baselineShift', 'capHeight', 'clipPath', 'clipRule', 'colorInterpolation',
+  'colorInterpolationFilters', 'colorProfile', 'colorRendering', 'dominantBaseline', 'enableBackground', 'fillOpacity', 'fillRule', 'floodColor',
+  'floodOpacity', 'fontFamily', 'fontSize', 'fontSizeAdjust', 'fontStretch', 'fontStyle', 'fontVariant', 'fontWeight', 'glyphName',
+  'glyphOrientationHorizontal', 'glyphOrientationVertical', 'horizAdvX', 'horizOriginX', 'imageRendering', 'letterSpacing', 'lightingColor',
+  'markerEnd', 'markerMid', 'markerStart', 'overlinePosition', 'overlineThickness', 'paintOrder', 'pointerEvents', 'renderingIntent',
+  'shapeRendering', 'stopColor', 'stopOpacity', 'strikethroughPosition', 'strikethroughThickness', 'strokeDasharray', 'strokeDashoffset',
+  'strokeLinecap', 'strokeLinejoin', 'strokeMiterlimit', 'strokeOpacity', 'strokeWidth', 'textAnchor', 'textDecoration', 'textRendering',
+  'transformOrigin', 'underlinePosition', 'underlineThickness', 'unicodeBidi', 'unicodeRange', 'unitsPerEm', 'vAlphabetic', 'vHanging',
+  'vIdeographic', 'vMathematical', 'vectorEffect', 'vertAdvY', 'vertOriginX', 'vertOriginY', 'wordSpacing', 'writingMode', 'xHeight']);
+// React-only props that never reach the DOM.
+const REACT_ONLY = new Set(['suppressHydrationWarning', 'suppressContentEditableWarning']);
+
+/**
+ * The attribute a host JSX prop renders as, or null for a React-only prop. Case-sensitive SVG names keep their case;
+ * every other name is lowercased, as the HTML parser does. Namespaced and form-value props the model cannot hold fail.
+ */
+function domAttr(tag: string, name: string): string | null {
+  if (REACT_ONLY.has(name)) return null;
+  if ((tag === 'textarea' || tag === 'select') && (name === 'value' || name === 'defaultValue')) throw new Error(`Unsupported JSX attribute ${name} on <${tag}>; render its content or selected option instead`);
+  if (name.includes(':') || /^(?:xlink|xml|xmlns)[A-Z]/.test(name)) throw new Error(`Unsupported JSX attribute ${name}: namespaced attributes are unsupported`);
+  if (Object.hasOwn(REACT_ATTRS, name)) return REACT_ATTRS[name]!;
+  if (SVG_CASED_ATTRS.has(name)) return name;
+  if (SVG_KEBAB.has(name)) return name.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`);
+  return name.toLowerCase();
+}
 
 class PropValue { constructor(readonly name: string) {} }
 type Value = string | number | boolean | null | undefined | Record<string, unknown> | unknown[] | PropValue;
@@ -715,7 +744,8 @@ function extractOnce(project: SourceProject, entries: RouteEntry[], options: Ext
         for (const [name, literal] of Object.entries(props)) {
           if (literal instanceof PropValue) {
             if (name === 'style' || name === 'className') throw new PropDrivenCss();
-            attrs[name === 'htmlFor' ? 'for' : name] = `{{${literal.name}}}`;
+            const attr = domAttr(tag, name);
+            if (attr !== null) attrs[attr] = `{{${literal.name}}}`;
             continue;
           }
           if (name === 'style') {
@@ -729,7 +759,8 @@ function extractOnce(project: SourceProject, entries: RouteEntry[], options: Ext
             inline.set(id, style);
           } else if (literal !== false && literal !== null && literal !== undefined) {
             if (typeof literal === 'object') throw new Error(`Non-scalar attribute ${name}`);
-            attrs[name === 'className' ? 'class' : name === 'htmlFor' ? 'for' : name] = literal === true ? '' : String(literal);
+            const attr = domAttr(tag, name);
+            if (attr !== null) attrs[attr] = literal === true ? '' : String(literal);
           }
         }
         return [{ id, kind: 'element', tag, attrs, style: { base: {} }, children: nodes }];

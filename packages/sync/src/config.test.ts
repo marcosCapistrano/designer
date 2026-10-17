@@ -27,6 +27,7 @@ describe('tsconfig path aliases', () => {
     expect(fail(tsconfig({ '*': ['./src/*'] }))).toMatchObject({ ok: false, diagnostic: { message: expect.stringContaining('"*"') } });
     expect(fail(tsconfig({ '@/*': ['../../*'] }))).toMatchObject({ ok: false, diagnostic: { message: expect.stringContaining('"@/*"') } });
     expect(fail('{ "compilerOptions": { "paths": [] } }')).toMatchObject({ ok: false, diagnostic: { file: 'site/tsconfig.json' } });
+    expect(fail(tsconfig({ '@/*': ['./src/*'] }, '"baseUrl": "/abs/src",'))).toEqual({ ok: false, diagnostic: { file: 'site/tsconfig.json', message: 'Unsupported absolute tsconfig baseUrl /abs/src in site/tsconfig.json; use a path relative to the tsconfig' } });
     expect(fail('{ not json')).toMatchObject({ ok: false, diagnostic: { file: 'site/tsconfig.json', message: expect.stringContaining('Invalid tsconfig') } });
   });
 });

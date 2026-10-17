@@ -37,6 +37,8 @@ export function projectAliases(configs: Record<string, string>, fromDir: string)
   if (!options || typeof options !== 'object' || Array.isArray(options)) return fail('Invalid tsconfig compilerOptions');
   const { baseUrl, paths } = options as Record<string, unknown>;
   if (baseUrl !== undefined && typeof baseUrl !== 'string') return fail('Invalid tsconfig compilerOptions.baseUrl');
+  // An absolute baseUrl names a machine path, which has no meaning in the source tree; it is not reinterpreted.
+  if (baseUrl !== undefined && (baseUrl.startsWith('/') || /^[A-Za-z]:[\\/]/.test(baseUrl))) return fail(`Unsupported absolute tsconfig baseUrl ${baseUrl} in ${file}; use a path relative to the tsconfig`);
   if (paths === undefined) return { ok: true, aliases: {} };
   if (!paths || typeof paths !== 'object' || Array.isArray(paths)) return fail('Invalid tsconfig compilerOptions.paths');
   const dir = file.split('/').slice(0, -1).join('/');

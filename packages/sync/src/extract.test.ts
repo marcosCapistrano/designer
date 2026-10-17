@@ -127,6 +127,26 @@ describe('static import', () => {
     }
   });
 
+  it('maps React SVG and DOM prop names to the attribute names the browser reads', () => {
+    const page = `export default () => <div><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 22 22" strokeWidth="2" preserveAspectRatio="none"><path strokeLinejoin="round" fillRule="evenodd" clipRule="evenodd" d="M0 0" /><circle cx="1" cy="1" r="1" strokeOpacity="0.5" /></svg><input readOnly tabIndex={0} defaultValue="v" autoComplete="off" /></div>`;
+    const result = extractPages({ files: { 'page.tsx': page } }, [{ route: '/', file: 'page.tsx' }]);
+    expect(result.ok, JSON.stringify(result)).toBe(true);
+    if (!result.ok) return;
+    const exported = exportPage(result.doc, Object.keys(result.doc.pages)[0]!);
+    expect(exported.ok, JSON.stringify(exported)).toBe(true);
+    if (!exported.ok) return;
+    expect(exported.value.html).toContain('stroke-width="2" viewBox="0 0 22 22" xmlns="http://www.w3.org/2000/svg"');
+    expect(exported.value.html).toContain('preserveAspectRatio="none"');
+    expect(exported.value.html).toContain('clip-rule="evenodd" d="M0 0" fill-rule="evenodd" stroke-linejoin="round"');
+    expect(exported.value.html).toContain('stroke-opacity="0.5"');
+    expect(exported.value.html).toContain('autocomplete="off" readonly="" tabindex="0" value="v"');
+    for (const [source, message] of [
+      ['<svg><use xlinkHref="#a" /></svg>', 'Unsupported JSX attribute xlinkHref'],
+      ['<textarea defaultValue="x" />', 'Unsupported JSX attribute defaultValue on <textarea>'],
+      ['<select value="x"><option>x</option></select>', 'Unsupported JSX attribute value on <select>'],
+    ]) expect(extractPages({ files: { 'page.tsx': `export default () => ${source}` } }, [{ route: '/', file: 'page.tsx' }])).toMatchObject({ ok: false, diagnostics: [{ file: 'page.tsx', message: expect.stringContaining(message!) }] });
+  });
+
   it('rejects ambiguous shorthand ordering rather than changing the appearance', () => {
     const result = extractPages({ files: { 'page.tsx': `import './style.css'; export default () => <p>Hi</p>`, 'style.css': 'p { margin-left: 2px; margin: 4px; }' } }, [{ route: '/', file: 'page.tsx' }]);
     expect(result.ok).toBe(false);
