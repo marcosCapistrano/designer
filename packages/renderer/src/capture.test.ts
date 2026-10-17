@@ -413,9 +413,10 @@ describe('frames of any size', () => {
     expect(wide.height).toBe(200);
   });
 
-  test('100vh follows the viewport height', async () => {
-    const result = await cap('<div style="height:100vh"></div>', '', { width: 800, viewportHeight: 700 });
-    expect(result.height).toBe(700);
+  test('vh follows the viewport height', async () => {
+    // 200vh, not 100vh: the page is at least viewportHeight tall anyway, so 100vh could not catch a smaller vh.
+    const result = await cap('<div style="height:200vh"></div>', '', { width: 800, viewportHeight: 700 });
+    expect(result.height).toBe(1400);
     expect(result.width).toBe(800);
   });
 });
