@@ -786,11 +786,14 @@ function extractOnce(project: SourceProject, entries: RouteEntry[], options: Ext
       })(expanded, null);
       applyStyles(expanded, rules, inline, { wrapper: expanded !== first, matched });
       // Selectors saw the real document; the model forbids document tags, so the shell becomes divs.
+      const wasHtml = expanded.tag === 'html';
       for (const node of expanded.tag === 'html' ? [expanded, ...expanded.children] : []) {
         if (node.kind !== 'element' || !SHELL_TAGS.has(node.tag)) continue;
         node.tag = 'div';
         for (const name of DOCUMENT_ATTRS) delete node.attrs[name];
       }
+      // Ruling P: the export moves this root's font and the canvas background onto the real html element.
+      if (wasHtml) expanded.attrs['data-d-shell'] = 'html';
       const styled = new Set<string>();
       function adopt(node: ElementNode, { component, label }: Occurrence): void {
         const styles = new Map<string, { style: NodeStyle; rules: Rule[] }>();

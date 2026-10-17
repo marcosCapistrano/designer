@@ -253,7 +253,9 @@ describe('path aliases and the document shell', () => {
     expect(result.ok, JSON.stringify(result)).toBe(true);
     if (!result.ok) return;
     const root = Object.values(result.doc.pages)[0]!.root;
-    expect(root).toMatchObject({ tag: 'div', attrs: {}, style: { base: { color: 'black' } } });
+    // Ruling P: the html-derived root is marked so the export propagates its font and the canvas background.
+    expect(root).toMatchObject({ tag: 'div', attrs: { 'data-d-shell': 'html' }, style: { base: { color: 'black' } } });
+    expect(Object.keys(root.attrs)).toEqual(['data-d-shell']);
     const body = root.children[0]!;
     expect(body).toMatchObject({ kind: 'element', tag: 'div', attrs: {}, style: { base: { margin: '0', 'font-size': '14px' } } });
     if (body.kind !== 'element') return;
@@ -264,6 +266,29 @@ describe('path aliases and the document shell', () => {
     const exported = exportPage(result.doc, Object.keys(result.doc.pages)[0]!);
     expect(exported.ok).toBe(true);
     if (exported.ok) expect(exported.value.html).not.toMatch(/<html|<body|lang=/);
+    const plain = extractPages({ files: { 'page.tsx': `export default () => <main>x</main>` } }, [{ route: '/', file: 'page.tsx' }]);
+    expect(plain.ok && Object.values(plain.doc.pages)[0]!.root.attrs).toEqual({});
+  });
+
+  it('exports the html root font-size and the body background on the real html element (Ruling P)', () => {
+    const files = {
+      'app/layout.tsx': `import './globals.css'; export default function Layout({ children }: { children: unknown }) { return <html lang="en"><body>{children}</body></html>; }`,
+      'app/globals.css': 'html { font-size: 62.5%; color-scheme: dark } body { background: #111; margin: 0 } .x { font-size: 1.6rem }',
+      'app/page.tsx': `export default () => <p className="x">Hi</p>`,
+    };
+    const result = extractPages({ files }, [{ route: '/', file: 'app/page.tsx', layouts: ['app/layout.tsx'] }]);
+    expect(result.ok, JSON.stringify(result)).toBe(true);
+    if (!result.ok) return;
+    const page = Object.values(result.doc.pages)[0]!;
+    const exported = exportPage(result.doc, page.id);
+    expect(exported.ok).toBe(true);
+    if (!exported.ok) return;
+    const body = page.root.children[0]!, x = body.kind === 'element' ? body.children[0]! : body;
+    expect(exported.value.css.split('\n')).toEqual([
+      'html{background:#111;color-scheme:dark;font-size:62.5%;}',
+      `[data-d-id="${body.id}"]{margin:0;}`,
+      `[data-d-id="${x.id}"]{font-size:1.6rem;}`,
+    ]);
   });
 
   it('rejects html/body anywhere but the outermost two elements of the root layout', () => {
