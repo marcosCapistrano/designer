@@ -287,25 +287,44 @@ function propagateShell(root: ElementOut): Styles {
     if (sources[0] !== undefined) move(sources[0], isBackground);
     return html;
   }
-  // The propagating element changes between devices: each block that changes the canvas restates it in full.
+  // The propagating element changes between devices: each block that changes the canvas restates it in full, and
+  // each div paints its own background only in the blocks where it does not propagate, restated where that changes.
   let before = '';
   devices.forEach((device, i) => {
     const source = sources[i] === root ? rootMaps[i]! : sources[i] === body ? bodyMaps[i]! : {};
-    const canvas = Object.fromEntries(Object.entries(source).filter(([prop]) => isBackground(prop)));
+    const canvas = backgroundOf(source);
     const key = declarations(canvas);
     if (key === before) return;
     if (i > 0 && !Object.hasOwn(canvas, 'background')) html[device]['background'] = 'initial';
     Object.assign(html[device], canvas);
     before = key;
   });
+  for (const [el, maps] of [[root, rootMaps], [body, bodyMaps]] as const) {
+    if (el === undefined) continue;
+    let painted: StyleMap = {};
+    devices.forEach((device, i) => {
+      const own = el.styles[device];
+      for (const prop of Object.keys(own)) if (isBackground(prop)) delete own[prop];
+      const wanted = sources[i] === el ? {} : backgroundOf(maps[i]!);
+      if (declarations(wanted) === declarations(painted)) return;
+      if (hasEntries(painted) && !Object.hasOwn(wanted, 'background')) own['background'] = 'initial';
+      Object.assign(own, wanted);
+      painted = wanted;
+    });
+  }
   return html;
+}
+
+function backgroundOf(map: StyleMap): StyleMap {
+  return Object.fromEntries(Object.entries(map).filter(([prop]) => isBackground(prop)));
 }
 
 function isBackground(prop: string): boolean {
   return prop === 'background' || prop.startsWith('background-');
 }
 
-const NO_PAINT = /^(?:transparent|none|initial|unset|revert|revert-layer)$/i;
+// Keywords and zero-alpha colors that paint nothing. A var() is taken to paint: its value is not resolved here.
+const NO_PAINT = /^(?:transparent|none|initial|unset|revert|revert-layer|#[0-9a-f]{3}0|#[0-9a-f]{6}00|(?:rgb|hsl)a?\((?:(?:[^,/)]*,){3}|[^,/)]*\/)\s*(?:0+(?:\.0*)?|\.0+)%?\s*\))$/i;
 
 // Whether a style map gives the element a background the browser would propagate to the canvas.
 function paintsBackground(map: StyleMap): boolean {

@@ -374,11 +374,22 @@ describe('document shell propagation', () => {
 
   test('copies the canvas background per device when the propagating element differs between devices', () => {
     const { css } = exportOk(shellDoc({ base: {}, tablet: { 'background-color': 'navy' } }, { base: { 'background-color': 'red' } }));
+    // The propagated background is painted by the canvas only, never again by its div (M4).
     expect(css.split('\n')).toEqual([
       'html{background-color:red;}',
-      '[data-d-id="b"]{background-color:red;}',
-      '@media (max-width: 1023px){html{background:initial;background-color:navy;}[data-d-id="h"]{background-color:navy;}}',
+      '@media (max-width: 1023px){html{background:initial;background-color:navy;}[data-d-id="b"]{background-color:red;}}',
     ]);
+  });
+
+  test('treats zero-alpha background colors as not painting', () => {
+    for (const clear of ['rgba(0, 0, 0, 0)', '#0000', '#ff000000', 'rgb(0 0 0 / 0%)', 'hsla(0, 0%, 0%, 0.0)']) {
+      const { css } = exportOk(shellDoc({ base: { 'background-color': clear } }, { base: { background: 'red' } }));
+      expect(css.split('\n')).toEqual(['html{background:red;}', `[data-d-id="h"]{background-color:${clear};}`]);
+    }
+    for (const opaque of ['rgb(10, 20, 0)', 'rgba(1, 2, 3, 0.5)', 'rgb(0 0 0)', '#000']) {
+      const { css } = exportOk(shellDoc({ base: { 'background-color': opaque } }, { base: { background: 'red' } }));
+      expect(css.split('\n')).toEqual([`html{background-color:${opaque};}`, '[data-d-id="b"]{background:red;}']);
+    }
   });
 
   test('a page root without the marker exports no html rule', () => {
