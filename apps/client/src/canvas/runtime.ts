@@ -41,6 +41,10 @@ export interface CanvasRuntimeOptions {
   onFrameMenu?: (frameId: string, screen: Point) => void;
   /** Whether frames can be moved, resized or opened in the menu (default true); previews turn it off. */
   framesEditable?: boolean;
+  /** A double tap, with what it selected (see ControllerDeps). */
+  onDoubleTap?: (s: NodeSelection) => void;
+  /** In component mode, a tap outside the instance being edited. */
+  onOutside?: () => void;
   /** The manifest or frames error to show, or null to clear it. */
   onError: (message: string | null) => void;
   /** Passed through to the TileLoader (tests inject a decoder). */
@@ -104,6 +108,8 @@ export function createCanvasRuntime(opts: CanvasRuntimeOptions): CanvasRuntime {
     onFramesChange: (frames) => framesChanged(frames),
     onFrameMenu: opts.onFrameMenu,
     framesEditable: opts.framesEditable,
+    onDoubleTap: opts.onDoubleTap,
+    onOutside: opts.onOutside,
   });
   if (opts.initialCamera) controller.setCamera(opts.initialCamera);
 

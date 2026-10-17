@@ -22,6 +22,7 @@ import type { Camera, Insets, Point, Rect, Size } from './geom.js';
 import { dragTo, hitHandle, settleFrame } from './frame-drag.js';
 import type { FrameDrag } from './frame-drag.js';
 import { boxSelect, hitTest, toPagePoint } from './hit.js';
+import { boxOf, scopedId } from './scope.js';
 import type { Frame } from './layout.js';
 import { frameAt, layoutBounds, layoutFrames } from './layout.js';
 import type { TileImage, TileWant } from './loader.js';
@@ -58,6 +59,10 @@ export interface ControllerDeps {
   onFrameMenu?: (frameId: string, screen: Point) => void;
   /** Whether frames can be moved, resized or opened in the menu (default true). Off, handles are neither drawn nor hit. */
   framesEditable?: boolean;
+  /** A second tap within DOUBLE_TAP_MS and DOUBLE_TAP_SLOP of the first, with what it selected. */
+  onDoubleTap?: (s: NodeSelection) => void;
+  /** In component mode, a tap or box select outside the instance being edited. */
+  onOutside?: () => void;
 }
 
 /** Where the painted layers are shown: translate by (x, y) CSS px, then scale about the layer origin. */
@@ -89,6 +94,10 @@ export const PREVIEW_MAX_RATIO = 2;
 export const PREFETCH_MARGIN = 0.25;
 
 const FIT_PADDING = 40;
+export const DOUBLE_TAP_MS = 350;
+export const DOUBLE_TAP_SLOP = 24;
+/** Space kept around a layer panned into view. */
+const REVEAL_MARGIN = 40;
 
 interface IndexEntry {
   frame: Frame;
@@ -138,7 +147,7 @@ function buildIndex(frames: readonly Frame[]): Map<string, IndexEntry[]> {
 }
 
 export class CanvasController {
-  private readonly deps: ControllerDeps;
+  private deps: ControllerDeps;
   private readonly painter: BasePainter;
   private readonly gestures: GestureTracker;
 
@@ -161,6 +170,10 @@ export class CanvasController {
   private scheduled = false;
   private overlayDirty = false;
   private selected: FrameSelection | null = null;
+  /** Component mode: the instance path being edited ('' outside) and its page. */
+  private scope = '';
+  private scopePage: string | null = null;
+  private lastTap: { x: number; y: number; t: number } | null = null;
   private marquee: Rect | null = null;
   /** A move or resize of a frame by its handle; its pointer never reaches the gesture tracker. */
   private drag: FrameDrag | null = null;
@@ -239,6 +252,11 @@ export class CanvasController {
     this.cameraChanged();
   }
 
+  /** The floating chrome changed (a panel docked or closed): later fits and reveals keep clear of it. */
+  setInsets(insets: Insets): void {
+    this.deps = { ...this.deps, insets };
+  }
+
   /** Fits every frame into the view. Does nothing while there are no frames. */
   fitAll(): void {
     if (this.layout.length === 0 || this.viewSize.w === 0) return;
@@ -286,11 +304,13 @@ export class CanvasController {
   /** `x`, `y` are screen CSS px. */
   async tap(x: number, y: number): Promise<void> {
     const token = ++this.selectToken;
+    const at = this.deps.now();
     const world = screenToWorld(this.cam, { x, y });
     const frame = frameAt(this.layout, world);
     const hash = frame ? renderHash(frame) : null;
     if (!frame || hash === null) {
       this.select(null);
+      this.outside();
       return;
     }
     const map = await this.hitMapOf(hash);
@@ -299,8 +319,84 @@ export class CanvasController {
       this.select(null);
       return;
     }
-    const id = hitTest(map, toPagePoint(frame, world));
-    this.select(id === null ? null : { frameId: frame.frameId, nodeIds: [id] });
+    const hit = hitTest(map, toPagePoint(frame, world));
+    const id = hit === null ? null : scopedId(hit, this.scope);
+    if (id === null) {
+      this.select(null);
+      this.outside();
+      return;
+    }
+    this.select({ frameId: frame.frameId, nodeIds: [id] });
+    const last = this.lastTap;
+    if (last !== null && at - last.t <= DOUBLE_TAP_MS && Math.hypot(x - last.x, y - last.y) <= DOUBLE_TAP_SLOP) {
+      this.lastTap = null;
+      const reported = this.reported(this.selected);
+      if (reported !== null) this.deps.onDoubleTap?.(reported);
+    } else {
+      this.lastTap = { x, y, t: at };
+    }
+  }
+
+  /** In component mode, a selection outside the instance: the app steps out. */
+  private outside(): void {
+    this.lastTap = null;
+    if (this.scope !== '') this.deps.onOutside?.();
+  }
+
+  /** Enters (a non-empty instance path on `pageId`) or leaves ('') component mode for later taps and box selects. */
+  setScope(prefix: string, pageId: string | null = null): void {
+    this.scope = prefix;
+    this.scopePage = prefix === '' ? null : pageId;
+    this.lastTap = null;
+    this.overlayDirty = true;
+    // Dimming needs the scope page's hit maps.
+    for (const f of this.layout) {
+      const hash = renderHash(f);
+      if (prefix !== '' && f.pageId === pageId && hash !== null && !this.deps.hitMaps.get(hash)) {
+        void this.hitMapOf(hash).then(() => { this.overlayDirty = true; this.schedule(); });
+      }
+    }
+    this.schedule();
+  }
+
+  /** The selected frame's hit map, or null with no selection or an unloaded map. */
+  selectionBoxes(): readonly HitBox[] | null {
+    const frame = this.selected ? this.findFrame(this.selected.frameId) : undefined;
+    const hash = frame ? renderHash(frame) : null;
+    return hash === null ? null : (this.deps.hitMaps.get(hash) ?? null);
+  }
+
+  /**
+   * Selects layers by id on `pageId`: in the selected frame when it shows that page, else the page's first frame
+   * with a render. Pans their box into view when it is off-screen; a layer without a box selects without panning.
+   */
+  async selectNodes(pageId: string, nodeIds: string[]): Promise<void> {
+    const token = ++this.selectToken;
+    const current = this.selected ? this.findFrame(this.selected.frameId) : undefined;
+    const frame = current?.pageId === pageId && renderHash(current) !== null ? current : this.layout.find((f) => f.pageId === pageId && renderHash(f) !== null);
+    if (!frame) return;
+    this.select({ frameId: frame.frameId, nodeIds });
+    const map = await this.hitMapOf(renderHash(frame)!);
+    if (token !== this.selectToken || map === null) return;
+    const boxes = nodeIds.map((id) => boxOf(map, id)).filter((b): b is HitBox => b !== null);
+    if (boxes.length === 0) return;
+    const x0 = Math.min(...boxes.map((b) => b.x)), y0 = Math.min(...boxes.map((b) => b.y));
+    const x1 = Math.max(...boxes.map((b) => b.x + b.w)), y1 = Math.max(...boxes.map((b) => b.y + b.h));
+    this.reveal({ x: frame.x + x0, y: frame.y + y0, w: x1 - x0, h: y1 - y0 });
+  }
+
+  /** Pans, at the current scale, so `r` (world) is in the view clear of the chrome; nothing when it already is. */
+  private reveal(r: Rect): void {
+    const insets = this.deps.insets ?? NO_INSETS;
+    const s = this.cam.scale;
+    const left = this.cam.x + insets.left / s, top = this.cam.y + insets.top / s;
+    const right = this.cam.x + (this.viewSize.w - insets.right) / s, bottom = this.cam.y + (this.viewSize.h - insets.bottom) / s;
+    if (r.x >= left && r.y >= top && r.x + r.w <= right && r.y + r.h <= bottom) return;
+    const m = REVEAL_MARGIN / s;
+    const dx = r.x < left ? r.x - m - left : r.x + r.w > right ? Math.min(r.x + r.w + m - right, r.x - m - left) : 0;
+    const dy = r.y < top ? r.y - m - top : r.y + r.h > bottom ? Math.min(r.y + r.h + m - bottom, r.y - m - top) : 0;
+    this.cam = { ...this.cam, x: this.cam.x + dx, y: this.cam.y + dy };
+    this.cameraChanged();
   }
 
   /** `a` and `b` are screen CSS px corners. */
@@ -322,7 +418,7 @@ export class CanvasController {
       return;
     }
     const pageRect = { x: clipped.x - frame.x, y: clipped.y - frame.y, w: clipped.w, h: clipped.h };
-    const nodeIds = boxSelect(map, pageRect);
+    const nodeIds = [...new Set(boxSelect(map, pageRect).map((id) => scopedId(id, this.scope)).filter((id): id is string => id !== null))];
     this.select(nodeIds.length > 0 ? { frameId: frame.frameId, nodeIds } : null);
   }
 
@@ -376,13 +472,14 @@ export class CanvasController {
       }
     }
 
-    const overlayShown = this.selected !== null || this.marquee !== null;
+    const overlayShown = this.selected !== null || this.marquee !== null || this.scope !== '';
     if (this.overlayDirty || (stats.mode !== 'none' && overlayShown)) {
       paintOverlay(this.deps.overlay, {
         camera: snapCamera(this.cam, this.dpr),
         dpr: this.dpr,
         selection: this.highlight(),
         marquee: this.marquee,
+        dim: this.dimming(),
       });
       this.overlayDirty = false;
     }
@@ -531,8 +628,19 @@ export class CanvasController {
     const hash = frame ? renderHash(frame) : null;
     if (!frame || hash === null) return null;
     const map = this.deps.hitMaps.get(hash);
-    const ids = new Set(sel.nodeIds);
-    return { frame, boxes: map ? map.filter((b) => ids.has(b.nodeId)) : [] };
+    return { frame, boxes: map ? sel.nodeIds.map((id) => boxOf(map, id)).filter((b): b is HitBox => b !== null) : [] };
+  }
+
+  /** Component mode: every frame dimmed except the scope instance's box in the frames of its page. */
+  private dimming(): { rect: Rect; keep: Rect | null }[] {
+    if (this.scope === '') return [];
+    return this.layout.map((f) => {
+      const rect = { x: f.x, y: f.y, w: f.w, h: f.h };
+      const hash = f.pageId === this.scopePage ? renderHash(f) : null;
+      const map = hash === null ? undefined : this.deps.hitMaps.get(hash);
+      const box = map ? boxOf(map, this.scope) : null;
+      return { rect, keep: box ? { x: f.x + box.x, y: f.y + box.y, w: box.w, h: box.h } : null };
+    });
   }
 
   /** Memory first, then a load. A failed load is null, which callers treat as no selection. */

@@ -1,10 +1,10 @@
 // The canvas component: owns the two paint layers, wires DOM events into the
 // controller, and renders the tool toolbar. Source, frames, framesEditable, cache,
-// onSelect and debug are read once at mount; the app passes stable values.
+// onSelect, onDoubleTap, onOutside and debug are read once at mount; the app passes stable values. scope and insets follow their props.
 
 import { useEffect, useRef, useState } from 'preact/hooks';
 import type { JSX } from 'preact';
-import type { CanvasFrame, NodeSelection } from '@hub/protocol';
+import type { CanvasFrame, HitBox, NodeSelection } from '@hub/protocol';
 import type { CanvasController, ControllerStats } from './controller.js';
 import type { BlobCache } from './cache.js';
 import type { FrameStore } from './frames.js';
@@ -46,7 +46,22 @@ export interface CanvasViewProps {
   insets?: Insets;
   /** Set on mount to a function that fits every frame into view; cleared on unmount. */
   fitRef?: { current: (() => void) | null };
+  /** Set on mount to the canvas's selection and scope controls; cleared on unmount. */
+  handleRef?: { current: CanvasHandle | null };
+  /** Component mode: the instance path being edited on `pageId`, or null outside it. */
+  scope?: { prefix: string; pageId: string } | null;
+  /** A double tap, with what it selected. Read at mount. */
+  onDoubleTap?: (s: NodeSelection) => void;
+  /** In component mode, a tap outside the instance being edited. Read at mount. */
+  onOutside?: () => void;
   debug?: boolean;
+}
+
+/** What the app drives on the canvas besides its props. */
+export interface CanvasHandle {
+  selectNodes(pageId: string, nodeIds: string[]): Promise<void>;
+  /** The selected frame's hit map, or null. */
+  selectionBoxes(): readonly HitBox[] | null;
 }
 
 /** Test and debug hooks, exposed on `window.__hubCanvas` only when `debug` is set. */
@@ -86,7 +101,7 @@ function menuPanelStyle(at: { x: number; y: number }, root: HTMLElement | null):
   return `position:absolute;left:${left}px;top:${top}px;width:${width}px;max-height:${h - top - 8}px;overflow-y:auto;box-sizing:border-box;background:var(--surface);border:1px solid var(--border);border-radius:10px;box-shadow:var(--shadow);touch-action:pan-y`;
 }
 
-export function CanvasView({ source, cache, frames, framesEditable = true, onSelect, onCamera, initialCamera, insets, fitRef, debug = false }: CanvasViewProps): JSX.Element {
+export function CanvasView({ source, cache, frames, framesEditable = true, onSelect, onCamera, initialCamera, insets, fitRef, handleRef, scope = null, onDoubleTap, onOutside, debug = false }: CanvasViewProps): JSX.Element {
   const rootRef = useRef<HTMLDivElement>(null);
   const layersRef = useRef<HTMLDivElement>(null);
   const baseRef = useRef<HTMLCanvasElement>(null);
@@ -143,11 +158,14 @@ export function CanvasView({ source, cache, frames, framesEditable = true, onSel
       onError: setError,
       onFrameMenu: (frameId, p) => setMenu({ frameId, x: p.x, y: p.y }),
       framesEditable,
+      onDoubleTap,
+      onOutside,
     });
     const { controller, loader } = runtime;
     runtimeRef.current = runtime;
     controllerRef.current = controller;
     if (fitRef) fitRef.current = () => controller.fitAll();
+    if (handleRef) handleRef.current = { selectNodes: (pageId, ids) => controller.selectNodes(pageId, ids), selectionBoxes: () => controller.selectionBoxes() };
 
     const sizeToRoot = (): void => {
       controller.resize(root.clientWidth, root.clientHeight, devicePixelRatio || 1);
@@ -233,10 +251,19 @@ export function CanvasView({ source, cache, frames, framesEditable = true, onSel
       observer.disconnect();
       controllerRef.current = null;
       if (fitRef) fitRef.current = null;
+      if (handleRef) handleRef.current = null;
       runtimeRef.current = null;
       if (debug) delete window.__hubCanvas;
     };
   }, []);
+
+  useEffect(() => {
+    controllerRef.current?.setScope(scope?.prefix ?? '', scope?.pageId ?? null);
+  }, [scope?.prefix, scope?.pageId]);
+
+  useEffect(() => {
+    if (insets) controllerRef.current?.setInsets(insets);
+  }, [insets?.top, insets?.right, insets?.bottom, insets?.left]);
 
   useEffect(() => {
     if (menu === null) return;
