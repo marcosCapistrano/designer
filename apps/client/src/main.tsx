@@ -1,3 +1,5 @@
+import './shell/tokens.css';
+import './ui/ui.css';
 import './shell/shell.css';
 import { render } from 'preact';
 import { App } from './shell/App.js';
