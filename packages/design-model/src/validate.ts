@@ -36,7 +36,7 @@ export function validateDoc(doc: DesignDoc): string | null {
     const keyProblem = validatePageId(key);
     if (keyProblem !== null) return `${where}: ${keyProblem}`;
     if (page.id !== key) return `${where}: page id "${label(page.id)}" does not match its key`;
-    const problem = nodeIssue(doc, where, page.root, 1, scan);
+    const problem = nodeIssue(doc, where, page.root, 1, scan, true);
     if (problem !== null) return problem;
   }
   for (const [key, def] of sortedEntries(doc.components)) {
@@ -164,6 +164,7 @@ function nodeIssue(
   node: DesignNode,
   depth: number,
   scan: Scan,
+  pageRoot = false,
 ): string | null {
   const { ids } = scan;
   if (depth > MAX_DEPTH) return `${where}: Node tree deeper than ${MAX_DEPTH} levels`;
@@ -174,7 +175,7 @@ function nodeIssue(
   ids.add(node.id);
 
   if (node.kind === 'text') return null;
-  const problem = node.kind === 'instance' ? instanceIssue(doc, node, scan) : elementIssue(node);
+  const problem = node.kind === 'instance' ? instanceIssue(doc, node, scan) : elementIssue(node, pageRoot);
   if (problem !== null) return `${here}: ${problem}`;
   if (node.kind === 'element') {
     for (const child of node.children) {
@@ -186,11 +187,11 @@ function nodeIssue(
 }
 
 // The checks insertNode applies to an element, on a node that is already in the doc.
-function elementIssue(node: ElementNode): string | null {
+function elementIssue(node: ElementNode, pageRoot: boolean): string | null {
   const tagProblem = validateTag(node.tag);
   if (tagProblem !== null) return tagProblem;
   for (const [name, value] of Object.entries(node.attrs)) {
-    const problem = validateAttrName(name) ?? validateAttrValue(name, value);
+    const problem = validateAttrName(name, pageRoot) ?? validateAttrValue(name, value);
     if (problem !== null) return problem;
   }
   const styleProblem = styleIssue(node.style);

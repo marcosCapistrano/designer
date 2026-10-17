@@ -147,6 +147,14 @@ describe('setAttr', () => {
     expect(rejected(sampleDoc(), { op: 'setAttr', node: 'n3', name, value: '1' })).toContain('is not allowed');
   });
 
+  test('sets data-d-shell only on a page root, and only to html', () => {
+    const doc = sampleDoc();
+    const root = Object.values(doc.pages)[0]!.root.id;
+    expect(attrsOf(applied(doc, { op: 'setAttr', node: root, name: 'data-d-shell', value: 'html' }), root)).toEqual({ 'data-d-shell': 'html' });
+    expect(rejected(doc, { op: 'setAttr', node: root, name: 'data-d-shell', value: 'body' })).toBe('Attribute data-d-shell must be "html"');
+    expect(rejected(doc, { op: 'setAttr', node: 'n3', name: 'data-d-shell', value: 'html' })).toBe('Attribute "data-d-shell" is only allowed on a page root');
+  });
+
   test('rejects an event handler attribute', () => {
     const error = rejected(sampleDoc(), { op: 'setAttr', node: 'n3', name: 'onclick', value: 'alert(1)' });
     expect(error).toBe('Attribute "onclick" is not allowed');

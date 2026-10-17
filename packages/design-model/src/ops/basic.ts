@@ -103,7 +103,8 @@ export const basicHandlers: HandlerMap = {
       const found = lookupNode(doc, op.node);
       if (!found.ok) return found.error;
       if (found.hit.node.kind !== 'element') return `Node ${op.node} is not an element`;
-      const nameProblem = validateAttrName(op.name);
+      const { container, node } = found.hit;
+      const nameProblem = validateAttrName(op.name, container.kind === 'page' && ownValue(doc.pages, container.key)?.root === node);
       if (nameProblem !== null) return nameProblem;
       if (op.value === null) return null;
       // Inside a component, a placeholder in the value is filled in by every instance of it.

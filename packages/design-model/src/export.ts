@@ -1,4 +1,4 @@
-import { ownValue } from './ops/util.js';
+import { ownValue, SHELL_ATTR } from './ops/util.js';
 import { resolveProps, substituteProps } from './props.js';
 import { validateAttrValue, VOID_TAGS } from './rules.js';
 import type {
@@ -96,9 +96,10 @@ function buildPage(doc: DesignDoc, pageId: string): Result<{ html: string; css: 
     budget: { pageId, used: 0 },
   });
   if (!root.ok) return root;
+  const shell = page.root.attrs[SHELL_ATTR] === 'html';
   return {
     ok: true,
-    value: { html: renderHtml(root.value), css: renderCss(doc, root.value) },
+    value: { html: renderHtml(root.value), css: renderCss(doc, root.value, shell) },
   };
 }
 
@@ -234,23 +235,84 @@ function renderHtml(out: Out): string {
   return VOID_TAGS.has(out.tag) ? `${open}${inner}` : `${open}${inner}</${out.tag}>`;
 }
 
-// Blocks are joined with '\n' and nothing else.
-function renderCss(doc: DesignDoc, root: ElementOut): string {
+// Blocks are joined with '\n' and nothing else. `shell` marks a page root that stands for the source html element.
+function renderCss(doc: DesignDoc, root: ElementOut, shell: boolean): string {
   const blocks: string[] = [];
   const tokens = tokenDeclarations(doc);
   if (tokens.length > 0) blocks.push(`:root{${tokens.join('')}}`);
 
+  const html = shell ? propagateShell(root) : null;
   const elements = preorderElements(root);
-  for (const el of elements) {
-    if (hasEntries(el.styles.base)) blocks.push(ruleFor(el.id, el.styles.base));
-  }
+  const base = elements.filter((el) => hasEntries(el.styles.base)).map((el) => ruleFor(el.id, el.styles.base));
+  if (html !== null && hasEntries(html.base)) base.unshift(`html{${declarations(html.base)}}`);
+  blocks.push(...base);
   for (const [device, query] of BREAKPOINTS) {
     const rules = elements
       .filter((el) => hasEntries(el.styles[device]))
       .map((el) => ruleFor(el.id, el.styles[device]));
+    if (html !== null && hasEntries(html[device])) rules.unshift(`html{${declarations(html[device])}}`);
     if (rules.length > 0) blocks.push(`@media ${query}{${rules.join('')}}`);
   }
   return blocks.join('\n');
+}
+
+// Ruling P: the page root stands for the source html element and its first element child for body, but both are
+// exported as divs. What the browser takes from them for the whole document is moved to the real html element: the
+// root's font and color-scheme (so rem and relative font sizes resolve as in the source), and the canvas background,
+// which is html's background when it paints, else body's. Returns the declarations for html, per device block.
+function propagateShell(root: ElementOut): Styles {
+  const html: Styles = { base: {}, tablet: {}, mobile: {} };
+  const devices = ['base', 'tablet', 'mobile'] as const;
+  const move = (from: ElementOut, test: (prop: string) => boolean) => {
+    for (const device of devices) {
+      for (const [prop, value] of Object.entries(from.styles[device])) {
+        if (!test(prop)) continue;
+        html[device][prop] = value;
+        delete from.styles[device][prop];
+      }
+    }
+  };
+  move(root, (prop) => prop === 'color-scheme' || prop === 'font' || prop.startsWith('font-'));
+  const body = root.children.find((child): child is ElementOut => child.kind === 'element');
+  // Effective maps per device: a device block cascades over the blocks before it.
+  const effective = (el: ElementOut | undefined) => {
+    const out: StyleMap[] = [];
+    let acc: StyleMap = {};
+    for (const device of devices) { acc = { ...acc, ...(el?.styles[device] ?? {}) }; out.push(acc); }
+    return out;
+  };
+  const rootMaps = effective(root), bodyMaps = effective(body);
+  const sources = devices.map((_, i) => paintsBackground(rootMaps[i]!) ? root : bodyMaps[i] && paintsBackground(bodyMaps[i]!) ? body : undefined);
+  if (sources.every((source) => source === sources[0])) {
+    if (sources[0] !== undefined) move(sources[0], isBackground);
+    return html;
+  }
+  // The propagating element changes between devices: each block that changes the canvas restates it in full.
+  let before = '';
+  devices.forEach((device, i) => {
+    const source = sources[i] === root ? rootMaps[i]! : sources[i] === body ? bodyMaps[i]! : {};
+    const canvas = Object.fromEntries(Object.entries(source).filter(([prop]) => isBackground(prop)));
+    const key = declarations(canvas);
+    if (key === before) return;
+    if (i > 0 && !Object.hasOwn(canvas, 'background')) html[device]['background'] = 'initial';
+    Object.assign(html[device], canvas);
+    before = key;
+  });
+  return html;
+}
+
+function isBackground(prop: string): boolean {
+  return prop === 'background' || prop.startsWith('background-');
+}
+
+const NO_PAINT = /^(?:transparent|none|initial|unset|revert|revert-layer)$/i;
+
+// Whether a style map gives the element a background the browser would propagate to the canvas.
+function paintsBackground(map: StyleMap): boolean {
+  return ['background', 'background-color', 'background-image'].some((prop) => {
+    const value = ownValue(map, prop);
+    return value !== undefined && !NO_PAINT.test(value.trim());
+  });
 }
 
 function tokenDeclarations(doc: DesignDoc): string[] {
@@ -272,9 +334,12 @@ function hasEntries(map: StyleMap): boolean {
   return Object.keys(map).length > 0;
 }
 
+function declarations(map: StyleMap): string {
+  return sortedEntries(map).map(([prop, value]) => `${prop}:${value};`).join('');
+}
+
 function ruleFor(id: string, map: StyleMap): string {
-  const decls = sortedEntries(map).map(([prop, value]) => `${prop}:${value};`).join('');
-  return `[data-d-id="${cssString(id)}"]{${decls}}`;
+  return `[data-d-id="${cssString(id)}"]{${declarations(map)}}`;
 }
 
 // Escapes the characters that would end a quoted CSS string or the <style> element around it.

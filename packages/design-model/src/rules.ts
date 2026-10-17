@@ -71,6 +71,7 @@ export function validateAttrValue(name: string, value: string): string | null {
   if (name === 'srcdoc') return 'Attribute srcdoc is not allowed';
   // Op logs are decoded without a shape check, so a value can arrive here as another type.
   if (typeof value !== 'string') return `Attribute ${name} must have a string value`;
+  if (name === 'data-d-shell' && value !== 'html') return 'Attribute data-d-shell must be "html"';
   const normalized = value.replace(IGNORED_IN_URL, '').toLowerCase();
   if (UNSAFE_URL_PREFIXES.some((prefix) => normalized.startsWith(prefix))) {
     return `Unsafe URL in attribute ${name}`;

@@ -28,10 +28,14 @@ export function requireElement(draft: DesignDoc, id: string): ElementNode {
 const ATTR_NAME_PATTERN = /^[a-z][a-z0-9-]*$/;
 const RESERVED_ATTRS: ReadonlySet<string> = new Set(['style', 'class', 'data-d-id']);
 
-// Returns the reason an attribute name is not allowed, or null.
-export function validateAttrName(name: string): string | null {
+// Ruling P: marks a page root that stands for the source document's html element (see export.ts).
+export const SHELL_ATTR = 'data-d-shell';
+
+// Returns the reason an attribute name is not allowed, or null. `pageRoot` is true for the root element of a page.
+export function validateAttrName(name: string, pageRoot = false): string | null {
   // Op logs are decoded without a shape check, so a name can arrive here as another type.
   if (typeof name !== 'string') return 'Attribute name must be a string';
+  if (name === SHELL_ATTR && !pageRoot) return `Attribute "${SHELL_ATTR}" is only allowed on a page root`;
   if ((!ATTR_NAME_PATTERN.test(name) && !SVG_CASED_ATTRS.has(name)) || RESERVED_ATTRS.has(name) || name.startsWith('on')) {
     return `Attribute "${name}" is not allowed`;
   }

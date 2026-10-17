@@ -51,7 +51,7 @@ export const pageHandlers: HandlerMap = {
       const header = pageHeaderProblem(doc, op.page.id, op.page.route);
       if (header !== null) return header;
       if (op.page.root.kind !== 'element') return `Page ${op.page.id} root must be an element`;
-      return validateSubtree(doc, op.page.root);
+      return validateSubtree(doc, op.page.root, { pageRoot: true });
     },
     mutate(draft, op) {
       draft.pages[op.page.id] = structuredClone(op.page);
@@ -76,7 +76,7 @@ export const pageHandlers: HandlerMap = {
       }
       const copy = remapCopy(source.root, op.idMap);
       // The copy is a page root, so it is level 1.
-      return validateSubtree(doc, copy) ?? depthError(1, heightOf(copy));
+      return validateSubtree(doc, copy, { pageRoot: true }) ?? depthError(1, heightOf(copy));
     },
     mutate(draft, op) {
       const source = requirePage(draft, op.source);

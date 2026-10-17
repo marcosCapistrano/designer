@@ -344,3 +344,46 @@ function must<T>(value: T | undefined, what: string): T {
   if (value === undefined) throw new Error(`fixture is missing ${what}`);
   return value;
 }
+
+// Ruling P: a page root marked data-d-shell="html" stands for the source document's html element.
+describe('document shell propagation', () => {
+  function shellDoc(rootStyle: ElementNode['style'], bodyStyle: ElementNode['style']): DesignDoc {
+    const body = { ...el('b', 'div', [el('x', 'p', [txt('t', 'Hi')])]), style: bodyStyle };
+    return docWith({ ...el('h', 'div', [body], { 'data-d-shell': 'html' }), style: rootStyle });
+  }
+
+  test('moves the root font and color-scheme to the real html element, so rem resolves as in the browser', () => {
+    const { css } = exportOk(shellDoc(
+      { base: { 'color-scheme': 'dark', color: 'white', 'font-size': '62.5%' }, mobile: { 'font-size': '50%' } },
+      { base: { margin: '0' } },
+    ));
+    expect(css).toBe([
+      'html{color-scheme:dark;font-size:62.5%;}',
+      '[data-d-id="h"]{color:white;}',
+      '[data-d-id="b"]{margin:0;}',
+      '@media (max-width: 599px){html{font-size:50%;}}',
+    ].join('\n'));
+  });
+
+  test('paints the canvas with the html background when set, else the body background', () => {
+    const own = exportOk(shellDoc({ base: { 'background-color': 'navy' } }, { base: { background: 'red' } })).css;
+    expect(own.split('\n')).toEqual(['html{background-color:navy;}', '[data-d-id="b"]{background:red;}']);
+    const body = exportOk(shellDoc({ base: { 'background-color': 'transparent' } }, { base: { background: 'red', padding: '8px' } })).css;
+    expect(body.split('\n')).toEqual(['html{background:red;}', '[data-d-id="h"]{background-color:transparent;}', '[data-d-id="b"]{padding:8px;}']);
+  });
+
+  test('copies the canvas background per device when the propagating element differs between devices', () => {
+    const { css } = exportOk(shellDoc({ base: {}, tablet: { 'background-color': 'navy' } }, { base: { 'background-color': 'red' } }));
+    expect(css.split('\n')).toEqual([
+      'html{background-color:red;}',
+      '[data-d-id="b"]{background-color:red;}',
+      '@media (max-width: 1023px){html{background:initial;background-color:navy;}[data-d-id="h"]{background-color:navy;}}',
+    ]);
+  });
+
+  test('a page root without the marker exports no html rule', () => {
+    const doc = shellDoc({ base: { 'font-size': '62.5%' } }, { base: {} });
+    delete doc.pages['home']!.root.attrs['data-d-shell'];
+    expect(exportOk(doc).css).toBe('[data-d-id="h"]{font-size:62.5%;}');
+  });
+});

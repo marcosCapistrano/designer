@@ -379,4 +379,17 @@ describe('validateDoc on values that are not docs', () => {
     patch(doc);
     expect(validateDoc(doc as unknown as DesignDoc)).toBe(message);
   });
+
+  test('allows data-d-shell="html" only on a page root', () => {
+    const doc = mutableDoc();
+    const page = Object.values(doc.pages)[0]!;
+    page.root.attrs['data-d-shell'] = 'html';
+    expect(validateDoc(doc)).toBeNull();
+    page.root.attrs['data-d-shell'] = 'body';
+    expect(validateDoc(doc)).toContain('Attribute data-d-shell must be "html"');
+    delete page.root.attrs['data-d-shell'];
+    const child = page.root.children.find((node) => node.kind === 'element')!;
+    if (child.kind === 'element') child.attrs['data-d-shell'] = 'html';
+    expect(validateDoc(doc)).toContain('Attribute "data-d-shell" is only allowed on a page root');
+  });
 });
