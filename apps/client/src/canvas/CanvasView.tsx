@@ -4,15 +4,17 @@
 
 import { useEffect, useRef, useState } from 'preact/hooks';
 import type { JSX } from 'preact';
-import type { NodeSelection } from '@hub/protocol';
+import type { CanvasFrame, NodeSelection } from '@hub/protocol';
 import type { CanvasController, ControllerStats } from './controller.js';
 import type { BlobCache } from './cache.js';
 import type { FrameStore } from './frames.js';
 import type { Camera } from './geom.js';
+import { FrameMenu } from './FrameMenu.js';
 import type { PointerIn, Tool, WheelIn } from './gestures.js';
 import type { Frame } from './layout.js';
 import { COLORS } from './painter.js';
 import type { LoaderStats } from './loader.js';
+import type { CanvasRuntime } from './runtime.js';
 import { createCanvasRuntime } from './runtime.js';
 import type { TileSource } from './source.js';
 
@@ -64,6 +66,18 @@ function buttonStyle(pressed: boolean): string {
     : 'font:inherit;min-height:44px;padding:6px 10px;border:1px solid #dadce0;border-radius:6px;background:#fff;color:#202124;cursor:pointer';
 }
 
+const MENU_WIDTH = 340;
+
+/** The menu's box: at the tap, moved back inside the canvas, scrolling when it is taller than the canvas. */
+function menuPanelStyle(at: { x: number; y: number }, root: HTMLElement | null): string {
+  const w = root?.clientWidth ?? 800;
+  const h = root?.clientHeight ?? 600;
+  const width = Math.min(MENU_WIDTH, w - 16);
+  const left = Math.max(8, Math.min(at.x, w - width - 8));
+  const top = Math.max(8, Math.min(at.y, h - 120));
+  return `position:absolute;left:${left}px;top:${top}px;width:${width}px;max-height:${h - top - 8}px;overflow-y:auto;box-sizing:border-box;background:#fff;border-radius:10px;box-shadow:0 2px 12px rgba(0,0,0,.3);touch-action:pan-y`;
+}
+
 export function CanvasView({ source, cache, frames, onSelect, debug = false }: CanvasViewProps): JSX.Element {
   const rootRef = useRef<HTMLDivElement>(null);
   const layersRef = useRef<HTMLDivElement>(null);
@@ -71,6 +85,8 @@ export function CanvasView({ source, cache, frames, onSelect, debug = false }: C
   const spareRef = useRef<HTMLCanvasElement>(null);
   const overlayRef = useRef<HTMLCanvasElement>(null);
   const controllerRef = useRef<CanvasController | null>(null);
+  const runtimeRef = useRef<CanvasRuntime | null>(null);
+  const [menu, setMenu] = useState<{ frameId: string; x: number; y: number } | null>(null);
   const [tool, setToolState] = useState<Tool>('pan');
   const [error, setError] = useState<string | null>(null);
 
@@ -114,8 +130,10 @@ export function CanvasView({ source, cache, frames, onSelect, debug = false }: C
       now: () => performance.now(),
       onSelect,
       onError: setError,
+      onFrameMenu: (frameId, p) => setMenu({ frameId, x: p.x, y: p.y }),
     });
     const { controller, loader } = runtime;
+    runtimeRef.current = runtime;
     controllerRef.current = controller;
 
     const sizeToRoot = (): void => {
@@ -201,9 +219,22 @@ export function CanvasView({ source, cache, frames, onSelect, debug = false }: C
       root.removeEventListener('wheel', onWheel);
       observer.disconnect();
       controllerRef.current = null;
+      runtimeRef.current = null;
       if (debug) delete window.__hubCanvas;
     };
   }, []);
+
+  useEffect(() => {
+    if (menu === null) return;
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape') setMenu(null);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [menu !== null]);
+
+  const menuFrames: CanvasFrame[] = menu === null ? [] : (controllerRef.current?.canvasLayout ?? []);
+  const menuFrame = menu === null ? undefined : menuFrames.find((f) => f.id === menu.frameId);
 
   return (
     <div
@@ -224,6 +255,34 @@ export function CanvasView({ source, cache, frames, onSelect, debug = false }: C
         <div data-testid="canvas-error" style={ERROR_STYLE}>
           {error}
         </div>
+      )}
+      {menu !== null && menuFrame !== undefined && (
+        <>
+          <div
+            data-testid="frame-menu-backdrop"
+            style="position:absolute;inset:0"
+            onPointerDown={(e) => {
+              e.stopPropagation();
+              setMenu(null);
+            }}
+          />
+          <div
+            data-testid="frame-menu-panel"
+            style={menuPanelStyle(menu, rootRef.current)}
+            onPointerDown={(e) => e.stopPropagation()}
+          >
+            <FrameMenu
+              key={menuFrame.id}
+              frame={menuFrame}
+              frames={menuFrames}
+              onChange={(next) => {
+                runtimeRef.current?.changeFrames(next);
+                setMenu(null);
+              }}
+              onClose={() => setMenu(null)}
+            />
+          </div>
+        </>
       )}
       <div style={TOOLBAR_STYLE} onPointerDown={(e) => e.stopPropagation()}>
         {TOOLS.map(({ tool: t, label }) => {

@@ -96,6 +96,7 @@ function harness(now: () => number = () => 0, hitMaps: ControllerDeps['hitMaps']
   const tiles = { get: () => undefined, request: vi.fn() };
   const onSelect = vi.fn();
   const onFramesChange = vi.fn();
+  const onFrameMenu = vi.fn();
   const c = new CanvasController({
     base: base.ctx,
     overlay: overlay.ctx,
@@ -107,8 +108,9 @@ function harness(now: () => number = () => 0, hitMaps: ControllerDeps['hitMaps']
     now,
     onSelect,
     onFramesChange,
+    onFrameMenu,
   });
-  return { c, q, flush, base, overlay, tiles, onSelect, onFramesChange };
+  return { c, q, flush, base, overlay, tiles, onSelect, onFramesChange, onFrameMenu };
 }
 
 function ready(now: () => number = () => 0, hitMaps?: ControllerDeps['hitMaps']) {
@@ -904,6 +906,31 @@ describe('CanvasController frame drags', () => {
     expect(baseOf(c)).toMatchObject({ x: 0, y: 0 });
     expect(onFramesChange).not.toHaveBeenCalled();
     expect(onSelect).not.toHaveBeenCalled();
+  });
+
+  it('a tap on the label band opens the frame menu at the tap; a drag on it moves the frame and does not', () => {
+    const { c, onFrameMenu } = atRightEdge();
+    c.pointer(pen('down', 100, 30));
+    c.pointer(pen('move', 103, 31));
+    c.pointer(pen('up', 103, 31));
+    expect(onFrameMenu).toHaveBeenCalledTimes(1);
+    expect(onFrameMenu).toHaveBeenCalledWith(MF[0]!.id, { x: 103, y: 31 });
+
+    onFrameMenu.mockClear();
+    c.pointer(pen('down', 100, 30));
+    c.pointer(pen('move', 160, 30));
+    c.pointer(pen('up', 160, 30));
+    expect(onFrameMenu).not.toHaveBeenCalled();
+    expect(baseOf(c)).toMatchObject({ x: 64 });
+  });
+
+  it('a tap on a resize handle or a cancelled press does not open the menu', () => {
+    const { c, onFrameMenu } = atRightEdge();
+    c.pointer(pen('down', 450, 500));
+    c.pointer(pen('up', 450, 500));
+    c.pointer(pen('down', 100, 30));
+    c.pointer(pen('cancel', 100, 30));
+    expect(onFrameMenu).not.toHaveBeenCalled();
   });
 
   it('pointercancel restores the pre-drag frame and reports nothing', async () => {

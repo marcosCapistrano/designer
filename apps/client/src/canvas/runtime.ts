@@ -9,6 +9,7 @@ import type { BlobCache } from './cache.js';
 import { liveKeys } from './cache.js';
 import { CanvasController } from './controller.js';
 import type { LayerTransform } from './controller.js';
+import type { Point } from './geom.js';
 import type { FrameStore } from './frames.js';
 import { HitMapStore } from './hitmaps.js';
 import { TileLoader } from './loader.js';
@@ -30,6 +31,8 @@ export interface CanvasRuntimeOptions {
   requestFrame: (cb: () => void) => void;
   now: () => number;
   onSelect?: (s: NodeSelection | null) => void;
+  /** A tap on a frame's label band: the frame and the screen point tapped. */
+  onFrameMenu?: (frameId: string, screen: Point) => void;
   /** The manifest or frames error to show, or null to clear it. */
   onError: (message: string | null) => void;
   /** Passed through to the TileLoader (tests inject a decoder). */
@@ -39,6 +42,8 @@ export interface CanvasRuntimeOptions {
 export interface CanvasRuntime {
   readonly controller: CanvasController;
   readonly loader: TileLoader;
+  /** Applies a layout chosen outside the canvas (the frame menu): shows it and queues the debounced save. */
+  changeFrames(frames: readonly CanvasFrame[]): void;
   dispose(): void;
 }
 
@@ -85,6 +90,7 @@ export function createCanvasRuntime(opts: CanvasRuntimeOptions): CanvasRuntime {
     now: opts.now,
     onSelect: opts.onSelect,
     onFramesChange: (frames) => framesChanged(frames),
+    onFrameMenu: opts.onFrameMenu,
   });
 
   // Every manifest, initial or subscribed, goes through apply(). A request's
@@ -208,6 +214,12 @@ export function createCanvasRuntime(opts: CanvasRuntimeOptions): CanvasRuntime {
   return {
     controller,
     loader,
+    changeFrames(frames) {
+      if (disposed) return;
+      const next = frames.map((f) => ({ ...f }));
+      controller.setFrames(next);
+      framesChanged(next);
+    },
     dispose(): void {
       // A change still waiting is saved now rather than lost; its result no longer matters.
       if (saveTimer !== null) {

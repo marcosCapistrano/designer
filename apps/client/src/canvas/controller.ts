@@ -49,6 +49,8 @@ export interface ControllerDeps {
   onSelect?: (s: NodeSelection | null) => void;
   /** A frame drag was released with the frame changed: the whole layout, to save. */
   onFramesChange?: (frames: CanvasFrame[]) => void;
+  /** A tap (not a drag) on a frame's label band: the frame and the tap's screen point, to open its menu at. */
+  onFrameMenu?: (frameId: string, screen: Point) => void;
 }
 
 /** Where the painted layers are shown: translate by (x, y) CSS px, then scale about the layer origin. */
@@ -228,6 +230,11 @@ export class CanvasController {
     this.needsFit = false;
     this.cameraSet = true;
     this.schedule();
+  }
+
+  /** The frame layout as the canvas holds it, mid-drag changes included. */
+  get canvasLayout(): CanvasFrame[] {
+    return this.canvasFrames.map((f) => ({ ...f }));
   }
 
   get frames(): readonly Frame[] {
@@ -549,7 +556,10 @@ export class CanvasController {
         this.drag = null;
         // A release without movement is a tap on the handle, which moves nothing.
         if (d.moved) this.settleDrag(d);
-        else this.schedule();
+        else {
+          this.schedule();
+          if (d.kind === 'move') this.deps.onFrameMenu?.(d.frameId, { x: ev.x, y: ev.y });
+        }
         return true;
       }
       // A cancel, or a down for this pointer whose up was lost.

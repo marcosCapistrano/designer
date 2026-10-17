@@ -3,6 +3,7 @@ import { DEVICE_VIEWPORT_HEIGHT, DEVICE_WIDTH } from '@hub/protocol';
 import type { CanvasFrame, Device, PageRender, RenderManifest } from '@hub/protocol';
 import type { BlobCache } from './cache.js';
 import { liveKeys } from './cache.js';
+import { ApiError } from '../net/api.js';
 import { createCanvasRuntime } from './runtime.js';
 import type { CanvasRuntimeOptions } from './runtime.js';
 import type { TileSource } from './source.js';
@@ -430,6 +431,36 @@ describe('createCanvasRuntime frame saves', () => {
       // The next save that lands clears it.
       widen(h, 100);
       await vi.advanceTimersByTimeAsync(300);
+      expect(h.onError).toHaveBeenLastCalledWith(null);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a menu change goes to the controller and the save; a stale-layout refusal shows its message, reloads, and the next change saves', async () => {
+    try {
+      const h = await ready();
+      const stale = new ApiError(400, 'frames[0].pageId is not a page of this app');
+      h.frameStore.save.mockRejectedValueOnce(stale);
+      const add = (): CanvasFrame[] => {
+        const now = h.rt.controller.canvasLayout;
+        const f = now[0]!;
+        return [...now, { ...f, id: 'f' + String(now.length).padStart(16, '0'), x: f.x + 5000 }];
+      };
+      h.rt.changeFrames(add());
+      expect(h.rt.controller.frames).toHaveLength(4);
+      await vi.advanceTimersByTimeAsync(300);
+      expect(h.onError).toHaveBeenLastCalledWith(
+        'Could not save the canvas frames: frames[0].pageId is not a page of this app',
+      );
+      expect(h.frameStore.load).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(h.rt.controller.frames).toHaveLength(3);
+
+      h.rt.changeFrames(add());
+      await vi.advanceTimersByTimeAsync(300);
+      expect(h.frameStore.save).toHaveBeenCalledTimes(2);
+      expect(h.frameStore.save.mock.calls[1]![0]).toHaveLength(4);
       expect(h.onError).toHaveBeenLastCalledWith(null);
     } finally {
       vi.useRealTimers();
