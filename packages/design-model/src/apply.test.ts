@@ -241,6 +241,14 @@ describe('setToken', () => {
     expect(error).toContain('Invalid token name');
   });
 
+  test('deletes a dashed token group saved before groups lost their dashes', () => {
+    const doc = structuredClone(sampleDoc());
+    doc.tokens['brand-color'] = { x: '#f00' };
+    const next = applied(doc, { op: 'setToken', group: 'brand-color', name: 'x', value: null });
+    expect(Object.hasOwn(next.tokens, 'brand-color')).toBe(false);
+    expect(rejected(doc, { op: 'setToken', group: 'brand-color', name: 'y', value: '1px' })).toContain('Invalid token name');
+  });
+
   test('rejects a token value that would break out of the CSS block', () => {
     const error = rejected(sampleDoc(), { op: 'setToken', group: 'color', name: 'primary', value: 'red;}' });
     expect(error).toContain('forbidden character');
