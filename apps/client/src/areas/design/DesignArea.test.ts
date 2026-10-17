@@ -27,7 +27,7 @@ function render(extra: Partial<DesignAreaViewProps> = {}) {
     onSelect: vi.fn(), onResult: vi.fn(), onInspectorResult: vi.fn(), onApply: vi.fn(), onCancel: vi.fn(), onUndo: vi.fn(), onRedo: vi.fn(), onFit: vi.fn(), onCamera: vi.fn(),
     onArea: vi.fn(), onImportOpen: vi.fn(), onImported: vi.fn(), onRetried: vi.fn(), onDismissToast: vi.fn(), onDetails: vi.fn(),
     onCloseInspector: vi.fn(), onInspectorBusy: vi.fn(), onSelectionLabel: vi.fn(), onChatBusy: vi.fn(), onSampleBusy: vi.fn(), onPreviewFocus: vi.fn(), onError: vi.fn(),
-    onDoubleTap: vi.fn(), onOutside: vi.fn(), onLayersToggle: vi.fn(), onLayersClose: vi.fn(), onLayerSelect: vi.fn(), onLayerEnter: vi.fn(), onModeDone: vi.fn(), onEnterComponent: vi.fn(),
+    onLayersToggle: vi.fn(), onLayersClose: vi.fn(), onLayerSelect: vi.fn(), onLayerEnter: vi.fn(), onModeDone: vi.fn(), onEnterComponent: vi.fn(),
   };
   const p: DesignAreaViewProps = {
     app: 'adhunters-v7', api: {} as never, ws: {} as never, live, cache: {} as never, previewCache: {} as never, frames: {} as never, previewFrames: {} as never,
@@ -274,7 +274,7 @@ describe('DesignAreaView layers and component mode', () => {
   it('in component mode the canvas is scoped, the layers show the component and the inspector edits it', () => {
     const v = render({ selection, layers, layersVisible: true, mode: ['a'], inspectorOpen: true });
     expect(props(byType(v.els, CanvasView)).scope).toEqual({ prefix: 'a', pageId: 'p' });
-    expect((props(byType(v.els, LayersPanel)).root as { id: string }).id).toBe('a');
+    expect((props(byType(v.els, LayersPanel)).root as { id: string }).id).toBe('root'); // the whole page, as in Figma
     const inspector = props(byType(v.els, Inspector));
     expect(inspector.mode).toBe('component');
     expect(inspector.scope).toEqual({ component: 'Panel' });
@@ -295,6 +295,11 @@ describe('DesignAreaView layers and component mode', () => {
     const bar = props(byType(render({ pages, page: 'p2' }).els, TopBar));
     expect(bar.pages).toBe(pages);
     expect(bar.page).toBe('p2');
+  });
+  it('gives the inspector a way to the parent layer when there is one', () => {
+    const onParent = vi.fn();
+    expect(props(byType(render({ selection, inspectorOpen: true, onParent }).els, Inspector)).onParent).toBe(onParent);
+    expect(props(byType(render({ selection, inspectorOpen: true }).els, Inspector)).onParent).toBeUndefined();
   });
   it('hides the layers panel while a proposal is shown', () => {
     expect(render({ selection, layers, layersVisible: true, proposal, previewSource }).els.some((e) => e.type === LayersPanel)).toBe(false);

@@ -5,7 +5,7 @@ import type { DesignEditResult, DesignTarget, Device, EditScope, NodeSelection }
 import type { ApiClient } from '../../../net/api.js';
 import { IconButton } from '../../../ui/IconButton.js';
 import { Segmented } from '../../../ui/Segmented.js';
-import { CloseIcon } from '../../../ui/icons.js';
+import { CloseIcon, UpIcon } from '../../../ui/icons.js';
 import { BorderSection, ComponentSection, FillSection, RawSection, SizeSection, SpacingSection, TextSection, TypographySection, VisibilitySection } from './sections.js';
 import { FIELDS, shownFields, textBearing } from './fields.js';
 import type { FieldSection } from './fields.js';
@@ -85,6 +85,8 @@ export interface InspectorViewProps {
   /** In component mode, where the target sits: "Filter Panel › Verticais". */
   path: string | null;
   onEnterComponent(targetId: string): void;
+  /** Selects the layer one level up; absent at the top. */
+  onParent?(): void;
 }
 
 export function InspectorView(p: InspectorViewProps): JSX.Element {
@@ -109,6 +111,7 @@ export function InspectorView(p: InspectorViewProps): JSX.Element {
           {target && <span class="inspector-kind" data-testid="inspector-kind">{kindLabel(target)}</span>}
           {p.path && <span class="inspector-path" data-testid="inspector-path">{p.path}</span>}
         </div>
+        {p.onParent && <IconButton label="Select parent" icon={<UpIcon />} onClick={p.onParent} data-testid="inspector-parent" />}
         <IconButton label="Close inspector" icon={<CloseIcon />} onClick={p.onClose} data-testid="inspector-close" />
       </header>
       {state.errors['name'] && <p class="inspector-section-error" role="alert" data-testid="section-name-error">{state.errors['name']}</p>}
@@ -185,9 +188,10 @@ export interface InspectorProps {
   scope?: EditScope;
   path?: string | null;
   onEnterComponent?(targetId: string): void;
+  onParent?(): void;
 }
 
-export function Inspector({ app, api, selection, revision, disabled, onResult, onClose, onLabel, onPending, mode = 'page', scope, path = null, onEnterComponent }: InspectorProps): JSX.Element {
+export function Inspector({ app, api, selection, revision, disabled, onResult, onClose, onLabel, onPending, mode = 'page', scope, path = null, onEnterComponent, onParent }: InspectorProps): JSX.Element {
   const [, rerender] = useState(0);
   const resultRef = useRef(onResult);
   resultRef.current = onResult;
@@ -225,6 +229,7 @@ export function Inspector({ app, api, selection, revision, disabled, onResult, o
       mode={mode}
       path={path}
       onEnterComponent={(id) => onEnterComponent?.(id)}
+      {...(onParent ? { onParent } : {})}
     />
   );
 }

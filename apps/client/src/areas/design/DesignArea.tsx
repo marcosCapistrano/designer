@@ -31,10 +31,10 @@ import { Inspector } from './inspector/Inspector.js';
 import { importOutcome } from './import-result.js';
 import type { Details } from './import-result.js';
 import { INSPECTOR_WIDTH, canvasInsets, layersLayout, panelLayout } from './layout.js';
-import { alive, enter, enterPath, leave, modeLabel, rootOf } from './component-mode.js';
+import { alive, enterPath, leave, modeFor, modeLabel, rootOf } from './component-mode.js';
 import type { ModeStack } from './component-mode.js';
 import { LayersPanel } from './layers/LayersPanel.js';
-import { presentIn, subtree } from './layers/model.js';
+import { instanceFor, parentOf, presentIn, subtree } from './layers/model.js';
 import { PreviewBanner } from './PreviewBanner.js';
 import { proposalSource } from './preview-source.js';
 import { resultToast } from './result-toast.js';
@@ -104,8 +104,8 @@ export interface DesignAreaViewProps {
   handleRef: { current: CanvasHandle | null };
   /** Whether a layer has a box in the selected frame. */
   present(id: string): boolean;
-  onDoubleTap(selection: NodeSelection): void;
-  onOutside(): void;
+  /** Selects the selected layer's parent; absent at the top. */
+  onParent?(): void;
   onLayersToggle(): void;
   onLayersClose(): void;
   onLayerSelect(id: string): void;
@@ -122,19 +122,20 @@ function inspector(p: DesignAreaViewProps, locked: boolean, side: 'right' | 'bot
   return (
     <SheetView open side={side} width={side === 'right' ? INSPECTOR_WIDTH : undefined} maxHeight="55vh" label="Inspector" onClose={p.onCloseInspector} data-testid="inspector-sheet">
       <Inspector app={p.app} api={p.api} selection={p.selection!} revision={p.revision} disabled={locked} onResult={p.onInspectorResult} onClose={p.onCloseInspector} onLabel={p.onSelectionLabel} onPending={p.onInspectorBusy}
-        mode={p.mode.length ? 'component' : 'page'} scope={label ? { component: label.component } : undefined} path={label?.path ?? null} onEnterComponent={p.onEnterComponent} />
+        mode={p.mode.length ? 'component' : 'page'} scope={label ? { component: label.component } : undefined} path={label?.path ?? null} onEnterComponent={p.onEnterComponent}
+        {...(p.onParent ? { onParent: p.onParent } : {})} />
     </SheetView>
   );
 }
 
 function layersPanel(p: DesignAreaViewProps): JSX.Element {
-  const inner = prefixOf(p.mode);
-  const root = p.layers ? (inner ? subtree(p.layers.root, inner) : p.layers.root) : null;
-  const label = p.layers ? modeLabel(p.mode, p.layers) : null;
+  // As in Figma, the panel always shows the whole page; component mode only dims the canvas.
+  const root = p.layers?.root ?? null;
+  const label = null;
   const docked = layersLayout(p.width) === 'docked';
   return (
     <div class={docked ? 'design-layers' : 'design-layers design-layers-sheet'} data-testid="design-layers">
-      <LayersPanel root={root} title={label ? label.title : 'Layers'} selected={p.selection?.nodeIds ?? []} present={p.present}
+      <LayersPanel root={root} title={label ?? 'Layers'} selected={p.selection?.nodeIds ?? []} present={p.present}
         onSelect={p.onLayerSelect} onEnter={p.onLayerEnter} onClose={p.onLayersClose} />
     </div>
   );
@@ -167,8 +168,6 @@ export function DesignAreaView(p: DesignAreaViewProps): JSX.Element {
           fitRef={p.fitRef}
           handleRef={p.handleRef}
           scope={showPreview ? null : scope}
-          onDoubleTap={showPreview ? undefined : p.onDoubleTap}
-          onOutside={showPreview ? undefined : p.onOutside}
         />
       </div>
       {!p.revision && !previewing && (
@@ -354,7 +353,10 @@ export function DesignArea({ app, api, ws, source, cache }: DesignAreaProps): JS
       try { l = await api.designLayers(app, at); setLayers(l); } catch { return; }
     }
     if (!l || subtree(l.root, id)?.kind !== 'instance') return;
-    setMode([...enterPath(id), id]);
+    const next = [...enterPath(id), id];
+    setMode(next);
+    // The root's selection below arrives before a render: let it see the mode it enters.
+    live.current.mode = next;
     const root = rootOf(l.root, id);
     if (root) selectLayers([root]);
   }, [app, api, selectLayers]);
@@ -367,18 +369,35 @@ export function DesignArea({ app, api, ws, source, cache }: DesignAreaProps): JS
     if (reselect) selectLayers([left]);
   }, [selectLayers]);
 
+  // The layer one level up from a single selected layer, as Escape and the inspector's up button select it.
+  const parent = layers && selection?.nodeIds.length === 1 ? parentOf(layers.root, selection.nodeIds[0]!) : null;
   useEffect(() => {
-    if (!mode.length) return;
+    if (parent === null) return;
     const onKey = (e: KeyboardEvent): void => {
-      if (e.key === 'Escape' && !importOpen && !details) stepOut(true);
+      const target = e.target as HTMLElement | null;
+      const typing = !!target && (target.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName));
+      if (e.key === 'Escape' && !typing && !importOpen && !details) selectLayers([parent]);
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [mode.length, importOpen, details, stepOut]);
+  }, [parent, importOpen, details, selectLayers]);
 
   const onCanvasSelect = useCallback((s: NodeSelection | null) => {
+    // A component's root is drawn by its instance, which is what the layer is (as in Figma): select that.
+    // Inside that component (component mode), its root stays the root, whose styles are the component's.
+    const l = live.current.layers;
+    const editing = new Set(live.current.mode);
+    if (s && l) {
+      const ids = s.nodeIds.map((id) => { const inst = instanceFor(l.root, id); return inst && !editing.has(inst) ? inst : id; });
+      if (ids.some((id, i) => id !== s.nodeIds[i])) {
+        void handleRef.current?.selectNodes(s.pageId, [...new Set(ids)]);
+        return;
+      }
+    }
     setSelection(s);
     if (s) setPage(s.pageId);
+    // A layer inside a component is edited in component mode: the mode follows the selection.
+    setMode(modeFor(s?.nodeIds ?? null));
     if (settleTimer.current) clearTimeout(settleTimer.current);
     if (!s) setSettled(false);
     else settleTimer.current = setTimeout(() => setSettled(true), DOUBLE_TAP_MS);
@@ -405,14 +424,12 @@ export function DesignArea({ app, api, ws, source, cache }: DesignAreaProps): JS
         onSelect={onCanvasSelect}
         layers={layers} page={page} layersVisible={layersVisible} mode={mode} handleRef={handleRef}
         present={presentIn(handleRef.current?.selectionBoxes() ?? null)}
-        onDoubleTap={(s) => void enterComponent(s.nodeIds[0]!, s.pageId)}
-        onOutside={() => stepOut(false)}
+        {...(parent !== null ? { onParent: () => selectLayers([parent]) } : {})}
         onLayersToggle={() => setLayersPref(layersVisible ? 'closed' : 'open')}
         onLayersClose={() => setLayersPref('closed')}
         onLayerSelect={(id) => {
           const inner = prefixOf(mode);
           if (id === inner) { const root = layers ? rootOf(layers.root, id) : null; if (root) selectLayers([root]); return; }
-          setMode(enterPath(id));
           selectLayers([id]);
         }}
         onLayerEnter={(id) => void enterComponent(id)}

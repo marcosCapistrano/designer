@@ -36,7 +36,8 @@ export interface HandleHit {
  * The handle under world point `p` at camera scale `scale`, or null. A point inside any frame is
  * never a handle, and below LABEL_MIN_SCALE (where none are drawn) nothing is.
  */
-export function hitHandle(frames: readonly Frame[], p: Point, scale: number): HandleHit | null {
+/** `resizable` says which frames' width and height handles can be hit (the selected one); any label band can. */
+export function hitHandle(frames: readonly Frame[], p: Point, scale: number, resizable: (frameId: string) => boolean = () => true): HandleHit | null {
   if (scale < LABEL_MIN_SCALE || frameAt(frames, p) !== null) return null;
   const band = HANDLE_PX / scale;
   const label = LABEL_BAND_PX / scale;
@@ -45,7 +46,7 @@ export function hitHandle(frames: readonly Frame[], p: Point, scale: number): Ha
     const f = frames[i]!;
     if (f.x <= p.x && p.x < f.x + f.w && f.y - label <= p.y && p.y < f.y) return { frameId: f.frameId, kind: 'move' };
     const right = f.x + f.w;
-    if (p.x < right || p.x >= right + band) continue;
+    if (!resizable(f.frameId) || p.x < right || p.x >= right + band) continue;
     if (Math.abs(p.y - (f.y + f.viewportHeight)) < band) return { frameId: f.frameId, kind: 'height' };
     if (f.y <= p.y && p.y < f.y + f.h) return { frameId: f.frameId, kind: 'width' };
   }

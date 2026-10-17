@@ -28,6 +28,8 @@ export interface PaintInput {
   readout?: Readout | null;
   /** Whether frame handles are drawn (default true); off where frames cannot be changed. */
   handles?: boolean;
+  /** Only this frame's handles are drawn (the selected frame); undefined draws every frame's, null none. */
+  handlesFor?: string | null;
 }
 
 export interface Readout {
@@ -95,6 +97,7 @@ interface Pass {
   smoothing: boolean;
   readout: Readout | null;
   handles: boolean;
+  handlesFor: string | null | undefined;
 }
 
 interface Counts {
@@ -243,7 +246,7 @@ export class BasePainter {
       }
     }
 
-    const pass: Pass = { cam, s, dpr: input.dpr, width, frames: input.frames, zoom: input.zoom, smoothing: input.smoothing, readout, handles: input.handles !== false };
+    const pass: Pass = { cam, s, dpr: input.dpr, width, frames: input.frames, zoom: input.zoom, smoothing: input.smoothing, readout, handles: input.handles !== false, handlesFor: input.handlesFor };
     const counts: Counts = { tilesDrawn: 0, missing: 0 };
     for (const r of regions) this.paintRegion(target, r, pass, counts);
 
@@ -340,7 +343,7 @@ export class BasePainter {
           ctx.textBaseline = 'bottom';
           ctx.fillText(frameLabel(frame), fr.x, fr.y - 6 * dpr);
         }
-        if (pass.handles && cam.scale >= LABEL_MIN_SCALE) paintHandles(ctx, r, fr, handleYs(frame, cam, dpr), dpr);
+        if (pass.handles && (pass.handlesFor === undefined || pass.handlesFor === frame.frameId) && cam.scale >= LABEL_MIN_SCALE) paintHandles(ctx, r, fr, handleYs(frame, cam, dpr), dpr);
       }
       if (pass.readout !== null) paintReadout(ctx, pass, pass.readout);
     } finally {

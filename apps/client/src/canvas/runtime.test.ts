@@ -51,7 +51,8 @@ function controlledSource() {
       new Promise<Blob>((resolve) => {
         tiles.push({ key: `${key}/${x}_${y}`, resolve });
       }),
-    hitMap: async () => [],
+    // A page root box in the corner: enough to select a frame (resizing needs it), small enough to miss taps.
+    hitMap: async () => [{ nodeId: 'root', x: 0, y: 0, w: 1, h: 1 }],
     subscribe: (cb) => {
       subscribers.add(cb);
       return () => {
@@ -452,6 +453,10 @@ describe('createCanvasRuntime frame saves', () => {
     await vi.advanceTimersByTimeAsync(0);
     h.rt.controller.resize(800, 600, 1);
     h.rt.controller.setCamera({ x: 1000, y: -40, scale: 1 });
+    // Only the selected frame can be resized; selecting the last one loads its hit map.
+    const select = h.rt.controller.selectFrame(h.rt.controller.frames.at(-1)!.frameId);
+    await vi.advanceTimersByTimeAsync(0);
+    await select;
     return h;
   }
 
