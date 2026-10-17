@@ -1,6 +1,7 @@
 import * as css from 'css-tree';
 import type { Device, ElementNode, StyleMap, Tokens } from '@hub/design-model';
 import { TOKEN_GROUP, TOKEN_NAME } from './tokens.js';
+import { overlaps } from './shorthands.js';
 import { isSourceOnly, matchSelector, specificity, type SelectorAst, type TreeNode } from './selectors.js';
 
 /** `file` is the stylesheet that declares the rule and `text` its unscoped selector, for diagnostics. */
@@ -171,21 +172,24 @@ export function applyStyles(root: ElementNode, rules: Rule[], inline: Map<string
         .sort((a, b) => a.rule.layer - b.rule.layer || a.rule.specificity[0] - b.rule.specificity[0] || a.rule.specificity[1] - b.rule.specificity[1] || a.rule.specificity[2] - b.rule.specificity[2] || a.order - b.order);
       for (const device of ['base', 'tablet', 'mobile'] as const) {
         const style: StyleMap = {};
-        // Keys are kept in the order they were last set, so the checks below see the cascade order.
-        const set = (map: StyleMap | undefined) => { for (const [property, value] of Object.entries(map ?? {})) { delete style[property]; style[property] = value; } };
+        // Keys are kept in the order they were last set, so the check below sees the cascade order.
+        const origin = new Map<string, Rule | null>();
+        const set = (map: StyleMap | undefined, rule: Rule | null) => { for (const [property, value] of Object.entries(map ?? {})) { delete style[property]; style[property] = value; origin.set(property, rule); } };
         for (const { rule } of matching) {
-          if (rule.device === 'base' || rule.device === device || (device === 'mobile' && rule.device === 'tablet')) set(rule.declarations);
+          if (rule.device === 'base' || rule.device === device || (device === 'mobile' && rule.device === 'tablet')) set(rule.declarations, rule);
         }
-        set(inline.get(node.id));
-        // Canonical style maps sort properties, which puts a shorthand before its own longhands. A longhand set
-        // before its shorthand (which resets it) cannot be retained; `all` resets everything and sorts anywhere.
+        set(inline.get(node.id), null);
+        // Canonical style maps sort properties on export. Where one declaration sets or resets a longhand of another,
+        // their cascade order must be their sorted order, or the exported page would resolve them differently.
         const order = Object.keys(style);
-        for (const shorthand of ['all', 'margin', 'padding', 'border', 'background', 'font', 'flex', 'grid', 'animation', 'transition', 'outline', 'list-style', 'overflow', 'gap', 'inset']) {
-          const at = order.indexOf(shorthand);
-          if (at >= 0 && order.some((property, index) => property !== shorthand && (shorthand === 'all' || (index < at && property.startsWith(`${shorthand}-`))))) {
-            throw new Error(`Unsupported CSS mixed shorthand and longhand: ${shorthand}`);
-          }
-        }
+        order.forEach((earlier, i) => order.slice(i + 1).forEach((later) => {
+          if (earlier < later || !overlaps(earlier, later)) return;
+          const from = [origin.get(earlier), origin.get(later)];
+          const where = [...new Set(from.map((rule) => rule ? rule.text : 'inline style'))].join(' and ');
+          const message = `Unsupported CSS declaration order: ${earlier} before ${later} in ${where}`;
+          const file = from[1]?.file ?? from[0]?.file;
+          throw file ? new CssError(file, message) : new Error(message);
+        }));
         if (device === 'base' || matching.some(({ rule }) => rule.device !== 'base')) node.style[device] = style;
       }
       opts.matched?.set(node, matching.map(({ rule }) => rule));

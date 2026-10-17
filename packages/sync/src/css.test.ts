@@ -120,9 +120,41 @@ describe('stylesheet parsing', () => {
   it('keeps animation longhands after the shorthand, and still rejects a shorthand that resets earlier longhands', () => {
     expect(style('.a { animation: var(--animate-spin); animation-duration: 2s }').base).toEqual({ animation: 'var(--animate-spin)', 'animation-duration': '2s' });
     expect(style('.a { animation: var(--animate-spin) } p.a { animation-duration: 2s }').base).toEqual({ animation: 'var(--animate-spin)', 'animation-duration': '2s' });
-    expect(() => style('.a { animation-duration: 2s; animation: var(--animate-spin) }')).toThrow('Unsupported CSS mixed shorthand and longhand: animation');
-    expect(() => style('.a { animation-duration: 2s } p.a { animation: var(--animate-spin) }')).toThrow('Unsupported CSS mixed shorthand and longhand: animation');
-    expect(() => style('.a { all: unset; color: red }')).toThrow('Unsupported CSS mixed shorthand and longhand: all');
+    expect(() => style('.a { animation-duration: 2s; animation: var(--animate-spin) }')).toThrow('Unsupported CSS declaration order: animation-duration before animation in .a');
+    expect(() => style('.a { animation-duration: 2s } p.a { animation: var(--animate-spin) }')).toThrow('Unsupported CSS declaration order: animation-duration before animation in .a and p.a');
+  });
+
+  // The design model sorts declarations on export, so every pair where one property resets the other must cascade in sorted order.
+  it.each([
+    ['.a { gap: 8px; column-gap: 16px }', 'gap before column-gap'],
+    ['.a { border-top: 1px solid; border-color: red }', 'border-top before border-color'],
+    ['.a { place-items: center; align-items: start }', 'place-items before align-items'],
+    ['.a { place-content: center; justify-content: start }', 'place-content before justify-content'],
+    ['.a { place-self: center; align-self: start }', 'place-self before align-self'],
+    ['.a { flex-flow: row wrap; flex-direction: column }', 'flex-flow before flex-direction'],
+    ['.a { inset: 0; bottom: 4px }', 'inset before bottom'],
+    ['.a { border-image: url(x.png) 30; border: 0 }', 'border-image before border'],
+    ['.a { all: unset; align-items: center }', 'all before align-items'],
+    ['.a { white-space: nowrap; text-wrap: balance }', 'white-space before text-wrap'],
+    ['.a { margin-left: 2px; margin: 4px }', 'margin-left before margin'],
+    ['.a { padding-left: 2px; padding-inline: 4px }', 'padding-left before padding-inline'],
+  ])('rejects %s, whose sorted export would change the result', (text, order) => {
+    expect(() => style(text)).toThrow(`Unsupported CSS declaration order: ${order} in `);
+  });
+
+  it.each([
+    ['.a { border-radius: 4px; border: 1px solid }', { border: '1px solid', 'border-radius': '4px' }],
+    ['.a { outline-offset: 2px; outline: 1px solid }', { outline: '1px solid', 'outline-offset': '2px' }],
+    ['.a { overflow-wrap: anywhere; overflow: hidden }', { overflow: 'hidden', 'overflow-wrap': 'anywhere' }],
+    ['.a { flex-direction: column; flex: 1 }', { flex: '1', 'flex-direction': 'column' }],
+    ['.a { grid-column: 1 / 3; grid: auto / 1fr }', { grid: 'auto / 1fr', 'grid-column': '1 / 3' }],
+    ['.a { border: 1px solid; border-color: red }', { border: '1px solid', 'border-color': 'red' }],
+    ['.a { all: unset; color: red }', { all: 'unset', color: 'red' }],
+    ['.a { margin: 4px; margin-left: 2px }', { margin: '4px', 'margin-left': '2px' }],
+    ['.a { column-gap: 16px; gap: 8px }', { 'column-gap': '16px', gap: '8px' }],
+    ['.a { inset: 0; left: 4px }', { inset: '0', left: '4px' }],
+  ])('accepts %s, unrelated or in sorted order', (text, base) => {
+    expect(style(text).base).toEqual(base);
   });
 
   it('matches structural selectors against the source tree', () => {

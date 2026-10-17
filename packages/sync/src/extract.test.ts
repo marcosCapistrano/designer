@@ -150,7 +150,7 @@ describe('static import', () => {
   it('rejects ambiguous shorthand ordering rather than changing the appearance', () => {
     const result = extractPages({ files: { 'page.tsx': `import './style.css'; export default () => <p>Hi</p>`, 'style.css': 'p { margin-left: 2px; margin: 4px; }' } }, [{ route: '/', file: 'page.tsx' }]);
     expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.diagnostics[0]!.message).toContain('mixed shorthand');
+    if (!result.ok) expect(result.diagnostics[0]).toMatchObject({ file: 'style.css', message: 'Unsupported CSS declaration order: margin-left before margin in p' });
   });
 
   it('keeps the source root and does not apply CSS to a synthetic fragment wrapper', () => {
