@@ -117,6 +117,13 @@ describe('classifyBatch', () => {
     expect(classifyBatch(sampleDoc(), [PAD_N7])).toBe('preview');
   });
 
+  test('a single edit inside the component being edited is immediate; elsewhere it still previews', () => {
+    expect(classifyBatch(sampleDoc(), [PAD_N7], { component: 'Card' })).toBe('immediate');
+    expect(classifyBatch(sampleDoc(), [PAD_N7], { component: 'Other' })).toBe('preview');
+    expect(classifyBatch(sampleDoc(), [PAD_N7, PAD_N7], { component: 'Card' })).toBe('preview');
+    expect(classifyBatch(sampleDoc(), [{ op: 'removeNode', node: 'n7' }], { component: 'Card' })).toBe('preview');
+  });
+
   test('multi-op batch needs preview', () => {
     expect(classifyBatch(sampleDoc(), [PAD_N3, TEXT_N4])).toBe('preview');
   });

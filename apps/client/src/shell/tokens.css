@@ -1,0 +1,37 @@
+/* Design tokens for the hub's own interface (not the designs it shows). Dark and tool-like, so the canvas content is
+   the bright thing on screen. */
+:root {
+  color-scheme: dark;
+  --bg: #121316;
+  --surface: #1c1e23;
+  --surface-2: #262930;
+  --border: #33363e;
+  --overlay: rgba(18, 19, 22, 0.94); /* opaque enough without a backdrop blur, which costs every canvas frame on low-end GPUs */
+  --text: #e8eaed;
+  --text-2: #9aa0a6;
+  --text-3: #6b7076;
+  --accent: #4c8dff;
+  --accent-text: #0b1220;
+  --accent-soft: rgba(76, 141, 255, 0.16);
+  --danger: #ff6b6b;
+  --warning: #f2c94c;
+  --ok: #4cd98a;
+  --font: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --mono: ui-monospace, 'SFMono-Regular', Menlo, Consolas, monospace;
+  --text-s: 13px;
+  --text-m: 14px;
+  --text-l: 16px;
+  --text-xl: 20px;
+  --s1: 4px;
+  --s2: 8px;
+  --s3: 16px;
+  --s4: 24px;
+  --s5: 32px;
+  --s6: 48px;
+  --radius: 10px;
+  --radius-s: 6px;
+  --touch: 44px;
+  --shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
+}
+
+html, body { background: var(--bg); color: var(--text); }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { formatRoute, parseHash } from './route.js';
+import { formatRoute, parseHash, shellClass } from './route.js';
 
 describe('hash routes', () => {
   it('round trips an app route with an encoded name', () => {
@@ -51,5 +51,13 @@ describe('hash routes', () => {
 
   it('the apps route formats as the root hash', () => {
     expect(formatRoute({ name: 'apps' })).toBe('#/');
+  });
+});
+
+describe('shellClass', () => {
+  it('makes only the Design area immersive', () => {
+    expect(shellClass({ name: 'app', app: 'a', area: 'design' })).toBe('shell shell-immersive');
+    expect(shellClass({ name: 'app', app: 'a', area: 'build' })).toBe('shell');
+    expect(shellClass({ name: 'apps' })).toBe('shell');
   });
 });

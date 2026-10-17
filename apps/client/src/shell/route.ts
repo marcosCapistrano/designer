@@ -34,3 +34,8 @@ export function parseHash(hash: string): Route {
 export function formatRoute(r: Route): string {
   return r.name === 'apps' ? '#/' : `#/apps/${encodeURIComponent(r.app)}/${r.area}`;
 }
+
+/** The shell's class for a route. The Design area is immersive: its own top bar replaces the header and tabs. */
+export function shellClass(route: Route): string {
+  return route.name === 'app' && route.area === 'design' ? 'shell shell-immersive' : 'shell';
+}

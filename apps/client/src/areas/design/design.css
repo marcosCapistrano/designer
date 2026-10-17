@@ -1,31 +1,88 @@
-.design-area { display: flex; flex-direction: column; height: 100%; min-height: 0; }
-.design-import { display: flex; flex-wrap: wrap; align-items: end; gap: 12px; padding: 12px; border-bottom: 1px solid #ddd; }
-.design-import label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
-.design-import input, .design-import select { box-sizing: border-box; min-height: 44px; padding: 8px; border: 1px solid #aaa; border-radius: 6px; font: inherit; max-width: 240px; }
-.design-import button { min-height: 44px; }
-.design-status { padding: 8px 16px; margin: 0; max-height: 180px; overflow: auto; }
-.design-canvas { flex: 1; min-height: 240px; position: relative; }
-.design-workspace { display: flex; flex: 1; min-height: 0; }
-.design-editor { width: 290px; flex-shrink: 0; padding: 12px; overflow: auto; border-left: 1px solid #ddd; }
-.design-editor label { display: flex; flex-direction: column; gap: 4px; margin: 8px 0; font-size: 13px; }
-.design-editor input, .design-editor select { box-sizing: border-box; width: 100%; min-height: 44px; font: inherit; padding: 8px; border: 1px solid #aaa; border-radius: 6px; }
-.design-editor-actions { display: flex; gap: 8px; }
-.design-editor h2 { font-size: 16px; }
-.design-editor p, .design-editor li { font-size: 13px; line-height: 1.5; }
-.design-preview-canvas { position: relative; height: 300px; margin: 12px 0; }
-@media (max-width: 1000px) { .design-workspace { flex-direction: column; overflow: auto; } .design-canvas { min-height: 360px; } .design-editor { width: auto; max-height: 320px; border-left: 0; border-top: 1px solid #ddd; } }
-.design-empty { position: absolute; inset: 0; display: grid; place-items: center; background: #f1f3f4; color: #5f6368; pointer-events: none; padding: 24px; text-align: center; }
-.design-chat { border-top: 1px solid #ddd; margin-top: 16px; padding-top: 12px; }
-.design-chat-messages { max-height: 240px; overflow: auto; }
-.design-message { white-space: pre-wrap; overflow-wrap: anywhere; }
-.design-message-user { font-weight: 600; }
-.design-message-error { color: #a21d27; }
-.design-chat textarea { box-sizing: border-box; width: 100%; min-height: 96px; font: inherit; padding: 8px; border: 1px solid #aaa; border-radius: 6px; }
-.design-samples { padding: 8px 12px; flex-shrink: 0; max-height: 50vh; overflow: auto; }
-.design-samples > span { margin-left: 12px; font-size: 13px; }
-.design-samples > label { display: inline-flex; flex-direction: column; gap: 4px; font-size: 13px; margin: 0 12px 8px 0; }
-.design-samples > label > input { box-sizing: border-box; width: 300px; max-width: 80vw; min-height: 44px; padding: 8px; font: inherit; border: 1px solid #aaa; border-radius: 6px; }
-.design-sample-proposal { padding: 12px; border: 1px solid #aaa; border-radius: 8px; margin-top: 12px; }
-.design-sample-proposal h2 { font-size: 16px; }
-.design-sample-proposal pre { white-space: pre-wrap; overflow-wrap: anywhere; }
-.design-source-preview { height: 260px; position: relative; margin: 12px 0; }
+/* The Design tab: the canvas fills the area; everything else floats over it. */
+.design-root { position: relative; height: 100%; min-height: 0; }
+.design-area { position: absolute; inset: 0; overflow: hidden; background: var(--bg); color: var(--text); font-family: var(--font); }
+.design-canvas { position: absolute; inset: 0; }
+
+.design-topbar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 25;
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  height: 56px;
+  box-sizing: border-box;
+  padding: 0 var(--s2);
+  border-bottom: 1px solid var(--border);
+  background: var(--overlay);
+}
+.design-topbar-back { display: grid; place-items: center; width: var(--touch); height: var(--touch); border-radius: var(--radius); color: var(--text); }
+.design-topbar-title { margin: 0; min-width: 0; overflow: hidden; font-size: var(--text-l); font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.design-topbar-spacer { flex: 1; }
+.design-topbar-zoom { min-width: 64px; min-height: var(--touch); padding: 0 var(--s2); border: 0; border-radius: var(--radius); background: transparent; color: var(--text-2); font-size: var(--text-m); cursor: pointer; }
+@media (max-width: 700px) { .design-topbar .ui-segmented { display: none; } }
+@media (hover: hover) { .design-topbar-back:hover, .design-topbar-zoom:hover { background: var(--surface-2); color: var(--text); } }
+.design-topbar-back:focus-visible, .design-topbar-zoom:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* Panels sit below the top bar. Wide: inspector and chat share a right column. Narrow: the inspector is a bottom
+   sheet above the chat bar, and chat stacks over it so its send button is never covered. */
+.design-side { display: contents; }
+.design-side-docked { position: absolute; top: 56px; right: 0; bottom: 0; z-index: 20; display: flex; flex-direction: column; width: 360px; box-shadow: var(--shadow); }
+.design-side-docked > .ui-sheet { position: relative; top: auto; right: auto; bottom: auto; flex: 1; min-height: 0; box-shadow: none; }
+.design-side-docked > .chat-sheet { position: relative; left: auto; right: auto; bottom: auto; flex: 0 0 auto; max-height: 60%; border-left: 1px solid var(--border); }
+.design-side-stacked { position: absolute; left: 0; right: 0; bottom: 0; z-index: 20; display: flex; flex-direction: column; justify-content: flex-end; max-height: calc(100% - 56px); }
+.design-side-stacked > .ui-sheet { position: relative; left: auto; right: auto; bottom: auto; flex: 0 1 auto; min-height: 0; }
+.design-side-stacked > .chat-sheet { position: relative; left: auto; right: auto; bottom: auto; flex: 0 0 auto; border-radius: 0; }
+
+.design-building {
+  position: absolute; top: 64px; left: 50%; z-index: 24; margin: 0; transform: translateX(-50%);
+  padding: var(--s2) var(--s3); border: 1px solid var(--border); border-left: 4px solid var(--warning); border-radius: var(--radius);
+  background: var(--surface-2); font-size: var(--text-m);
+}
+
+.design-preview-banner {
+  position: absolute; top: 64px; left: 50%; z-index: 24;
+  display: flex; align-items: flex-start; gap: var(--s3);
+  width: min(720px, calc(100% - 2 * var(--s3))); box-sizing: border-box; max-height: 40%; overflow: auto;
+  padding: var(--s2) var(--s2) var(--s2) var(--s3);
+  border: 1px solid var(--warning); border-radius: var(--radius); background: var(--surface); box-shadow: var(--shadow);
+  transform: translateX(-50%);
+}
+.design-preview-banner:focus { outline: 2px solid var(--warning); }
+.design-preview-text { flex: 1; min-width: 0; font-size: var(--text-m); }
+.design-preview-text strong { color: var(--warning); }
+.design-preview-text ul { margin: var(--s1) 0 0; padding-left: 18px; }
+.design-preview-warning { margin: var(--s1) 0 0; color: var(--text-2); font-size: var(--text-s); }
+.design-preview-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: var(--s2); }
+
+.design-empty { position: absolute; inset: 0; z-index: 5; display: grid; place-items: center; padding: var(--s4); }
+.design-empty-card { display: flex; flex-direction: column; align-items: center; gap: var(--s3); padding: var(--s5); border: 1px solid var(--border); border-radius: 16px; background: var(--surface); text-align: center; }
+.design-empty-card p { margin: 0; font-size: var(--text-l); color: var(--text-2); }
+
+.design-details { margin: 0; padding-left: 18px; font-size: var(--text-m); line-height: 1.5; overflow-wrap: anywhere; }
+
+.design-import-form { display: flex; flex-direction: column; gap: var(--s3); }
+.design-import-actions { display: flex; justify-content: flex-end; gap: var(--s2); }
+.design-import-divider { margin: var(--s4) 0; border: 0; border-top: 1px solid var(--border); }
+
+/* Sample preview (inside the import sheet). */
+.design-samples { display: flex; flex-direction: column; gap: var(--s2); font-size: var(--text-m); }
+.design-samples > label { display: flex; flex-direction: column; gap: var(--s1); color: var(--text-2); font-size: var(--text-s); }
+.design-samples > label > input { box-sizing: border-box; width: 100%; min-height: var(--touch); padding: 0 var(--s2); border: 1px solid var(--border); border-radius: var(--radius-s); background: var(--surface-2); color: var(--text); font: inherit; font-size: 16px; }
+.design-sample-proposal { padding: var(--s3); border: 1px solid var(--border); border-radius: var(--radius); }
+.design-sample-proposal h2 { margin: 0 0 var(--s2); font-size: var(--text-l); }
+.design-sample-proposal pre { white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--mono); font-size: var(--text-s); }
+.design-source-preview { position: relative; height: 260px; margin: var(--s2) 0; }
+
+/* Component mode: what is being edited, and the way out. */
+.design-mode-chip { display: flex; align-items: center; gap: var(--s2); min-width: 0; padding: 0 var(--s1) 0 var(--s3); min-height: 40px; border: 1px solid rgba(177, 140, 255, 0.5); border-radius: 999px; background: rgba(177, 140, 255, 0.12); font-size: var(--text-m); }
+.design-mode-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-2); }
+.design-mode-text strong { color: #b18cff; }
+.design-mode-done { min-height: 32px; border-radius: 999px; }
+@media (max-width: 900px) { .design-topbar .ui-segmented { display: none; } }
+
+/* Layers: a left column on wide screens, a sheet over the canvas below 1200px. */
+.design-layers { position: absolute; top: 56px; left: 0; bottom: 0; z-index: 21; width: 280px; border-right: 1px solid var(--border); }
+.design-layers-sheet { bottom: 64px; width: min(300px, 85vw); box-shadow: var(--shadow); }

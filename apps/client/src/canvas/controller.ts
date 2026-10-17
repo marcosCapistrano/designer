@@ -8,7 +8,8 @@ import type { CanvasFrame, HitBox, NodeSelection, PageRender, RenderManifest, Ti
 import {
   clampScale,
   expandRect,
-  fitRect,
+  fitRectInset,
+  NO_INSETS,
   intersectRect,
   normalizeRect,
   panBy as panCamera,
@@ -17,10 +18,11 @@ import {
   viewRect,
   zoomAt as zoomCamera,
 } from './geom.js';
-import type { Camera, Point, Rect, Size } from './geom.js';
+import type { Camera, Insets, Point, Rect, Size } from './geom.js';
 import { dragTo, hitHandle, settleFrame } from './frame-drag.js';
 import type { FrameDrag } from './frame-drag.js';
 import { boxSelect, hitTest, toPagePoint } from './hit.js';
+import { boxOf, scopedId } from './scope.js';
 import type { Frame } from './layout.js';
 import { frameAt, layoutBounds, layoutFrames } from './layout.js';
 import type { TileImage, TileWant } from './loader.js';
@@ -47,12 +49,20 @@ export interface ControllerDeps {
   requestFrame: (cb: () => void) => void;
   now: () => number;
   onSelect?: (s: NodeSelection | null) => void;
+  /** Screen space covered by the app's floating chrome; fits keep frames clear of it. */
+  insets?: Insets;
+  /** Called after every camera change: pans, zooms, fits and explicit cameras. */
+  onCamera?: (camera: Camera) => void;
   /** A frame drag was released with the frame changed: the whole layout, to save. */
   onFramesChange?: (frames: CanvasFrame[]) => void;
   /** A tap (not a drag) on a frame's label band: the frame and the tap's screen point, to open its menu at. */
   onFrameMenu?: (frameId: string, screen: Point) => void;
   /** Whether frames can be moved, resized or opened in the menu (default true). Off, handles are neither drawn nor hit. */
   framesEditable?: boolean;
+  /** A second tap within DOUBLE_TAP_MS and DOUBLE_TAP_SLOP of the first, with what it selected. */
+  onDoubleTap?: (s: NodeSelection) => void;
+  /** In component mode, a tap or box select outside the instance being edited. */
+  onOutside?: () => void;
 }
 
 /** Where the painted layers are shown: translate by (x, y) CSS px, then scale about the layer origin. */
@@ -84,6 +94,10 @@ export const PREVIEW_MAX_RATIO = 2;
 export const PREFETCH_MARGIN = 0.25;
 
 const FIT_PADDING = 40;
+export const DOUBLE_TAP_MS = 350;
+export const DOUBLE_TAP_SLOP = 24;
+/** Space kept around a layer panned into view. */
+const REVEAL_MARGIN = 40;
 
 interface IndexEntry {
   frame: Frame;
@@ -133,7 +147,7 @@ function buildIndex(frames: readonly Frame[]): Map<string, IndexEntry[]> {
 }
 
 export class CanvasController {
-  private readonly deps: ControllerDeps;
+  private deps: ControllerDeps;
   private readonly painter: BasePainter;
   private readonly gestures: GestureTracker;
 
@@ -156,6 +170,11 @@ export class CanvasController {
   private scheduled = false;
   private overlayDirty = false;
   private selected: FrameSelection | null = null;
+  /** Component mode: the instance path being edited ('' outside) and its page. */
+  private scope = '';
+  private scopePage: string | null = null;
+  /** The last tap, and once it has resolved, what it selected (a double tap must select the same node twice). */
+  private lastTap: { x: number; y: number; t: number; id?: string } | null = null;
   private marquee: Rect | null = null;
   /** A move or resize of a frame by its handle; its pointer never reaches the gesture tracker. */
   private drag: FrameDrag | null = null;
@@ -231,7 +250,34 @@ export class CanvasController {
     // An explicit camera wins over the deferred first-page fit, whichever came first.
     this.needsFit = false;
     this.cameraSet = true;
-    this.schedule();
+    this.cameraChanged();
+  }
+
+  /** The floating chrome changed (a panel docked or closed): later fits and reveals keep clear of it. */
+  setInsets(insets: Insets): void {
+    const box = this.selectedWorldBox();
+    const wasShown = box !== null && this.inView(box);
+    this.deps = { ...this.deps, insets };
+    // A panel that opens over the selection moves the canvas so what was tapped stays in view.
+    if (box !== null && wasShown) this.reveal(box);
+  }
+
+  /** The selection's box in world space, or null with no selection or no loaded boxes. */
+  private selectedWorldBox(): Rect | null {
+    const h = this.highlight();
+    if (h === null || h.boxes.length === 0) return null;
+    const x0 = Math.min(...h.boxes.map((b) => b.x)), y0 = Math.min(...h.boxes.map((b) => b.y));
+    const x1 = Math.max(...h.boxes.map((b) => b.x + b.w)), y1 = Math.max(...h.boxes.map((b) => b.y + b.h));
+    return { x: h.frame.x + x0, y: h.frame.y + y0, w: x1 - x0, h: y1 - y0 };
+  }
+
+  /** Fits every frame into the view. Does nothing while there are no frames. */
+  fitAll(): void {
+    if (this.layout.length === 0 || this.viewSize.w === 0) return;
+    this.cam = fitRectInset(layoutBounds(this.layout), this.viewSize, FIT_PADDING, this.deps.insets ?? NO_INSETS);
+    this.needsFit = false;
+    this.cameraSet = true;
+    this.cameraChanged();
   }
 
   /** The frame layout as the canvas holds it, mid-drag changes included. */
@@ -259,24 +305,32 @@ export class CanvasController {
   panBy(dx: number, dy: number): void {
     if (dx === 0 && dy === 0) return;
     this.cam = panCamera(this.cam, dx, dy);
-    this.schedule();
+    this.cameraChanged();
   }
 
   zoomAt(x: number, y: number, factor: number): void {
     if (factor === 1) return;
     this.cam = zoomCamera(this.cam, { x, y }, factor);
     this.lastZoom = this.deps.now();
-    this.schedule();
+    this.cameraChanged();
   }
 
   /** `x`, `y` are screen CSS px. */
   async tap(x: number, y: number): Promise<void> {
     const token = ++this.selectToken;
+    // Whether this tap completes a double tap is decided now: a first tap still waiting for its hit map is
+    // superseded by the second and never finishes.
+    const at = this.deps.now();
+    const last = this.lastTap;
+    const double = last !== null && at - last.t <= DOUBLE_TAP_MS && Math.hypot(x - last.x, y - last.y) <= DOUBLE_TAP_SLOP;
+    const mine: { x: number; y: number; t: number; id?: string } | null = double ? null : { x, y, t: at };
+    this.lastTap = mine;
     const world = screenToWorld(this.cam, { x, y });
     const frame = frameAt(this.layout, world);
     const hash = frame ? renderHash(frame) : null;
     if (!frame || hash === null) {
       this.select(null);
+      this.outside();
       return;
     }
     const map = await this.hitMapOf(hash);
@@ -285,8 +339,93 @@ export class CanvasController {
       this.select(null);
       return;
     }
-    const id = hitTest(map, toPagePoint(frame, world));
-    this.select(id === null ? null : { frameId: frame.frameId, nodeIds: [id] });
+    const hit = hitTest(map, toPagePoint(frame, world));
+    const id = hit === null ? null : scopedId(hit, this.scope);
+    if (id === null) {
+      this.select(null);
+      this.outside();
+      return;
+    }
+    this.select({ frameId: frame.frameId, nodeIds: [id] });
+    if (mine !== null && this.lastTap === mine) mine.id = id;
+    const reported = this.reported(this.selected);
+    // The canvas can move between the taps (a panel opening): a second tap on something else is a new tap.
+    if (double && (last?.id === undefined || last.id === id) && reported !== null) this.deps.onDoubleTap?.(reported);
+  }
+
+  /** In component mode, a selection outside the instance: the app steps out. */
+  private outside(): void {
+    this.lastTap = null;
+    if (this.scope !== '') this.deps.onOutside?.();
+  }
+
+  /** Enters (a non-empty instance path on `pageId`) or leaves ('') component mode for later taps and box selects. */
+  setScope(prefix: string, pageId: string | null = null): void {
+    this.scope = prefix;
+    this.scopePage = prefix === '' ? null : pageId;
+    this.lastTap = null;
+    this.overlayDirty = true;
+    // Dimming needs the scope page's hit maps.
+    for (const f of this.layout) {
+      const hash = renderHash(f);
+      if (prefix !== '' && f.pageId === pageId && hash !== null && !this.deps.hitMaps.get(hash)) {
+        void this.hitMapOf(hash).then(() => { this.overlayDirty = true; this.schedule(); });
+      }
+    }
+    this.schedule();
+  }
+
+  /** The selected frame's hit map, or null with no selection or an unloaded map. */
+  selectionBoxes(): readonly HitBox[] | null {
+    const frame = this.selected ? this.findFrame(this.selected.frameId) : undefined;
+    const hash = frame ? renderHash(frame) : null;
+    return hash === null ? null : (this.deps.hitMaps.get(hash) ?? null);
+  }
+
+  /**
+   * Selects layers by id on `pageId`: in the selected frame when it shows that page, else the page's first frame
+   * with a render. Pans their box into view when it is off-screen; a layer without a box selects without panning.
+   */
+  async selectNodes(pageId: string, nodeIds: string[]): Promise<void> {
+    const token = ++this.selectToken;
+    const current = this.selected ? this.findFrame(this.selected.frameId) : undefined;
+    const frame = current?.pageId === pageId && renderHash(current) !== null ? current : this.layout.find((f) => f.pageId === pageId && renderHash(f) !== null);
+    if (!frame) return;
+    this.select({ frameId: frame.frameId, nodeIds });
+    const map = await this.hitMapOf(renderHash(frame)!);
+    if (token !== this.selectToken || map === null) return;
+    const boxes = nodeIds.map((id) => boxOf(map, id)).filter((b): b is HitBox => b !== null);
+    if (boxes.length === 0) return;
+    const x0 = Math.min(...boxes.map((b) => b.x)), y0 = Math.min(...boxes.map((b) => b.y));
+    const x1 = Math.max(...boxes.map((b) => b.x + b.w)), y1 = Math.max(...boxes.map((b) => b.y + b.h));
+    this.reveal({ x: frame.x + x0, y: frame.y + y0, w: x1 - x0, h: y1 - y0 });
+  }
+
+  /** Pans, at the current scale, so `r` (world) is in the view clear of the chrome; nothing when it already is. */
+  /** The world rect visible between the chrome. */
+  private clearView(): { left: number; top: number; right: number; bottom: number } {
+    const insets = this.deps.insets ?? NO_INSETS;
+    const s = this.cam.scale;
+    return {
+      left: this.cam.x + insets.left / s, top: this.cam.y + insets.top / s,
+      right: this.cam.x + (this.viewSize.w - insets.right) / s, bottom: this.cam.y + (this.viewSize.h - insets.bottom) / s,
+    };
+  }
+
+  private inView(r: Rect): boolean {
+    const { left, top, right, bottom } = this.clearView();
+    return r.x >= left && r.y >= top && r.x + r.w <= right && r.y + r.h <= bottom;
+  }
+
+  private reveal(r: Rect): void {
+    const s = this.cam.scale;
+    const { left, top, right, bottom } = this.clearView();
+    if (this.inView(r)) return;
+    const m = REVEAL_MARGIN / s;
+    const dx = r.x < left ? r.x - m - left : r.x + r.w > right ? Math.min(r.x + r.w + m - right, r.x - m - left) : 0;
+    const dy = r.y < top ? r.y - m - top : r.y + r.h > bottom ? Math.min(r.y + r.h + m - bottom, r.y - m - top) : 0;
+    this.cam = { ...this.cam, x: this.cam.x + dx, y: this.cam.y + dy };
+    this.cameraChanged();
   }
 
   /** `a` and `b` are screen CSS px corners. */
@@ -308,7 +447,7 @@ export class CanvasController {
       return;
     }
     const pageRect = { x: clipped.x - frame.x, y: clipped.y - frame.y, w: clipped.w, h: clipped.h };
-    const nodeIds = boxSelect(map, pageRect);
+    const nodeIds = [...new Set(boxSelect(map, pageRect).map((id) => scopedId(id, this.scope)).filter((id): id is string => id !== null))];
     this.select(nodeIds.length > 0 ? { frameId: frame.frameId, nodeIds } : null);
   }
 
@@ -362,13 +501,14 @@ export class CanvasController {
       }
     }
 
-    const overlayShown = this.selected !== null || this.marquee !== null;
+    const overlayShown = this.selected !== null || this.marquee !== null || this.scope !== '';
     if (this.overlayDirty || (stats.mode !== 'none' && overlayShown)) {
       paintOverlay(this.deps.overlay, {
         camera: snapCamera(this.cam, this.dpr),
         dpr: this.dpr,
         selection: this.highlight(),
         marquee: this.marquee,
+        dim: this.dimming(),
       });
       this.overlayDirty = false;
     }
@@ -493,8 +633,14 @@ export class CanvasController {
     if (first === undefined) return;
     const pageFrames = this.layout.filter((f) => f.pageId === first.pageId);
     if (pageFrames.length === 0) return;
-    this.cam = fitRect(layoutBounds(pageFrames), this.viewSize, FIT_PADDING);
+    this.cam = fitRectInset(layoutBounds(pageFrames), this.viewSize, FIT_PADDING, this.deps.insets ?? NO_INSETS);
     this.needsFit = false;
+    this.deps.onCamera?.(this.cam);
+  }
+
+  private cameraChanged(): void {
+    this.deps.onCamera?.(this.cam);
+    this.schedule();
   }
 
   private select(s: FrameSelection | null): void {
@@ -511,8 +657,19 @@ export class CanvasController {
     const hash = frame ? renderHash(frame) : null;
     if (!frame || hash === null) return null;
     const map = this.deps.hitMaps.get(hash);
-    const ids = new Set(sel.nodeIds);
-    return { frame, boxes: map ? map.filter((b) => ids.has(b.nodeId)) : [] };
+    return { frame, boxes: map ? sel.nodeIds.map((id) => boxOf(map, id)).filter((b): b is HitBox => b !== null) : [] };
+  }
+
+  /** Component mode: every frame dimmed except the scope instance's box in the frames of its page. */
+  private dimming(): { rect: Rect; keep: Rect | null }[] {
+    if (this.scope === '') return [];
+    return this.layout.map((f) => {
+      const rect = { x: f.x, y: f.y, w: f.w, h: f.h };
+      const hash = f.pageId === this.scopePage ? renderHash(f) : null;
+      const map = hash === null ? undefined : this.deps.hitMaps.get(hash);
+      const box = map ? boxOf(map, this.scope) : null;
+      return { rect, keep: box ? { x: f.x + box.x, y: f.y + box.y, w: box.w, h: box.h } : null };
+    });
   }
 
   /** Memory first, then a load. A failed load is null, which callers treat as no selection. */

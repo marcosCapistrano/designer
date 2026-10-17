@@ -57,7 +57,8 @@ export interface BackBuffer {
   present(shown: CanvasRenderingContext2D): void;
 }
 
-export const COLORS = { bg: '#e9e9ec', frame: '#ffffff', label: '#5f6368', badge: '#d93025', fold: '#9aa0a6', readout: '#1a73e8' } as const;
+// Matches the hub's tokens (shell/tokens.css); a 2D context cannot read CSS custom properties.
+export const COLORS = { bg: '#121316', frame: '#ffffff', label: '#9aa0a6', badge: '#ff6b6b', fold: '#6b7076', readout: '#4c8dff' } as const;
 export { LABEL_MIN_SCALE };
 
 /** The text above a frame: page, size and style tier, and whether its size is still rendering. */

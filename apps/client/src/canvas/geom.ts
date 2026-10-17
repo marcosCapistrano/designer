@@ -74,6 +74,16 @@ export function fitRect(r: Rect, view: Size, padding: number): Camera {
   };
 }
 
+/** Screen space the app's chrome covers on each edge, in CSS px. */
+export interface Insets { top: number; right: number; bottom: number; left: number }
+export const NO_INSETS: Insets = { top: 0, right: 0, bottom: 0, left: 0 };
+
+/** Like fitRect, but fits into the view minus the insets, so floating chrome never covers what was fitted. */
+export function fitRectInset(r: Rect, view: Size, padding: number, insets: Insets): Camera {
+  const inner = fitRect(r, { w: view.w - insets.left - insets.right, h: view.h - insets.top - insets.bottom }, padding);
+  return { x: inner.x - insets.left / inner.scale, y: inner.y - insets.top / inner.scale, scale: inner.scale };
+}
+
 // Positive-area overlap only: rectangles that merely touch do not intersect.
 export function rectsIntersect(a: Rect, b: Rect): boolean {
   return a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;

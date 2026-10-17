@@ -4,7 +4,8 @@ import type { CanvasFrame, Device, HitBox, PageRender, RenderManifest } from '@h
 import type { ControllerDeps } from './controller.js';
 import { CanvasController } from './controller.js';
 import { createNullCache } from './cache.js';
-import { fitRect } from './geom.js';
+import { fitRect, fitRectInset } from './geom.js';
+import { layoutBounds } from './layout.js';
 import type { PointerIn } from './gestures.js';
 import { TileLoader } from './loader.js';
 import type { TileWant } from './loader.js';
@@ -1061,5 +1062,225 @@ describe('CanvasController frame drags', () => {
       c.setFrames([{ ...F[0]!, width: 1023, x: 8 }]);
       expect(onSelect.mock.calls.length).toBe(calls);
     });
+  });
+});
+
+describe('CanvasController fit-all and camera reports', () => {
+  it('fits every frame of every page into the view, not just the first page', () => {
+    const two: RenderManifest = { ...M, pages: [...M.pages, { ...M.pages[0]!, pageId: 'p2', name: '/two', route: '/two' }] };
+    const h = harness();
+    h.c.resize(800, 600, 1);
+    h.c.setManifest(two);
+    h.c.setFrames(framesFor(two));
+    h.flush();
+    const firstPage = h.c.camera;
+    h.c.fitAll();
+    expect(new Set(h.c.frames.map((f) => f.pageId)).size).toBe(2);
+    expect(h.c.camera).toEqual(fitRect(layoutBounds(h.c.frames), { w: 800, h: 600 }, 40));
+    expect(h.c.camera.scale).toBeLessThan(firstPage.scale);
+  });
+
+  it('leaves the camera alone when there are no frames', () => {
+    const onCamera = vi.fn();
+    const h = harness(undefined, undefined, { onCamera });
+    h.c.resize(800, 600, 1);
+    const before = h.c.camera;
+    h.c.fitAll();
+    expect(h.c.camera).toEqual(before);
+    expect(onCamera).not.toHaveBeenCalled();
+  });
+
+  it('reports the camera after a pan, a zoom, a fit and an explicit camera', () => {
+    const onCamera = vi.fn();
+    const h = ready(undefined, undefined, { onCamera });
+    onCamera.mockClear();
+    h.c.panBy(10, 0);
+    h.c.zoomAt(100, 100, 2);
+    h.c.fitAll();
+    h.c.setCamera({ x: 1, y: 2, scale: 0.3 });
+    expect(onCamera).toHaveBeenCalledTimes(4);
+    expect(onCamera.mock.calls[0]![0].x).not.toBe(onCamera.mock.calls[1]![0].x);
+    expect(onCamera.mock.calls[1]![0].scale).toBeGreaterThan(onCamera.mock.calls[0]![0].scale);
+    expect(onCamera.mock.calls[2]![0]).toEqual(fitRect(layoutBounds(h.c.frames), { w: 800, h: 600 }, 40));
+    expect(onCamera.mock.calls[3]![0]).toEqual({ x: 1, y: 2, scale: 0.3 });
+  });
+
+  it('reports the first-page fit', () => {
+    const onCamera = vi.fn();
+    const h = harness(undefined, undefined, { onCamera });
+    h.c.resize(800, 600, 1);
+    h.c.setManifest(M);
+    h.c.setFrames(MF);
+    h.flush();
+    expect(onCamera).toHaveBeenCalledWith(h.c.camera);
+  });
+});
+
+describe('CanvasController fits around the app chrome', () => {
+  const insets = { top: 56, right: 0, bottom: 136, left: 0 };
+  it('fits the first page inside the insets', () => {
+    const h = harness(undefined, undefined, { insets });
+    h.c.resize(800, 600, 1);
+    h.c.setManifest(M);
+    h.c.setFrames(MF);
+    h.flush();
+    expect(h.c.camera).toEqual(fitRectInset(layoutBounds(h.c.frames), { w: 800, h: 600 }, 40, insets));
+  });
+  it('fits all frames inside the insets', () => {
+    const h = ready(undefined, undefined, { insets });
+    h.c.fitAll();
+    expect(h.c.camera).toEqual(fitRectInset(layoutBounds(h.c.frames), { w: 800, h: 600 }, 40, insets));
+  });
+  it('keeps the selection in view when the insets grow over it', async () => {
+    const h = ready(undefined, undefined, { insets });
+    h.c.setCamera({ x: 0, y: -100, scale: 1 });
+    await h.c.tap(30, 130); // n3 at 20..120 x 20..60, shown at 120..160 below the top bar
+    expect(h.c.selection?.nodeIds).toEqual(['n3']);
+    h.c.setInsets({ ...insets, left: 280 });
+    // n3 now starts right of the panel.
+    expect(20 - h.c.camera.x).toBeGreaterThanOrEqual(280);
+    expect(h.c.camera.y).toBe(-100);
+    const still = ready(undefined, undefined, { insets });
+    still.c.setCamera({ x: -400, y: -100, scale: 1 });
+    await still.c.tap(430, 130);
+    still.c.setInsets({ ...insets, left: 280 });
+    expect(still.c.camera).toEqual({ x: -400, y: -100, scale: 1 });
+  });
+  it('fits with insets changed after mount', () => {
+    const h = ready(undefined, undefined, { insets });
+    const wider = { ...insets, left: 280 };
+    h.c.setInsets(wider);
+    h.c.fitAll();
+    expect(h.c.camera).toEqual(fitRectInset(layoutBounds(h.c.frames), { w: 800, h: 600 }, 40, wider));
+  });
+});
+
+describe('CanvasController component scope', () => {
+  // Instance `a` (root a/r, children a/s and nested instance a/b) plus a second root box a/q.
+  const scoped: Record<string, HitBox[]> = {
+    hb: [
+      { nodeId: 'n1', x: 0, y: 0, w: 1440, h: 1000 },
+      { nodeId: 'a/r', x: 0, y: 0, w: 400, h: 100 },
+      { nodeId: 'a/s', x: 20, y: 20, w: 100, h: 40 },
+      { nodeId: 'a/b/t', x: 200, y: 40, w: 100, h: 50 },
+      { nodeId: 'a/q', x: 450, y: 0, w: 100, h: 100 },
+      { nodeId: 'far', x: 1300, y: 900, w: 100, h: 50 },
+    ],
+  };
+  const scopedMaps: ControllerDeps['hitMaps'] = { get: (h) => scoped[h], load: async (h) => scoped[h] ?? [] };
+  const setup = (now: () => number = () => 0) => {
+    const onDoubleTap = vi.fn();
+    const onOutside = vi.fn();
+    const h = ready(now, scopedMaps, { onDoubleTap, onOutside });
+    return { ...h, onDoubleTap, onOutside };
+  };
+
+  it('tap maps hits through the scope', async () => {
+    const { c } = setup();
+    await c.tap(15, 15);
+    expect(c.selection?.nodeIds).toEqual(['a']);
+    c.setScope('a', 'home');
+    await c.tap(15, 15);
+    expect(c.selection?.nodeIds).toEqual(['a/s']);
+    await c.tap(125, 40);
+    expect(c.selection?.nodeIds).toEqual(['a/b']);
+  });
+
+  it('tap outside the scope calls onOutside and clears', async () => {
+    const { c, onOutside } = setup();
+    c.setScope('a', 'home');
+    await c.tap(15, 15);
+    await c.tap(400, 400);
+    expect(onOutside).toHaveBeenCalledTimes(1);
+    expect(c.selection).toBeNull();
+    await c.tap(790, 590);
+    expect(onOutside).toHaveBeenCalledTimes(2);
+  });
+
+  it('two taps within 350ms and 24px report a double tap', async () => {
+    let t = 0;
+    const { c, onDoubleTap } = setup(() => t);
+    await c.tap(15, 15);
+    t = 200;
+    await c.tap(20, 18);
+    expect(onDoubleTap).toHaveBeenCalledWith({ pageId: 'home', device: 'base', nodeIds: ['a'] });
+    t = 1000;
+    await c.tap(20, 18);
+    t = 1100;
+    await c.tap(80, 18);
+    expect(onDoubleTap).toHaveBeenCalledTimes(1);
+  });
+
+  it('a double tap counts while the hit map is still loading', async () => {
+    let t = 0;
+    const d = deferredMaps();
+    const onDoubleTap = vi.fn();
+    const h = ready(() => t, d.hitMaps, { onDoubleTap });
+    void h.c.tap(15, 15);
+    t = 100;
+    const second = h.c.tap(16, 15);
+    d.pending.get('hb')!.ok(scoped['hb']!);
+    await second;
+    expect(onDoubleTap).toHaveBeenCalledWith({ pageId: 'home', device: 'base', nodeIds: ['a'] });
+  });
+
+  it('a double tap whose second tap selects something else is not reported', async () => {
+    let t = 0;
+    const { c, onDoubleTap } = setup(() => t);
+    await c.tap(15, 15); // a
+    t = 100;
+    c.setCamera({ x: 1290, y: 890, scale: 0.5 }); // the canvas moved under the finger (a panel opened): now over 'far'
+    await c.tap(15, 15);
+    expect(c.selection?.nodeIds).toEqual(['far']);
+    expect(onDoubleTap).not.toHaveBeenCalled();
+  });
+
+  it('box select dedupes scoped ids', async () => {
+    const { c } = setup();
+    await c.selectBox({ x: 0, y: 0 }, { x: 300, y: 60 });
+    expect(c.selection?.nodeIds).toEqual(['a']);
+  });
+
+  it('selectNodes highlights the union of an instance boxes', async () => {
+    const { c, flush, overlay } = setup();
+    await c.selectNodes('home', ['a']);
+    flush();
+    expect(c.selection).toEqual({ pageId: 'home', device: 'base', nodeIds: ['a'] });
+    expect(overlay.calls.filter((k) => k.m === 'strokeRect').at(-1)?.a).toEqual([0, 0, 275, 50]);
+  });
+
+  it('selectNodes with no boxes selects without panning', async () => {
+    const { c } = setup();
+    const before = c.camera;
+    await c.selectNodes('home', ['ghost']);
+    expect(c.selection?.nodeIds).toEqual(['ghost']);
+    expect(c.camera).toEqual(before);
+  });
+
+  it('selectNodes pans an off-screen layer into view', async () => {
+    const { c } = setup();
+    c.setCamera({ x: 0, y: 0, scale: 1 });
+    await c.selectNodes('home', ['far']);
+    const cam = c.camera;
+    expect(cam.scale).toBe(1);
+    expect(1300 - cam.x).toBeGreaterThanOrEqual(0);
+    expect(1400 - cam.x).toBeLessThanOrEqual(800);
+    expect(900 - cam.y).toBeGreaterThanOrEqual(0);
+    expect(950 - cam.y).toBeLessThanOrEqual(600);
+  });
+
+  it('dims everything but the scope instance', () => {
+    const { c, flush, overlay } = setup();
+    c.setScope('a', 'home');
+    flush();
+    const dims = overlay.calls.filter((k) => k.m === 'fillRect' && k.fill === 'rgba(0,0,0,0.55)');
+    expect(dims.length).toBeGreaterThan(0);
+    // Nothing dims the instance itself (device rect 0,0,275,50 at scale 0.5).
+    for (const d of dims) {
+      const [x, y, w, h] = d.a as number[];
+      const overlaps = x! < 275 && x! + w! > 0 && y! < 50 && y! + h! > 0;
+      expect(overlaps).toBe(false);
+    }
+    expect(c.selectionBoxes()).toBe(null);
   });
 });

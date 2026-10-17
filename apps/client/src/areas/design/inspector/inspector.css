@@ -1,0 +1,62 @@
+/* The inspector panel's content. The panel itself is a ui Sheet. */
+.inspector { display: flex; flex-direction: column; gap: var(--s2); padding: var(--s2) var(--s3) var(--s4); color: var(--text); font-size: var(--text-m); }
+.inspector-head { display: flex; align-items: flex-start; gap: var(--s2); }
+.inspector-chips { display: flex; flex-wrap: wrap; gap: var(--s1); flex: 1; min-width: 0; padding-top: var(--s1); }
+.inspector-chip {
+  display: inline-flex; align-items: center; gap: var(--s1);
+  min-height: 36px; padding: 0 var(--s2);
+  border: 1px solid var(--border); border-radius: 999px;
+  background: var(--surface-2); color: var(--text-2);
+  font: inherit; font-size: var(--text-s); cursor: pointer;
+}
+.inspector-chip-on { border-color: var(--accent); background: var(--accent-soft); color: var(--text); }
+.inspector-badge { padding: 1px 6px; border-radius: 999px; background: rgba(242, 201, 76, 0.16); color: var(--warning); font-size: 11px; font-weight: 600; }
+.inspector-note { margin: 0; color: var(--text-2); font-size: var(--text-s); }
+.inspector-device .ui-segmented { display: flex; }
+.inspector-device .ui-segment { flex: 1; }
+.inspector-error { display: flex; align-items: center; gap: var(--s2); padding: var(--s2); border-left: 3px solid var(--danger); border-radius: var(--radius-s); background: var(--surface-2); font-size: var(--text-s); }
+.inspector-error span { flex: 1; }
+.inspector-section { border-top: 1px solid var(--border); }
+.inspector-section-head {
+  display: flex; align-items: center; justify-content: space-between; width: 100%;
+  min-height: var(--touch); padding: 0; border: 0; background: transparent; color: var(--text);
+  font: inherit; font-size: var(--text-m); font-weight: 600; cursor: pointer;
+}
+.inspector-chevron { color: var(--text-2); font-size: 18px; }
+.inspector-section-body { display: flex; flex-direction: column; gap: var(--s3); padding-bottom: var(--s3); }
+.inspector-section-error { margin: 0; color: var(--danger); font-size: var(--text-s); }
+.inspector-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: var(--s2) var(--s3); }
+.inspector-stack { display: flex; flex-direction: column; gap: var(--s3); }
+.inspector-sides { display: flex; flex-direction: column; gap: var(--s1); }
+.inspector-sides-head { display: flex; align-items: center; justify-content: space-between; }
+.inspector-sides-head .ui-toggle { font-size: var(--text-s); color: var(--text-2); }
+.inspector-raw { display: flex; flex-direction: column; gap: var(--s2); }
+@media (hover: hover) { .inspector-chip:hover:not(.inspector-chip-on) { color: var(--text); } }
+.inspector-chip:focus-visible, .inspector-section-head:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.inspector-title { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0; padding-top: var(--s1); }
+.inspector-name {
+  box-sizing: border-box; width: 100%; min-height: 36px; margin: 0; padding: 0 var(--s1);
+  border: 1px solid transparent; border-radius: var(--radius-s); background: transparent; color: var(--text);
+  font: inherit; font-size: var(--text-l); font-weight: 600; text-overflow: ellipsis;
+}
+span.inspector-name { display: flex; align-items: center; overflow: hidden; white-space: nowrap; }
+input.inspector-name:focus { border-color: var(--accent); background: var(--surface-2); outline: none; }
+@media (hover: hover) { input.inspector-name:hover:not(:focus) { border-color: var(--border); } }
+.inspector-kind { padding: 0 var(--s1); color: var(--text-2); font-size: var(--text-s); }
+.inspector-path { padding: 0 var(--s1); color: #b18cff; font-size: var(--text-s); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.inspector-section-row { display: flex; align-items: center; gap: var(--s2); }
+.inspector-section-row .inspector-section-head { flex: 1; }
+.inspector-section-empty .inspector-section-head { color: var(--text-2); font-weight: 500; cursor: default; }
+.inspector-add {
+  flex: 0 0 auto; width: 36px; height: 36px; padding: 0; border: 0; border-radius: var(--radius-s);
+  background: transparent; color: var(--text-2); font: inherit; font-size: 20px; text-align: center; text-align-last: center;
+  appearance: none; -webkit-appearance: none; cursor: pointer;
+  background-image: linear-gradient(var(--text-2), var(--text-2)), linear-gradient(var(--text-2), var(--text-2));
+  background-size: 14px 1.8px, 1.8px 14px; background-position: center; background-repeat: no-repeat; color: transparent;
+}
+.inspector-add option { color: var(--text); background: var(--surface); font-size: var(--text-m); }
+@media (hover: hover) { .inspector-add:hover { background-color: var(--surface-2); } }
+.inspector-add:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.inspector-component { display: flex; align-items: center; justify-content: space-between; gap: var(--s2); padding: var(--s2) var(--s3); border: 1px solid rgba(177, 140, 255, 0.4); border-radius: var(--radius); background: rgba(177, 140, 255, 0.08); }
+.inspector-component-title { min-width: 0; overflow: hidden; color: #b18cff; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.inspector-hint { color: var(--text-2); font-size: var(--text-s); }

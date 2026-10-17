@@ -96,6 +96,58 @@ describe('validated design editing', () => {
     expect(s.saved().state.pending).toEqual([]);
     await expect(s.editing.selection('demo', { ...hit, nodeIds: [`${s.child.id}/vanished`] })).rejects.toMatchObject({ status: 409 });
   });
+  it('layers returns the page outline and component uses', async () => {
+    const s = setup(true);
+    if (s.child.kind !== 'instance') throw new Error('missing instance');
+    const out = await s.editing.layers('demo', s.page.id);
+    expect(out.revision).toBe('one');
+    expect(out.root).toMatchObject({ id: s.page.root.id, kind: 'element', children: [{ id: s.child.id, kind: 'instance', component: s.child.component }, { kind: 'instance' }] });
+    expect(out.components[s.child.component]).toEqual({ title: 'Button', uses: 2 });
+    await expect(s.editing.layers('demo', 'nope')).rejects.toMatchObject({ status: 404 });
+  });
+  it('selection targets carry display names and titles, and an instance by its own id carries its props', async () => {
+    const s = setup(true);
+    if (s.child.kind !== 'instance') throw new Error('missing instance');
+    const def = s.saved().state.doc.components[s.child.component]!;
+    const info = await s.editing.selection('demo', { ...s.selection, nodeIds: [`${s.child.id}/${def.root.id}`] });
+    expect(info.targets).toMatchObject([{ id: s.child.id, name: 'Button', title: 'Button' }, { id: def.root.id, name: 'Button' }]);
+    const own = await s.editing.selection('demo', { ...s.selection, nodeIds: [s.child.id] });
+    expect(own.targets).toMatchObject([{ id: s.child.id, kind: 'instance', shared: false, declaredProps: { label: 'Start' } }]);
+  });
+  it('component scope commits a shared edit immediately', async () => {
+    const s = setup(true);
+    if (s.child.kind !== 'instance') throw new Error('missing instance');
+    const def = s.saved().state.doc.components[s.child.component]!;
+    const hit = { ...s.selection, nodeIds: [`${s.child.id}/${def.root.id}`] };
+    const op = { op: 'setStyle', node: def.root.id, device: 'base', prop: 'color', value: 'red' };
+    expect((await s.editing.edit('demo', 'one', [op], hit)).mode).toBe('preview');
+    const out = await s.editing.edit('demo', 'one', [op], hit, false, { component: s.child.component });
+    expect(out.mode).toBe('applied');
+    expect(s.saved().state.doc.components[s.child.component]!.root.style.base['color']).toBe('red');
+  });
+  it('component scope applies only single property edits at once; structural or multi-op edits still preview', async () => {
+    const s = setup(true);
+    if (s.child.kind !== 'instance') throw new Error('missing instance');
+    const def = s.saved().state.doc.components[s.child.component]!;
+    const hit = { ...s.selection, nodeIds: [`${s.child.id}/${def.root.id}`] };
+    const scope = { component: s.child.component };
+    const two = [{ op: 'setStyle', node: def.root.id, device: 'base', prop: 'color', value: 'red' }, { op: 'setStyle', node: def.root.id, device: 'base', prop: 'padding', value: '4px' }];
+    expect((await s.editing.edit('demo', 'one', two, hit, false, scope)).mode).toBe('preview');
+    const text = def.root.children[0]!;
+    expect((await s.editing.edit('demo', 'one', [{ op: 'removeNode', node: text.id }], hit, false, scope)).mode).toBe('preview');
+    expect(s.saved().state.pending).toEqual([]);
+  });
+  it('component scope rejects ops outside the definition', async () => {
+    const s = setup(true);
+    if (s.child.kind !== 'instance') throw new Error('missing instance');
+    const def = s.saved().state.doc.components[s.child.component]!;
+    const hit = { ...s.selection, nodeIds: [`${s.child.id}/${def.root.id}`] };
+    // The instance itself is a page node: in the selection, but outside the definition.
+    const outside = { op: 'setStyle', node: s.child.id, device: 'base', prop: 'color', value: 'red' };
+    await expect(s.editing.edit('demo', 'one', [outside], hit, false, { component: s.child.component })).rejects.toMatchObject({ status: 400, message: 'The edit reaches outside the component being edited.' });
+    await expect(s.editing.edit('demo', 'one', [{ op: 'setStyle', node: def.root.id, device: 'base', prop: 'color', value: 'red' }], hit, false, { component: 'Cmissing' })).rejects.toMatchObject({ status: 400 });
+    expect(s.saved().state.pending).toEqual([]);
+  });
   it('refuses stale, expired or cancelled previews without losing edits', async () => {
     const s = setup();
     const ops = [{ op: 'setStyle', node: s.child.id, device: 'base', prop: 'color', value: 'red' }];

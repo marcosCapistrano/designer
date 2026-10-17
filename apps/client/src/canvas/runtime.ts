@@ -9,7 +9,7 @@ import type { BlobCache } from './cache.js';
 import { liveKeys } from './cache.js';
 import { CanvasController } from './controller.js';
 import type { LayerTransform } from './controller.js';
-import type { Point } from './geom.js';
+import type { Camera, Insets, Point } from './geom.js';
 import type { FrameStore } from './frames.js';
 import { HitMapStore } from './hitmaps.js';
 import { TileLoader } from './loader.js';
@@ -31,10 +31,20 @@ export interface CanvasRuntimeOptions {
   requestFrame: (cb: () => void) => void;
   now: () => number;
   onSelect?: (s: NodeSelection | null) => void;
+  /** Screen space covered by the app's floating chrome; fits keep frames clear of it. */
+  insets?: Insets;
+  /** Where to start instead of fitting the first page, e.g. the camera of the canvas this one replaces. */
+  initialCamera?: Camera;
+  /** Called after every camera change (pan, zoom, fit). */
+  onCamera?: (camera: Camera) => void;
   /** A tap on a frame's label band: the frame and the screen point tapped. */
   onFrameMenu?: (frameId: string, screen: Point) => void;
   /** Whether frames can be moved, resized or opened in the menu (default true); previews turn it off. */
   framesEditable?: boolean;
+  /** A double tap, with what it selected (see ControllerDeps). */
+  onDoubleTap?: (s: NodeSelection) => void;
+  /** In component mode, a tap outside the instance being edited. */
+  onOutside?: () => void;
   /** The manifest or frames error to show, or null to clear it. */
   onError: (message: string | null) => void;
   /** Passed through to the TileLoader (tests inject a decoder). */
@@ -93,10 +103,15 @@ export function createCanvasRuntime(opts: CanvasRuntimeOptions): CanvasRuntime {
     },
     now: opts.now,
     onSelect: opts.onSelect,
+    onCamera: opts.onCamera,
+    insets: opts.insets,
     onFramesChange: (frames) => framesChanged(frames),
     onFrameMenu: opts.onFrameMenu,
     framesEditable: opts.framesEditable,
+    onDoubleTap: opts.onDoubleTap,
+    onOutside: opts.onOutside,
   });
+  if (opts.initialCamera) controller.setCamera(opts.initialCamera);
 
   // Every manifest, initial or subscribed, goes through apply(). A request's
   // ticket is taken when it starts, so a response that is older than the newest

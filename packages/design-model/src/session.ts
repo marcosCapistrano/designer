@@ -58,12 +58,18 @@ function immediateTarget(op: Op): string | null {
   }
 }
 
-export function classifyBatch(doc: DesignDoc, ops: Op[]): 'immediate' | 'preview' {
+/**
+ * One property edit on a page node applies at once; anything wider previews. Editing a component in place
+ * (`scope.component`) extends "page node" to the nodes of that component's definition.
+ */
+export function classifyBatch(doc: DesignDoc, ops: Op[], scope?: { component: string }): 'immediate' | 'preview' {
   const [op] = ops;
   if (ops.length !== 1 || op === undefined || opProblem(op) !== null) return 'preview';
   const node = immediateTarget(op);
   if (node === null) return 'preview';
-  return findNode(doc, node)?.container.kind === 'page' ? 'immediate' : 'preview';
+  const container = findNode(doc, node)?.container;
+  if (container?.kind === 'page') return 'immediate';
+  return scope && container?.kind === 'component' && container.key === scope.component ? 'immediate' : 'preview';
 }
 
 interface Batch {

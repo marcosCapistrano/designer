@@ -8,7 +8,7 @@ import type {
   StopResponse,
   TaskResponse,
   ImportRequest, ImportResponse, DesignSummary,
-  NodeSelection, DesignSelection, DesignEditResult,
+  NodeSelection, DesignSelection, DesignEditResult, DesignLayers, EditScope,
   DesignChatState, DesignChatResult,
   SourcePreviewState, SourcePreviewResult,
   CanvasFrame,
@@ -107,8 +107,11 @@ export class ApiClient {
   designSelection(app: string, selection: NodeSelection): Promise<DesignSelection> {
     return this.json(`${appPath(app)}/design/selection`, { method: 'POST', body: selection });
   }
-  editDesign(app: string, revision: string, ops: unknown[], selection?: NodeSelection): Promise<DesignEditResult> {
-    return this.json(`${appPath(app)}/design/edits`, { method: 'POST', body: { revision, ops, selection } });
+  editDesign(app: string, revision: string, ops: unknown[], selection?: NodeSelection, scope?: EditScope): Promise<DesignEditResult> {
+    return this.json(`${appPath(app)}/design/edits`, { method: 'POST', body: { revision, ops, selection, ...(scope ? { scope } : {}) } });
+  }
+  designLayers(app: string, pageId: string): Promise<DesignLayers> {
+    return this.json(`${appPath(app)}/design/layers?page=${encodeURIComponent(pageId)}`);
   }
   applyDesign(app: string, id: string): Promise<DesignEditResult> {
     return this.json(`${appPath(app)}/design/apply`, { method: 'POST', body: { id } });

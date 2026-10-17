@@ -20,7 +20,7 @@ describe('BasePainter', () => {
     const stats = painter.paint(input([frame()]));
     expect(stats).toMatchObject({ mode: 'full', blit: false, regions: 1, tilesDrawn: 2, missing: 0 });
     const fills = calls.filter(c => c.m === 'fillRect');
-    expect(fills[0]).toMatchObject({ a: [0, 0, 800, 600], fill: '#e9e9ec' });
+    expect(fills[0]).toMatchObject({ a: [0, 0, 800, 600], fill: '#121316' });
     expect(calls.filter(c => c.m === 'fillRect' && c.fill === '#ffffff').map(c => c.a)).toContainEqual([0, 0, 720, 500]);
     expect(draws(calls)).toEqual([['k/0_0', 0, 0, 512, 512], ['k/1_0', 512, 0, 512, 512]]);
   });
@@ -30,7 +30,7 @@ describe('BasePainter', () => {
     const painter = new BasePainter(ctx, tilesOf());
     painter.paint(input([frame()], { camera: { x: 0, y: -40, scale: 0.5 } }));
     const label = calls.find(c => c.m === 'fillText');
-    expect(label).toMatchObject({ fill: '#5f6368' });
+    expect(label).toMatchObject({ fill: '#9aa0a6' });
     expect(label?.a).toEqual(['P · 1440 × 900 · Desktop styles', 0, 14]);
   });
 
@@ -180,7 +180,7 @@ describe('BasePainter', () => {
     const render = { ...frame().render!, error: 'boom' };
     const failed = [frame({ frameId: 'a', render }), frame({ frameId: 'b', y: 1100, render })];
     painter.paint(input(failed, { viewport: { w: 800, h: 1200 } }));
-    expect(calls.filter(c => c.m === 'fillRect' && c.fill === '#d93025').map(c => c.a)).toEqual([[696, 8, 16, 16], [696, 558, 16, 16]]);
+    expect(calls.filter(c => c.m === 'fillRect' && c.fill === '#ff6b6b').map(c => c.a)).toEqual([[696, 8, 16, 16], [696, 558, 16, 16]]);
   });
 
   it('smoothing off during interaction', () => {
@@ -401,13 +401,13 @@ describe('BasePainter frame handles', () => {
     const { ctx, calls } = fakeCtx();
     new BasePainter(ctx, tilesOf()).paint(input([frame()], { camera: { x: 0, y: 0, scale: 0.5 } }));
     // Right edge at device x 720, viewport line at device y 450; the tab is 24 CSS px wide.
-    expect(calls.filter(c => c.m === 'fillRect' && c.fill === '#9aa0a6').map(c => c.a)).toContainEqual([720, 438, 24, 24]);
+    expect(calls.filter(c => c.m === 'fillRect' && c.fill === '#6b7076').map(c => c.a)).toContainEqual([720, 438, 24, 24]);
   });
 
   it('draws no handles when the frames are not editable', () => {
     const { ctx, calls } = fakeCtx();
     new BasePainter(ctx, tilesOf()).paint(input([frame()], { camera: { x: 0, y: 0, scale: 0.5 }, handles: false }));
-    expect(calls.filter(c => c.m === 'fillRect' && c.fill === '#9aa0a6')).toEqual([]);
+    expect(calls.filter(c => c.m === 'fillRect' && c.fill === '#6b7076')).toEqual([]);
   });
 
   it('draws the readout next to the handle being dragged', () => {

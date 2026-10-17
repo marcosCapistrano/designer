@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import { applyBatch, classifyBatch, decodeOpLog, describeOp, type DesignDoc, type DesignNode, type Op } from '@hub/design-model';
-import type { NodeSelection, DesignTarget, DesignSelection, DesignEditResult } from '@hub/protocol';
+import { applyBatch, classifyBatch, componentTitle, componentUses, decodeOpLog, describeOp, displayName, layerOutline, type DesignDoc, type DesignNode, type Op } from '@hub/design-model';
+import type { NodeSelection, DesignTarget, DesignSelection, DesignEditResult, DesignLayers, EditScope } from '@hub/protocol';
 import { baselineTokens, type StoredSync, type SyncState } from '@hub/sync';
 import type { BuildService } from '../build/service.js';
 import { BuildError } from '../build/ci.js';
@@ -35,7 +35,8 @@ export class DesignEditing {
   }
   async selection(app: string, selection: NodeSelection): Promise<DesignSelection> {
     const saved = await this.saved(app);
-    const page = saved.state.doc.pages[selection.pageId];
+    const doc = saved.state.doc;
+    const page = doc.pages[selection.pageId];
     if (!page) throw new BuildError('Page not found.', 404);
     const targets = new Map<string, DesignTarget>();
     for (const hit of selection.nodeIds) {
@@ -50,38 +51,63 @@ export class DesignEditing {
         node = subtree(def.root, id);
         shared = true;
         // A component root's style can be overridden on this page instance.
-        if (segments.length === 2 && node === def.root) targets.set(instance.id, { ...this.target(instance, false), declaredProps: Object.fromEntries(Object.entries(def.props).map(([key, value]) => [key, instance.props[key] ?? value.default])) });
+        if (segments.length === 2 && node === def.root) targets.set(instance.id, this.target(doc, instance, false));
       }
       if (!node) throw new BuildError('Selection is stale. Refresh the preview and select again.', 409);
-      targets.set(node.id, this.target(node, shared));
+      targets.set(node.id, this.target(doc, node, shared));
     }
     return { revision: saved.revision, selection, targets: [...targets.values()] };
   }
-  private target(node: DesignNode, shared: boolean): DesignTarget {
-    if (node.kind === 'text') return { id: node.id, kind: node.kind, shared, text: node.text, textNode: node.id };
-    if (node.kind === 'instance') return { id: node.id, kind: node.kind, shared, component: node.component, props: node.props, style: node.style };
-    const text = node.children.length === 1 && node.children[0]?.kind === 'text' ? node.children[0] : null;
-    return { id: node.id, kind: node.kind, shared, tag: node.tag, attrs: node.attrs, style: node.style, ...(text ? { text: text.text, textNode: text.id } : {}) };
+  async layers(app: string, pageId: string): Promise<DesignLayers> {
+    const saved = await this.saved(app);
+    const doc = saved.state.doc;
+    const root = layerOutline(doc, pageId);
+    if (!root) throw new BuildError('Page not found.', 404);
+    const uses = componentUses(doc);
+    const components = Object.fromEntries(Object.keys(doc.components).map((id) => [id, { title: componentTitle(doc, id), uses: uses[id] ?? 0 }]));
+    return { revision: saved.revision, root, components };
   }
-  async edit(app: string, revision: string, raw: unknown, selection?: NodeSelection, forcePreview = false): Promise<DesignEditResult> {
+  private target(doc: DesignDoc, node: DesignNode, shared: boolean): DesignTarget {
+    const name = displayName(doc, node);
+    if (node.kind === 'text') return { id: node.id, kind: node.kind, shared, name, text: node.text, textNode: node.id };
+    if (node.kind === 'instance') {
+      const def = doc.components[node.component];
+      const declaredProps = def ? Object.fromEntries(Object.entries(def.props).map(([key, value]) => [key, node.props[key] ?? value.default])) : undefined;
+      return { id: node.id, kind: node.kind, shared, name, title: componentTitle(doc, node.component), component: node.component, props: node.props, style: node.style, ...(declaredProps ? { declaredProps } : {}) };
+    }
+    const text = node.children.length === 1 && node.children[0]?.kind === 'text' ? node.children[0] : null;
+    return { id: node.id, kind: node.kind, shared, name, tag: node.tag, attrs: node.attrs, style: node.style, ...(text ? { text: text.text, textNode: text.id } : {}) };
+  }
+  async edit(app: string, revision: string, raw: unknown, selection?: NodeSelection, forcePreview = false, scope?: EditScope): Promise<DesignEditResult> {
     return this.build.withCheckout(app, async () => {
       const saved = await this.saved(app, revision);
-      return this.prepare(app, saved, decodeOps(raw), selection, forcePreview);
+      return this.prepare(app, saved, decodeOps(raw), selection, forcePreview, scope);
     });
   }
   /** Called by design-only MCP tools while their chat already holds the checkout reservation. */
-  async prepare(app: string, saved: StoredSync, ops: Op[], selection?: NodeSelection, forcePreview = false): Promise<DesignEditResult> {
+  async prepare(app: string, saved: StoredSync, ops: Op[], selection?: NodeSelection, forcePreview = false, scope?: EditScope): Promise<DesignEditResult> {
+    let inScope = false;
     if (selection) {
-      const allowed = new Set((await this.selection(app, selection)).targets.flatMap((target) => [target.id, ...(target.textNode ? [target.textNode] : [])]));
-      for (const op of ops) {
-        const targets = 'node' in op && typeof op.node === 'string' ? [op.node] : op.op === 'insertNode' ? [op.parent] : op.op === 'wrapNodes' ? op.nodes : [];
-        if (op.op === 'moveNode') targets.push(op.parent);
-        if (!targets.length || targets.some((id) => !allowed.has(id))) throw new BuildError('The edit targets an element outside the selection. Select its targets or clear the selection for a wider preview.', 400);
+      const targets = (await this.selection(app, selection)).targets;
+      const allowed = new Set(targets.flatMap((target) => [target.id, ...(target.textNode ? [target.textNode] : [])]));
+      const opTargets = ops.map((op) => {
+        const ids = 'node' in op && typeof op.node === 'string' ? [op.node] : op.op === 'insertNode' ? [op.parent] : op.op === 'wrapNodes' ? [...op.nodes] : [];
+        if (op.op === 'moveNode') ids.push(op.parent);
+        return ids;
+      });
+      for (const ids of opTargets) {
+        if (!ids.length || ids.some((id) => !allowed.has(id))) throw new BuildError('The edit targets an element outside the selection. Select its targets or clear the selection for a wider preview.', 400);
+      }
+      if (scope) {
+        const def = saved.state.doc.components[scope.component];
+        const inside = (id: string): boolean => !!def && subtree(def.root, id) !== null;
+        if (!opTargets.flat().every(inside)) throw new BuildError('The edit reaches outside the component being edited.', 400);
+        inScope = true;
       }
     }
     const applied = applyBatch(saved.state.doc, ops);
     if (!applied.ok) throw new BuildError(applied.error, 400);
-    if (!forcePreview && selection && classifyBatch(saved.state.doc, ops) === 'immediate') return this.commit(app, saved, ops, applied.value.doc);
+    if (!forcePreview && selection && classifyBatch(saved.state.doc, ops, inScope ? scope : undefined) === 'immediate') return this.commit(app, saved, ops, applied.value.doc);
     for (const [id, proposal] of this.proposals) if (proposal.expires <= this.now() || proposal.app === app) this.proposals.delete(id);
     if (this.proposals.size >= 100) throw new BuildError('Too many pending previews.', 409);
     const id = randomUUID();
