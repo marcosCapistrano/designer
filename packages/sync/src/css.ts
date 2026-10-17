@@ -2,10 +2,11 @@ import * as css from 'css-tree';
 import type { Device, ElementNode, StyleMap, Tokens } from '@hub/design-model';
 import { TOKEN_GROUP, TOKEN_NAME } from './tokens.js';
 import { overlaps } from './shorthands.js';
-import { isSourceOnly, matchSelector, specificity, type SelectorAst, type TreeNode } from './selectors.js';
+import { hasPseudoElement, isSourceOnly, matchSelector, restingPseudoElement, specificity, type SelectorAst, type TreeNode } from './selectors.js';
 
 /** `file` is the stylesheet that declares the rule and `text` its unscoped selector, for diagnostics. */
-export interface Rule { selector: SelectorAst; text: string; file: string; device: Device; layer: number; declarations: StyleMap; specificity: [number, number, number]; sourceOnly: boolean }
+/** `pseudo` names a resting-visible pseudo-element the rule styles; such a rule fails if it applies at rest (Ruling Q). */
+export interface Rule { selector: SelectorAst; text: string; file: string; device: Device; layer: number; declarations: StyleMap; specificity: [number, number, number]; sourceOnly: boolean; pseudo?: string | null }
 /** A dashed `:root` custom property `--group-name`, split at the first dash (Ruling D). */
 export interface Token { group: string; name: string; value: string; layer: number; file: string }
 /** `layers` collects first-appearance layer order across every stylesheet of one page. */
@@ -15,33 +16,38 @@ export class CssError extends Error { constructor(readonly file: string, message
 
 // R4: layer order beats specificity; unlayered rules (index 5) win.
 const LAYERS = ['reset', 'theme', 'base', 'components', 'utilities'];
-const SOURCE_ONLY_MEDIA = new Set(['hover:hover', 'hover:none', 'prefers-reduced-motion:reduce', 'min-width:1536px']);
+// Media features no rendered frame matches. The renderer is desktop Chromium: `(hover: hover)` holds in every frame (Ruling Q).
+const NEVER_MEDIA = new Set(['hover:none', 'prefers-reduced-motion:reduce', 'min-width:1536px']);
+const ALWAYS_MEDIA = new Set(['hover:hover']);
 const DEVICE_MEDIA: Record<string, Device> = { 'max-width:1023px': 'tablet', 'max-width:599px': 'mobile' };
 // Animation definitions only matter while something animates, which the resting frame never shows (Ruling E).
 const SOURCE_ONLY_AT_RULES = new Set(['keyframes', 'property']);
 
-/** Resolves a media query list to a device or to a state the resting frame never shows (R2). */
+/** Resolves a media query list to the device it applies to (`base` for every frame) or to `source` when no frame matches (R2). */
 function media(prelude: css.AtrulePrelude | css.Raw | null): Device | 'source' {
   const text = prelude ? css.generate(prelude) : '';
   const list = prelude?.type === 'AtrulePrelude' ? prelude.children.first : null;
   if (!list || list.type !== 'MediaQueryList') throw new Error(`Unsupported CSS at-rule @media ${text}`);
   const queries = list.children.toArray().map((query): Device | 'source' => {
     if (query.type !== 'MediaQuery' || query.modifier || (query.mediaType && query.mediaType !== 'print')) throw new Error(`Unsupported CSS at-rule @media ${text}`);
-    let source = query.mediaType === 'print', device: Device | null = null;
+    let never = query.mediaType === 'print', device: Device | null = null, features = 0;
     for (const part of query.condition?.children.toArray() ?? []) {
       if (part.type === 'Identifier' && part.name === 'and') continue;
       const key = part.type === 'Feature' && part.value ? `${part.name}:${css.generate(part.value)}`.replace(/\s/g, '') : '';
-      if (SOURCE_ONLY_MEDIA.has(key)) source = true;
+      features++;
+      if (NEVER_MEDIA.has(key)) never = true;
+      else if (ALWAYS_MEDIA.has(key)) continue;
       else if (DEVICE_MEDIA[key] && !device) device = DEVICE_MEDIA[key];
       else throw new Error(`Unsupported CSS at-rule @media ${text}`);
     }
-    if (source) return 'source';
-    if (!device) throw new Error(`Unsupported CSS at-rule @media ${text}`);
-    return device;
+    if (never) return 'source';
+    if (!features) throw new Error(`Unsupported CSS at-rule @media ${text}`);
+    return device ?? 'base';
   });
-  if (queries.every((query) => query === 'source')) return 'source';
+  const matching = queries.filter((query) => query !== 'source');
+  if (!matching.length) return 'source';
   if (queries.length !== 1) throw new Error(`Unsupported CSS at-rule @media ${text}`);
-  return queries[0]!;
+  return matching[0]!;
 }
 
 /** A deliberately bounded CSS subset. Unsupported rules fail before any design is written. */
@@ -87,6 +93,7 @@ export function parseStyles(text: string, scope: string | null, opts: StyleOptio
         if (node.name !== 'media' || !node.block) throw new Error(`Unsupported CSS at-rule @${node.name} ${prelude}`);
         const target = media(node.prelude);
         if (target === 'source') read(node.block.children, { ...at, source: true, top: false }, stack);
+        else if (target === 'base') read(node.block.children, { ...at, top: false }, stack);
         else if (at.device === 'base' || at.source) read(node.block.children, { ...at, device: at.device === 'base' ? target : at.device, top: false }, stack);
         else throw new Error(`Unsupported CSS at-rule @media ${prelude} nested in a device query`);
         return;
@@ -117,7 +124,8 @@ export function parseStyles(text: string, scope: string | null, opts: StyleOptio
         }
         if (scope) css.walk(selector, (part) => { if (part.type === 'ClassSelector') part.name = `${scope}__${part.name}`; });
         if (source) skip(stack[stack.length - 1]!);
-        rules.push({ selector, text, file: stack[stack.length - 1]!, device: at.device, layer: at.layer, declarations: own, specificity: specificity(selector), sourceOnly: source });
+        const pseudo = at.source ? null : restingPseudoElement(selector);
+        rules.push({ selector, text, file: stack[stack.length - 1]!, device: at.device, layer: at.layer, declarations: own, specificity: specificity(selector), sourceOnly: source, pseudo });
       });
     });
   }
@@ -156,15 +164,24 @@ export function applyStyles(root: ElementNode, rules: Rule[], inline: Map<string
   const known = new Set<string>();
   for (const rule of rules) css.walk(rule.selector, (part) => { if (part.type === 'ClassSelector') known.add(part.name); });
   const resting = rules.map((rule, order) => ({ rule, order })).filter(({ rule }) => !rule.sourceOnly);
+  const visible = rules.filter((rule) => rule.pseudo);
+  const tree = (node: ElementNode, parent: TreeNode | null, index: number, siblings: number): TreeNode => ({
+    tag: node.tag, attrs: { ...node.attrs }, parent, index, siblings, text: node.children.map((child) => child.kind === 'text' ? child.text : '').join(''),
+  });
   function visit(node: ElementNode, view: TreeNode, styled: boolean): void {
     for (const className of (node.attrs['class'] ?? '').split(/\s+/).filter(Boolean)) {
       if (!known.has(className)) throw new Error(`Unresolved CSS class ${className}; utility classes and Tailwind are unsupported`);
     }
     const elements = node.children.filter((child) => child.kind !== 'text');
+    view.tags = elements.map((child) => child.kind === 'element' ? child.tag : '');
     elements.forEach((child, index) => {
-      if (child.kind === 'element') visit(child, { tag: child.tag, attrs: { ...child.attrs }, parent: view, index, siblings: elements.length }, true);
+      if (child.kind === 'element') visit(child, tree(child, view, index, elements.length), true);
     });
     if (styled) {
+      for (const rule of visible) {
+        if (!hasPseudoElement(view, rule.pseudo!) || !matchSelector(view, rule.selector)) continue;
+        throw new CssError(rule.file, `Unsupported CSS pseudo-element ::${rule.pseudo} in ${rule.text}: it renders at rest on a matched element`);
+      }
       const matching = resting.filter(({ rule }) => {
         try { return matchSelector(view, rule.selector); }
         catch (error) { throw new CssError(rule.file, `${error instanceof Error ? error.message : 'Invalid selector'} in ${rule.text}`); }
@@ -197,5 +214,5 @@ export function applyStyles(root: ElementNode, rules: Rule[], inline: Map<string
     // The design model owns its generated class attribute; source classes are compiled into style maps.
     delete node.attrs['class'];
   }
-  visit(root, { tag: root.tag, attrs: { ...root.attrs }, parent: null, index: 0, siblings: 1 }, !opts.wrapper);
+  visit(root, tree(root, null, 0, 1), !opts.wrapper);
 }

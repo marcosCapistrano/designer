@@ -2,10 +2,15 @@ import * as css from 'css-tree';
 
 /** One complex selector from css-tree. Structural matching only; state is resolved before matching (R2, R3). */
 export type SelectorAst = css.Selector;
-export interface TreeNode { tag: string; attrs: Record<string, string>; parent: TreeNode | null; index: number; siblings: number }
+/** `tags` lists the tags of the element children and `text` the direct text content, where a state reads them. */
+export interface TreeNode { tag: string; attrs: Record<string, string>; parent: TreeNode | null; index: number; siblings: number; tags?: readonly string[]; text?: string }
 type Specificity = [number, number, number];
 
-const STATE = /^(?:hover|focus.*|active|disabled|checked|placeholder-shown)$/;
+// States the resting frame never shows (R2). States decidable from static attributes are matched structurally (Ruling Q).
+const STATE = /^(?:hover|focus.*|active|visited|target)$/;
+const STATIC_STATE = new Set(['disabled', 'enabled', 'checked', 'required', 'optional', 'read-only', 'read-write', 'placeholder-shown']);
+// Pseudo-elements that render at rest; a rule for one fails when it applies to an element in the tree (Ruling Q).
+const RESTING_PSEUDO = new Set(['placeholder', 'marker', 'first-line', 'first-letter', 'file-selector-button']);
 const LOGICAL = new Set(['is', 'where', 'not']);
 const STRUCTURAL = new Set(['first-child', 'last-child', 'root']);
 
@@ -40,13 +45,83 @@ export function isSourceOnly(selector: SelectorAst, content = true): boolean {
         if (part.name === 'not') { if (inner.some(Boolean)) throw new Error('Unsupported CSS selector :not() with a state pseudo-class'); }
         else if (inner.every(Boolean)) state = true;
         else if (inner.some(Boolean)) throw new Error(`Unsupported CSS selector :${part.name}() mixing resting and state alternatives`);
-      } else if (!STRUCTURAL.has(part.name) || part.children) throw new Error(`Unsupported CSS selector :${part.name}`);
+      } else if ((!STRUCTURAL.has(part.name) && !STATIC_STATE.has(part.name)) || part.children) throw new Error(`Unsupported CSS selector :${part.name}`);
     } else if (part.type === 'AttributeSelector') {
       if (part.flags || part.name.name.includes('|')) throw new Error(`Unsupported CSS attribute selector ${css.generate(part)}`);
     } else if (part.type === 'TypeSelector') { if (part.name.includes('|')) throw new Error(`Unsupported CSS selector ${part.name}`); }
     else if (part.type !== 'ClassSelector' && part.type !== 'IdSelector') throw new Error(`Unsupported CSS selector ${css.generate(part)}`);
   });
   return state;
+}
+
+/** The resting-visible pseudo-element a selector styles, or null (Ruling Q). */
+export function restingPseudoElement(selector: SelectorAst): string | null {
+  let found: string | null = null;
+  selector.children.forEach((part) => { if (part.type === 'PseudoElementSelector' && RESTING_PSEUDO.has(part.name)) found = part.name; });
+  return found;
+}
+
+/** Whether `pseudo` exists on the element: ::placeholder needs a placeholder text, ::file-selector-button a file input. */
+export function hasPseudoElement(node: TreeNode, pseudo: string): boolean {
+  if (pseudo === 'placeholder') return (node.tag === 'input' || node.tag === 'textarea') && !!node.attrs['placeholder'];
+  if (pseudo === 'file-selector-button') return node.tag === 'input' && node.attrs['type']?.toLowerCase() === 'file';
+  return true;
+}
+
+const has = (node: TreeNode, name: string) => Object.hasOwn(node.attrs, name);
+const inputType = (node: TreeNode) => (node.attrs['type'] ?? 'text').toLowerCase();
+const DISABLEABLE = new Set(['button', 'input', 'select', 'textarea', 'optgroup', 'option', 'fieldset']);
+const READ_WRITE_INPUTS = new Set(['text', 'search', 'url', 'tel', 'email', 'password', 'date', 'month', 'week', 'time', 'datetime-local', 'number']);
+const PLACEHOLDER_INPUTS = new Set(['text', 'search', 'url', 'tel', 'email', 'password', 'number']);
+const REQUIRED_NOT_APPLICABLE = new Set(['hidden', 'range', 'color', 'submit', 'image', 'reset', 'button']);
+
+/** HTML's "actually disabled": a disabled attribute, a disabled optgroup, or a disabled fieldset outside its first legend. */
+function isDisabled(node: TreeNode): boolean {
+  if (!DISABLEABLE.has(node.tag)) return false;
+  if (has(node, 'disabled')) return true;
+  if (node.tag === 'option') return node.parent?.tag === 'optgroup' && has(node.parent, 'disabled');
+  if (node.tag === 'optgroup') return false;
+  for (let child = node, up = node.parent; up; child = up, up = up.parent) {
+    if (up.tag !== 'fieldset' || !has(up, 'disabled')) continue;
+    if (child.tag === 'legend' && (up.tags ? up.tags.indexOf('legend') === child.index : child.index === 0)) return false;
+    return true;
+  }
+  return false;
+}
+
+function isEditable(node: TreeNode): boolean {
+  for (let up: TreeNode | null = node; up; up = up.parent) {
+    const value = up.attrs['contenteditable']?.toLowerCase();
+    if (value === '' || value === 'true' || value === 'plaintext-only') return true;
+    if (value === 'false') return false;
+  }
+  return false;
+}
+
+/** A state pseudo-class decided from static attributes, as the browser decides it on the unmodified page. */
+function staticState(node: TreeNode, name: string): boolean {
+  switch (name) {
+    case 'disabled': return isDisabled(node);
+    case 'enabled': return DISABLEABLE.has(node.tag) && !isDisabled(node);
+    case 'checked': return (node.tag === 'input' && ['checkbox', 'radio'].includes(inputType(node)) && has(node, 'checked')) || (node.tag === 'option' && has(node, 'selected'));
+    case 'required':
+    case 'optional': {
+      const applies = node.tag === 'select' || node.tag === 'textarea' || (node.tag === 'input' && !REQUIRED_NOT_APPLICABLE.has(inputType(node)));
+      const form = node.tag === 'select' || node.tag === 'textarea' || node.tag === 'input';
+      return name === 'required' ? applies && has(node, 'required') : form && !(applies && has(node, 'required'));
+    }
+    case 'read-write':
+    case 'read-only': {
+      const control = (node.tag === 'textarea' || (node.tag === 'input' && READ_WRITE_INPUTS.has(inputType(node)))) && !has(node, 'readonly') && !isDisabled(node);
+      return (control || isEditable(node)) === (name === 'read-write');
+    }
+    case 'placeholder-shown': {
+      const field = node.tag === 'textarea' || (node.tag === 'input' && PLACEHOLDER_INPUTS.has(inputType(node)));
+      const value = node.tag === 'textarea' ? node.text ?? '' : node.attrs['value'] ?? '';
+      return field && !!node.attrs['placeholder'] && value === '';
+    }
+    default: throw new Error(`Unsupported CSS selector :${name}`);
+  }
 }
 
 export function specificity(selector: SelectorAst): Specificity {
@@ -97,6 +172,7 @@ function compound(node: TreeNode, parts: css.CssNode[]): boolean {
         if (part.name === 'not') return !args(part).some((inner) => matchSelector(node, inner));
         if (part.name === 'is' || part.name === 'where') return args(part).some((inner) => matchSelector(node, inner));
         if (STATE.test(part.name)) return false; // State pseudo-classes never match at rest (R2).
+        if (STATIC_STATE.has(part.name)) return staticState(node, part.name);
         throw new Error(`Unsupported CSS selector :${part.name}`);
       default: throw new Error(`Unsupported CSS selector ${css.generate(part)}`);
     }

@@ -67,13 +67,48 @@ describe('stylesheet parsing', () => {
     '@media print { .a { color: blue } }',
     '@media (prefers-reduced-motion: reduce) { .a { color: blue } }',
     '@media (hover: none) and (max-width: 1023px) { .a { color: blue } }',
-    '@media (max-width: 1023px) { @media (hover: hover) { .a { color: blue } } }',
+    '@media (hover: none) { .a { color: blue } }',
     '.a:focus-visible { color: blue }',
-    '.a::placeholder { color: blue }',
+    '.b::placeholder { color: blue }',
+    '.a::selection { color: blue }',
   ])('%s is source-only', (text) => {
-    const parsed = parse(`.a { color: red } ${text}`);
+    const parsed = parse(`.a { color: red } .b {} ${text}`);
     expect(parsed.sourceOnly).toBe(1);
-    expect(style(`.a { color: red } ${text}`)).toEqual({ base: { color: 'red' } });
+    expect(style(`.a { color: red } .b {} ${text}`)).toEqual({ base: { color: 'red' } });
+  });
+
+  it('evaluates (hover: hover) as true and (hover: none) as false for every frame, the renderer being desktop Chromium (Ruling Q)', () => {
+    expect(style('@media (hover: hover) { .a { color: blue } }')).toEqual({ base: { color: 'blue' } });
+    expect(style('@media (max-width: 1023px) { @media (hover: hover) { .a { color: blue } } }')).toEqual({ base: {}, tablet: { color: 'blue' }, mobile: { color: 'blue' } });
+    expect(style('@media (hover: hover) and (max-width: 599px) { .a { color: blue } }')).toEqual({ base: {}, tablet: {}, mobile: { color: 'blue' } });
+    const mixed = parse('.a { color: red } @media (hover: hover) { .a:hover { color: blue } .a { padding: 1px } } @media (hover: none) { .a:active { color: green } .a { margin: 0 } }');
+    expect(mixed.sourceOnly).toBe(3);
+    const node = el('p', 'a');
+    applyStyles(node, mixed.rules, new Map());
+    expect(node.style).toEqual({ base: { color: 'red', padding: '1px' } });
+  });
+
+  it('applies statically decidable states at rest and fails on resting-visible pseudo-elements of matched elements (Ruling Q)', () => {
+    const input = (attrs: Record<string, string>): ElementNode => ({ ...el('input', 'f'), attrs: { class: 'f', ...attrs } });
+    const css = '.f { color: black } .f:placeholder-shown { color: gray } .f:disabled { opacity: 0.5 } .f:hover { color: red }';
+    const shown = input({ placeholder: 'Search' });
+    applyStyles(shown, parse(css).rules, new Map());
+    expect(shown.style.base).toEqual({ color: 'gray' });
+    const filled = input({ placeholder: 'Search', value: 'x' });
+    applyStyles(filled, parse(css).rules, new Map());
+    expect(filled.style.base).toEqual({ color: 'black' });
+    const button: ElementNode = { ...el('button', 'f'), attrs: { class: 'f', disabled: '' } };
+    applyStyles(button, parse(css).rules, new Map());
+    expect(button.style.base).toEqual({ color: 'black', opacity: '0.5' });
+    for (const pseudo of ['placeholder', 'first-line', 'first-letter', 'marker']) {
+      const error = (() => { try { applyStyles(input({ placeholder: 'Search' }), parse(`.f::${pseudo} { color: gray }`).rules, new Map()); } catch (caught) { return caught; } })();
+      expect(error).toBeInstanceOf(CssError);
+      expect(error).toMatchObject({ file: 'app/globals.css', message: `Unsupported CSS pseudo-element ::${pseudo} in .f::${pseudo}: it renders at rest on a matched element` });
+    }
+    expect(() => applyStyles(input({ type: 'file' }), parse('.f::file-selector-button { color: gray }').rules, new Map())).toThrow('Unsupported CSS pseudo-element ::file-selector-button');
+    const plain = input({});
+    applyStyles(plain, parse('.f { color: black } .f::placeholder { color: gray } ::file-selector-button { color: red }').rules, new Map());
+    expect(plain.style.base).toEqual({ color: 'black' });
   });
 
   it('keeps device media and a class used only in source-only rules resolves', () => {

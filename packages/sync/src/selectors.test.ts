@@ -48,4 +48,35 @@ describe('selectors', () => {
     expect(matchSelector(root, selector)).toBe(true);
     expect(matchSelector(tree('p', {}, root), selector)).toBe(false);
   });
+
+  it('evaluates state pseudo-classes decidable from static attributes structurally (Ruling Q)', () => {
+    const match = (selector: string, node: TreeNode) => matchSelector(node, parseSelector(selector));
+    for (const state of ['disabled', 'enabled', 'checked', 'required', 'optional', 'read-only', 'read-write', 'placeholder-shown']) expect(isSourceOnly(parseSelector(`.a:${state}`))).toBe(false);
+    for (const state of ['hover', 'focus', 'focus-visible', 'focus-within', 'active', 'visited', 'target']) expect(isSourceOnly(parseSelector(`.a:${state}`))).toBe(true);
+    expect(match('button:disabled', tree('button', { disabled: '' }))).toBe(true);
+    expect(match('button:disabled', tree('button', {}))).toBe(false);
+    expect(match('button:enabled', tree('button', {}))).toBe(true);
+    expect(match('div:enabled', tree('div', {}))).toBe(false);
+    const fieldset = { ...tree('fieldset', { disabled: '' }), tags: ['legend', 'input'] };
+    expect(match('input:disabled', tree('input', {}, fieldset, 1, 2))).toBe(true);
+    expect(match('input:disabled', tree('input', {}, { ...tree('legend', {}, fieldset, 0, 2) }))).toBe(false);
+    expect(match(':checked', tree('input', { type: 'checkbox', checked: '' }))).toBe(true);
+    expect(match(':checked', tree('input', { type: 'text', checked: '' }))).toBe(false);
+    expect(match(':checked', tree('option', { selected: '' }))).toBe(true);
+    expect(match(':required', tree('input', { required: '' }))).toBe(true);
+    expect(match(':optional', tree('input', {}))).toBe(true);
+    expect(match(':optional', tree('div', {}))).toBe(false);
+    expect(match(':read-write', tree('input', {}))).toBe(true);
+    expect(match(':read-only', tree('input', { readonly: '' }))).toBe(true);
+    expect(match(':read-only', tree('input', { type: 'checkbox' }))).toBe(true);
+    expect(match(':read-only', tree('div', {}))).toBe(true);
+    expect(match(':read-write', tree('p', {}, tree('div', { contenteditable: 'true' })))).toBe(true);
+    expect(match(':placeholder-shown', tree('input', { placeholder: 'Search' }))).toBe(true);
+    expect(match(':placeholder-shown', tree('input', { placeholder: 'Search', value: 'x' }))).toBe(false);
+    expect(match(':placeholder-shown', tree('input', { placeholder: 'Search', value: '' }))).toBe(true);
+    expect(match(':placeholder-shown', tree('input', {}))).toBe(false);
+    expect(match(':placeholder-shown', { ...tree('textarea', { placeholder: 'Note' }), text: 'typed' })).toBe(false);
+    expect(match(':placeholder-shown', { ...tree('textarea', { placeholder: 'Note' }), text: '' })).toBe(true);
+    expect(match('.a:not(:disabled)', tree('button', { class: 'a' }))).toBe(true);
+  });
 });
