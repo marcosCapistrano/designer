@@ -62,3 +62,27 @@ describe('layer names at import', () => {
     expect(child(root(doc), 0).name).toBe('Ad Card');
   });
 });
+
+describe('layer names through adapters and shared definitions', () => {
+  it('an adapter element keeps its data-name', () => {
+    const result = extractPages({
+      files: { 'page.tsx': `import Link from 'next/link'; export default () => <main><Link href="/x" data-name="Nav Button / Anúncios">Go</Link></main>` },
+      adapters: { modules: { 'next/link': { default: { kind: 'element', tag: 'a', attrs: { href: 'href' } } } } },
+    }, [{ route: '/', file: 'page.tsx' }]);
+    if (!result.ok) throw new Error(JSON.stringify(result));
+    const link = Object.values(result.doc.pages)[0]!.root.children[0] as ElementNode;
+    expect(link.name).toBe('Nav Button / Anúncios');
+    expect(link.attrs['data-name']).toBeUndefined();
+  });
+
+  it('elements inside a shared definition are named after their CSS module class', () => {
+    const doc = extract({
+      'page.tsx': `import Chip from './Chip'; export default () => <main><Chip label="A" /><Chip label="B" /></main>`,
+      'Chip.tsx': `import styles from './Chip.module.css'; export default function Chip({ label }: { label: string }) { return <span className={styles.chip}><b className={styles.chipLabel}>{label}</b></span>; }`,
+      'Chip.module.css': `.chip { color: red; } .chipLabel { color: blue; }`,
+    }, true);
+    const def = Object.values(doc.components)[0]!;
+    expect(def.root.name).toBe('Chip');
+    expect((def.root.children[0] as ElementNode).name).toBe('Chip Label');
+  });
+});

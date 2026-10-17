@@ -1,6 +1,6 @@
 import ts from '@typescript/typescript6';
 import { canonicalStringify, SVG_CASED_ATTRS, validateDoc, type ComponentDef, type DesignDoc, type DesignNode, type ElementNode, type InstanceNode, type NodeStyle, type StyleMap } from '@hub/design-model';
-import { applyStyles, CssError, parseStyles, winningTokens, type Rule, type Token } from './css.js';
+import { applyStyles, CssError, nameFromClass, parseStyles, winningTokens, type Rule, type Token } from './css.js';
 import { mergeTokens } from './tokens.js';
 import type { ComponentRules, ExtractOptions, ExtractResult, InlinedComponent, InlineReason, PreviewNode, RouteEntry, RouteInlining, SourceDiagnostic, SourceProject, TokenSource } from './types.js';
 import { choiceKey, choicesProblem, PreviewRequired } from './choices.js';
@@ -664,7 +664,7 @@ function extractOnce(project: SourceProject, entries: RouteEntry[], options: Ext
         if (adapter?.kind === 'omit') return [];
         // An adapter reads only className/class and its mapped props. Every other prop is ignored and never evaluated.
         const mapped = adapter?.kind === 'element' ? adapter.attrs ?? {} : null;
-        const reads = (name: string) => !adapter || (mapped !== null && (name === 'className' || name === 'class' || Object.hasOwn(mapped, name)));
+        const reads = (name: string) => !adapter || (mapped !== null && (name === 'className' || name === 'class' || name === 'data-name' || Object.hasOwn(mapped, name)));
         let props: Record<string, Value> = {};
         for (const attribute of opening.attributes.properties) {
           if (!ts.isJsxAttribute(attribute)) { if (adapter?.kind === 'children') continue; throw new Error('JSX spreads need a preview choice'); }
@@ -847,6 +847,7 @@ function extractOnce(project: SourceProject, entries: RouteEntry[], options: Ext
         function apply(def: DesignNode): void {
           if (def.kind !== 'element') return;
           def.style = structuredClone(styles.get(def.id)!.style);
+          nameFromClass(def);
           delete def.attrs['class'];
           def.children.forEach(apply);
         }

@@ -227,11 +227,7 @@ export function applyStyles(root: ElementNode, rules: Rule[], inline: Map<string
       }
       opts.matched?.set(node, matching.map(({ rule }) => rule));
     }
-    // An unnamed element is named after its last CSS Module class (`scope__favoriteName` → "Favorite Name").
-    if (node.name === undefined) {
-      const local = (node.attrs['class'] ?? '').split(/\s+/).filter((c) => c.includes('__')).pop()?.split('__').pop();
-      if (local) node.name = humanize(local);
-    }
+    nameFromClass(node);
     // The design model owns its generated class attribute; source classes are compiled into style maps.
     delete node.attrs['class'];
   }
@@ -241,4 +237,11 @@ export function applyStyles(root: ElementNode, rules: Rule[], inline: Map<string
 /** `favoriteName` / `bar-fill` / `bar_fill` → "Favorite Name" / "Bar Fill". */
 export function humanize(local: string): string {
   return local.replace(/([a-z0-9])([A-Z])/g, '$1 $2').split(/[-_\s]+/).filter(Boolean).map((w) => w[0]!.toUpperCase() + w.slice(1)).join(' ');
+}
+
+/** Names an unnamed element after its last CSS Module class (`scope__favoriteName` → "Favorite Name"). */
+export function nameFromClass(node: ElementNode): void {
+  if (node.name !== undefined) return;
+  const local = (node.attrs['class'] ?? '').split(/\s+/).filter((c) => c.includes('__')).pop()?.split('__').pop();
+  if (local) node.name = humanize(local);
 }
