@@ -46,7 +46,7 @@ function voidError(tag: string): string {
 export function validateSubtree(
   doc: DesignDoc,
   node: DesignNode,
-  ctx: { extraIds?: Set<string> } = {},
+  ctx: { extraIds?: Set<string>; pageRoot?: boolean } = {},
 ): string | null {
   const state: IdState = {
     taken: new Set(allIds(doc)),
@@ -54,7 +54,7 @@ export function validateSubtree(
     seen: new Set<string>(),
     attrs: new Map<ComponentDef, TemplatedAttr[]>(),
   };
-  return checkNode(doc, node, state);
+  return checkNode(doc, node, state, ctx.pageRoot ?? false);
 }
 
 interface IdState {
@@ -74,7 +74,7 @@ function attrsOf(state: IdState, def: ComponentDef): TemplatedAttr[] {
   return attrs;
 }
 
-function checkNode(doc: DesignDoc, node: DesignNode, state: IdState): string | null {
+function checkNode(doc: DesignDoc, node: DesignNode, state: IdState, pageRoot = false): string | null {
   const { id } = node;
   const idProblem = validateNodeId(id);
   if (idProblem !== null) return idProblem;
@@ -96,7 +96,7 @@ function checkNode(doc: DesignDoc, node: DesignNode, state: IdState): string | n
   const tagProblem = validateTag(node.tag);
   if (tagProblem !== null) return tagProblem;
   for (const [name, value] of Object.entries(node.attrs)) {
-    const problem = validateAttrName(name) ?? validateAttrValue(name, value);
+    const problem = validateAttrName(name, pageRoot) ?? validateAttrValue(name, value);
     if (problem !== null) return problem;
   }
   const styleProblem = checkStyle(node.style);

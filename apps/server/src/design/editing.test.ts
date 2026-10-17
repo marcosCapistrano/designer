@@ -3,8 +3,8 @@ import { canonicalStringify } from '@hub/design-model';
 import { synchronizePages, serializeSyncState, parseSyncState, type StoredSync, type SyncState } from '@hub/sync';
 import type { NodeSelection } from '@hub/protocol';
 import { DesignEditing } from './editing.js';
-function setup(shared = false) {
-  const files: Record<string, string> = { 'page.tsx': shared ? `import Button from './Button'; export default () => <main><Button label="Start" /><Button label="Go" /></main>` : `export default () => <main><button>Start</button><p>Other</p></main>` };
+function setup(shared = false, extra: Record<string, string> = {}) {
+  const files: Record<string, string> = { ...extra, 'page.tsx': extra['page.tsx'] ?? (shared ? `import Button from './Button'; export default () => <main><Button label="Start" /><Button label="Go" /></main>` : `export default () => <main><button>Start</button><p>Other</p></main>`) };
   if (shared) files['Button.tsx'] = 'export default ({label}) => <button>{label}</button>';
   const result = synchronizePages({ project: { files }, entries: [{ route: '/', file: 'page.tsx' }], commit: 'one' });
   if (!result.ok) throw new Error(JSON.stringify(result));
@@ -42,6 +42,23 @@ describe('validated design editing', () => {
     await restarted.history('demo', s.saved().revision, 'redo');
     expect(s.saved().state.pending).toHaveLength(1);
     expect(s.renders()).toBe(3);
+  });
+  it('keeps baseline :root tokens through undo and redo replay, and the saved state parses', async () => {
+    const s = setup(false, {
+      'page.tsx': `import './globals.css'; export default () => <main className="c"><button>Start</button></main>`,
+      'globals.css': ':root { --color-brand: #f00; --space-4: 1rem } .c { color: var(--color-brand); padding: var(--space-4) }',
+    });
+    const tokens = { color: { brand: '#f00' }, space: { '4': '1rem' } };
+    expect(s.saved().state.doc.tokens).toEqual(tokens);
+    await s.editing.edit('demo', 'one', [{ op: 'setStyle', node: s.child.id, device: 'tablet', prop: 'color', value: 'red' }], s.selection);
+    for (const direction of ['undo', 'redo', 'undo'] as const) {
+      await s.editing.history('demo', s.saved().revision, direction);
+      expect(s.saved().state.doc.tokens).toEqual(tokens);
+      const decoded = parseSyncState(serializeSyncState(s.saved().state));
+      expect(decoded.ok).toBe(true);
+      if (decoded.ok) expect(decoded.value.doc.tokens).toEqual(tokens);
+    }
+    expect(s.saved().state.pending).toEqual([]);
   });
   it('previews multiple properties without publishing, then applies an exact revision once', async () => {
     const s = setup();

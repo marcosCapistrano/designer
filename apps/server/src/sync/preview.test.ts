@@ -6,10 +6,10 @@ import { FsSyncStore } from '@hub/sync';
 import { FakeClaudeRunner,type FakeStep } from '../claude/fake.js';
 import { SyncService } from './service.js';
 import { SourcePreview,type PreviewActions } from './preview.js';
-async function setup(code='const user=loadUser();export default () => <main><h1>{user.name}</h1></main>'){
+async function setup(code='const user=loadUser();export default () => <main><h1>{user.name}</h1></main>',extra:Record<string,string>={}){
   const dir=await mkdtemp(join(tmpdir(),'hub-source-preview-'));
   const store=new FsSyncStore(dir);
-  const source={project:{files:{'app/page.tsx':code}},commit:'one'};
+  const source:{project:{files:Record<string,string>};commit:string;config?:Record<string,string>}={project:{files:{'app/page.tsx':code,...extra}},commit:'one'};
   const build={withCheckout:async<T>(_app:string,action:()=>Promise<T>)=>action()};
   const sync=new SyncService({dataDir:dir,build,registry:{get:async name=>name==='demo'?{name,dir,adopted:false,manifest:null,manifestError:null}:null},hub:{broadcast:()=>{}},store:()=>store,readSource:async()=>source,render:async()=>({manifest:{version:1,pages:[]},warnings:[]})});
   let actions!:PreviewActions;
@@ -48,6 +48,25 @@ describe('reviewed subscription source samples',()=>{
     s.source.project.files['app/page.tsx']='export default () => <main>{dynamic()}</main>';
     s.scripts.push([async()=>{const gap=(await s.actions().gaps())[0]!;await expect(s.actions().choose(gap.key,{kind:'nodes',nodes:[{tag:'script'}]})).rejects.toThrow();await expect(s.actions().choose('0'.repeat(64),{kind:'nodes',nodes:[]})).rejects.toThrow('Unknown');await expect(s.actions().choose(gap.key,{kind:'nodes',nodes:['Sample']})).rejects.toThrow('Two invalid')},{type:'done',ok:true,sessionId:'invalid'}]);
     expect(await s.preview.propose('demo',{mode:'next'})).toMatchObject({ok:false,kind:'source'});expect(await s.store.load()).toBeNull();
+    await s.preview.close();await s.sync.close();
+  });
+  it('chooses samples for gaps on failed routes of a partial import, leaving unsupported routes failed',async()=>{
+    const s=await setup(undefined,{'app/ok/page.tsx':'export default () => <p>Static</p>','app/bad/page.tsx':'export default () => <script>bad</script>'});
+    s.scripts.push([async()=>{const gaps=await s.actions().gaps();expect(gaps).toHaveLength(1);await s.actions().choose(gaps[0]!.key,{kind:'value',value:{name:'Alice'}})},{type:'done',ok:true,sessionId:'partial'}]);
+    const result=await s.preview.propose('demo',{mode:'next'});
+    expect(s.runner.calls).toHaveLength(1);
+    if(!result.ok)throw new Error(JSON.stringify(result));
+    expect(result.proposal.samples).toHaveLength(1);
+    expect(await s.preview.apply('demo',result.proposal.id)).toMatchObject({ok:true,rebuilt:['/','/ok'],failed:[{route:'/bad'}]});
+    await s.preview.close();await s.sync.close();
+  });
+  it('reports unusable import configuration as a source diagnostic naming the file, without calling Claude',async()=>{
+    const s=await setup();
+    s.source.config={'.hub/adapters.json':'{}}'};
+    expect(await s.preview.propose('demo',{mode:'next'})).toMatchObject({ok:false,kind:'source',diagnostics:[{file:'.hub/adapters.json'}]});
+    s.source.config={'tsconfig.json':'{ "extends": "./base.json" }'};
+    expect(await s.preview.propose('demo',{mode:'next'})).toMatchObject({ok:false,kind:'source',diagnostics:[{file:'tsconfig.json',message:expect.stringContaining('extends')}]});
+    expect(s.runner.calls).toHaveLength(0);expect(await s.store.load()).toBeNull();
     await s.preview.close();await s.sync.close();
   });
 });

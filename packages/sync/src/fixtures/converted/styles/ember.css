@@ -1,0 +1,11 @@
+.ember {
+  --ember-text-primary: #fafafa;
+  --ember-text-muted: #a1a1aa;
+  --ember-accent-default: #f59e0b;
+  color: var(--ember-text-primary);
+}
+
+.ember-type-body-small {
+  font: 400 var(--text-xs) / var(--text-xs-leading) sans-serif;
+  letter-spacing: 0.01em;
+}

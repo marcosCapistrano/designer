@@ -1,0 +1,21 @@
+@layer reset, theme, base, components, utilities;
+@import "../styles/tokens.css";
+@import "../styles/animations.css";
+@import "../styles/reset.css";
+@import "../styles/ember.css";
+
+:root {
+  --background: 240 10% 3.9%;
+  --radius: 0.5rem;
+  --radius-md: calc(var(--radius) - 2px);
+}
+
+.dark {
+  --foreground: 0 0% 98%;
+}
+
+@layer base {
+  body {
+    background-color: hsl(var(--background));
+  }
+}

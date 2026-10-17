@@ -9,6 +9,7 @@ export { applyBatch, classifyBatch, DesignSession } from './session.js';
 export type { BatchResult } from './session.js';
 export { serializeDoc, parseDoc, encodeOpLog, decodeOpLog } from './files.js';
 export { validateDoc } from './validate.js';
+export { SVG_CASED_ATTRS, validateTag } from './rules.js';
 export { exportPage } from './export.js';
 export { describeOp } from './describe.js';
 export { sampleDoc } from './fixtures.js';

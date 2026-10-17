@@ -1,0 +1,28 @@
+@layer utilities {
+  .page {
+    padding: var(--space-4);
+  }
+  .card {
+    display: grid;
+    gap: var(--space-2);
+  }
+  .title {
+    color: var(--ember-text-muted);
+  }
+  .chip {
+    color: var(--color-amber-300);
+  }
+  @media (hover: hover) {
+    .title:is(:where(.card):hover *) {
+      color: var(--ember-text-primary);
+    }
+    .chip.chip:hover {
+      color: var(--color-amber-400);
+    }
+  }
+  @media (max-width: 1023px) {
+    .card {
+      gap: var(--space-0_5);
+    }
+  }
+}

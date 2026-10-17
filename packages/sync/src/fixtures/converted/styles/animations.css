@@ -1,0 +1,16 @@
+@property --enter-opacity {
+  syntax: "*";
+  inherits: false;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes motion-enter {
+  from {
+    opacity: var(--enter-opacity, 1);
+  }
+}

@@ -1,22 +1,101 @@
 import * as css from 'css-tree';
-import type { Device, ElementNode, StyleMap } from '@hub/design-model';
+import type { Device, ElementNode, StyleMap, Tokens } from '@hub/design-model';
+import { TOKEN_GROUP, TOKEN_NAME } from './tokens.js';
+import { overlaps, resets } from './shorthands.js';
+import { hasPseudoElement, isSourceOnly, matchSelector, restingPseudoElement, specificity, type SelectorAst, type TreeNode } from './selectors.js';
 
-interface Rule { selector: string; device: Device; declarations: StyleMap; specificity: [number, number, number] }
+/** `file` is the stylesheet that declares the rule and `text` its unscoped selector, for diagnostics. */
+/** `pseudo` names a resting-visible pseudo-element the rule styles; such a rule fails if it applies at rest (Ruling Q). */
+export interface Rule { selector: SelectorAst; text: string; file: string; device: Device; layer: number; declarations: StyleMap; specificity: [number, number, number]; sourceOnly: boolean; pseudo?: string | null }
+/** A dashed `:root` custom property `--group-name`, split at the first dash (Ruling D). */
+export interface Token { group: string; name: string; value: string; layer: number; file: string }
+/** `layers` collects first-appearance layer order across every stylesheet of one page. */
+export interface StyleOptions { file: string; resolveImport(spec: string, from: string): { file: string; text: string }; layers?: string[] }
+/** A CSS failure attributed to the stylesheet that contains it. */
+export class CssError extends Error { constructor(readonly file: string, message: string) { super(message); } }
+
+// R4: layer order beats specificity; unlayered rules (index 5) win.
+const LAYERS = ['reset', 'theme', 'base', 'components', 'utilities'];
+// Media features no rendered frame matches. The renderer is desktop Chromium: `(hover: hover)` holds in every frame (Ruling Q).
+const NEVER_MEDIA = new Set(['hover:none', 'prefers-reduced-motion:reduce', 'min-width:1536px']);
+const ALWAYS_MEDIA = new Set(['hover:hover']);
+const DEVICE_MEDIA: Record<string, Device> = { 'max-width:1023px': 'tablet', 'max-width:599px': 'mobile' };
+// Animation definitions only matter while something animates, which the resting frame never shows (Ruling E).
+const SOURCE_ONLY_AT_RULES = new Set(['keyframes', 'property']);
+
+/** Resolves a media query list to the device it applies to (`base` for every frame) or to `source` when no frame matches (R2). */
+function media(prelude: css.AtrulePrelude | css.Raw | null): Device | 'source' {
+  const text = prelude ? css.generate(prelude) : '';
+  const list = prelude?.type === 'AtrulePrelude' ? prelude.children.first : null;
+  if (!list || list.type !== 'MediaQueryList') throw new Error(`Unsupported CSS at-rule @media ${text}`);
+  const queries = list.children.toArray().map((query): Device | 'source' => {
+    if (query.type !== 'MediaQuery' || query.modifier || (query.mediaType && query.mediaType !== 'print')) throw new Error(`Unsupported CSS at-rule @media ${text}`);
+    let never = query.mediaType === 'print', device: Device | null = null, features = 0;
+    for (const part of query.condition?.children.toArray() ?? []) {
+      if (part.type === 'Identifier' && part.name === 'and') continue;
+      const key = part.type === 'Feature' && part.value ? `${part.name}:${css.generate(part.value)}`.replace(/\s/g, '') : '';
+      features++;
+      if (NEVER_MEDIA.has(key)) never = true;
+      else if (ALWAYS_MEDIA.has(key)) continue;
+      else if (DEVICE_MEDIA[key] && !device) device = DEVICE_MEDIA[key];
+      else throw new Error(`Unsupported CSS at-rule @media ${text}`);
+    }
+    if (never) return 'source';
+    if (!features) throw new Error(`Unsupported CSS at-rule @media ${text}`);
+    return device ?? 'base';
+  });
+  const matching = queries.filter((query) => query !== 'source');
+  if (!matching.length) return 'source';
+  if (queries.length !== 1) throw new Error(`Unsupported CSS at-rule @media ${text}`);
+  return matching[0]!;
+}
 
 /** A deliberately bounded CSS subset. Unsupported rules fail before any design is written. */
-export function parseStyles(text: string, scope: string | null): Rule[] {
-  const tree = css.parse(text, { parseValue: false });
+/** `sourceOnly` counts the rules and blocks skipped as source-only (R2); `sourceOnlyFiles` splits that count by file. */
+export function parseStyles(text: string, scope: string | null, opts: StyleOptions): { rules: Rule[]; tokens: Token[]; sourceOnly: number; sourceOnlyFiles: Record<string, number> } {
   const rules: Rule[] = [];
-  function read(nodes: css.List<css.CssNode>, device: Device): void {
+  const tokens: Token[] = [];
+  const layers = opts.layers ?? [];
+  let sourceOnly = 0;
+  const sourceOnlyFiles: Record<string, number> = {};
+  const skip = (file: string) => { sourceOnly++; sourceOnlyFiles[file] = (sourceOnlyFiles[file] ?? 0) + 1; };
+  interface Context { device: Device; layer: number; source: boolean; top: boolean }
+  function read(nodes: css.List<css.CssNode>, at: Context, stack: string[]): void {
     nodes.forEach((node) => {
       if (node.type === 'Comment') return;
       if (node.type === 'Atrule') {
-        const media = node.prelude ? css.generate(node.prelude).replace(/\s/g, '') : '';
-        const next = media === '(max-width:1023px)' ? 'tablet' : media === '(max-width:599px)' ? 'mobile' : null;
-        if (node.name !== 'media' || !next || !node.block || device !== 'base') {
-          throw new Error(`Unsupported CSS at-rule @${node.name} ${media}`);
+        const prelude = node.prelude ? css.generate(node.prelude) : '';
+        if (node.name === 'import') {
+          const target = node.prelude?.type === 'AtrulePrelude' && node.prelude.children.size === 1 ? node.prelude.children.first : null;
+          const spec = target?.type === 'String' || target?.type === 'Url' ? target.value : null;
+          if (spec === null || node.block || !at.top) throw new Error(`Unsupported CSS at-rule @import ${prelude}`);
+          if (!spec.startsWith('.')) throw new Error(`Unsupported CSS package import ${spec}`);
+          if (scope) throw new Error('Unsupported CSS @import in a CSS Module');
+          const imported = opts.resolveImport(spec, stack[stack.length - 1]!);
+          if (stack.includes(imported.file)) throw new Error(`Cyclic CSS @import ${spec}`);
+          sheet(imported.text, imported.file, [...stack, imported.file]);
+          return;
         }
-        read(node.block.children, next);
+        if (node.name === 'layer') {
+          const list = node.prelude?.type === 'AtrulePrelude' && node.prelude.children.size === 1 ? node.prelude.children.first : null;
+          const names = list?.type === 'LayerList' ? list.children.toArray().map((layer) => layer.type === 'Layer' ? layer.name : '') : [];
+          for (const name of names) if (!LAYERS.includes(name)) throw new Error(`Unsupported CSS layer ${name || prelude}`);
+          if (!names.length) throw new Error(`Unsupported CSS anonymous @layer ${prelude}`);
+          if (node.block ? names.length !== 1 || at.layer !== LAYERS.length || at.device !== 'base' : !at.top) throw new Error(`Unsupported CSS nested @layer ${prelude}`);
+          // Browsers order layers by first appearance; the importer requires that to be the canonical order (R4).
+          for (const name of names) if (!layers.includes(name)) layers.push(name);
+          if (layers.some((name, i) => i > 0 && LAYERS.indexOf(name) < LAYERS.indexOf(layers[i - 1]!))) throw new Error(`Unsupported CSS layer order: ${layers.join(', ')}`);
+          if (!node.block) return;
+          read(node.block.children, { ...at, layer: LAYERS.indexOf(names[0]!), top: false }, stack);
+          return;
+        }
+        if (SOURCE_ONLY_AT_RULES.has(node.name) && node.block) { skip(stack[stack.length - 1]!); return; }
+        if (node.name !== 'media' || !node.block) throw new Error(`Unsupported CSS at-rule @${node.name} ${prelude}`);
+        const target = media(node.prelude);
+        if (target === 'source') read(node.block.children, { ...at, source: true, top: false }, stack);
+        else if (target === 'base') read(node.block.children, { ...at, top: false }, stack);
+        else if (at.device === 'base' || at.source) read(node.block.children, { ...at, device: at.device === 'base' ? target : at.device, top: false }, stack);
+        else throw new Error(`Unsupported CSS at-rule @media ${prelude} nested in a device query`);
         return;
       }
       if (node.type !== 'Rule' || node.prelude.type !== 'SelectorList') throw new Error('Unsupported CSS rule');
@@ -24,58 +103,132 @@ export function parseStyles(text: string, scope: string | null): Rule[] {
       node.block.children.forEach((declaration) => {
         if (declaration.type !== 'Declaration' || declaration.important) throw new Error('Unsupported CSS declaration (including !important)');
         if (Object.hasOwn(declarations, declaration.property) || ['__proto__', 'constructor', 'prototype'].includes(declaration.property)) throw new Error('Unsupported CSS repeated or reserved property');
-        declarations[declaration.property] = css.generate(declaration.value);
+        declarations[declaration.property] = declaration.property.startsWith('--') ? css.generate(declaration.value).trim() : css.generate(declaration.value);
       });
       node.prelude.children.forEach((selector) => {
-        const raw = css.generate(selector);
-        if (!/^(?:\*|[a-z][a-z0-9-]*)?(?:[.#][a-zA-Z_][\w-]*)*$/.test(raw) || !raw) {
-          throw new Error(`Unsupported CSS selector ${raw}`);
+        if (selector.type !== 'Selector' || !selector.children.size) throw new Error(`Unsupported CSS selector ${css.generate(selector)}`);
+        const source = isSourceOnly(selector, Object.hasOwn(declarations, 'content')) || at.source;
+        const text = css.generate(selector);
+        let own = declarations;
+        if (text === ':root' && at.device === 'base' && !source) {
+          own = {};
+          for (const [property, value] of Object.entries(declarations)) {
+            // Undashed custom properties such as shadcn's `--background` stay declarations on the root.
+            const dash = property.startsWith('--') ? property.indexOf('-', 2) : -1;
+            if (dash < 0) { own[property] = value; continue; }
+            const group = property.slice(2, dash), name = property.slice(dash + 1);
+            if (!TOKEN_GROUP.test(group) || !TOKEN_NAME.test(name)) throw new Error(`Unsupported CSS token name ${property}: a :root token must be --group-name in lowercase letters, digits, _ and -`);
+            tokens.push({ group, name, value, layer: at.layer, file: stack[stack.length - 1]! });
+          }
+          if (!Object.keys(own).length) return;
         }
-        const scoped = scope ? raw.replace(/\.([\w-]+)/g, `.${scope}__$1`) : raw;
-        rules.push({ selector: scoped, device, declarations, specificity: [raw.match(/#/g)?.length ?? 0, raw.match(/\./g)?.length ?? 0, /^[a-z]/.test(raw) ? 1 : 0] });
+        if (scope) css.walk(selector, (part) => { if (part.type === 'ClassSelector') part.name = `${scope}__${part.name}`; });
+        if (source) skip(stack[stack.length - 1]!);
+        const pseudo = at.source ? null : restingPseudoElement(selector);
+        rules.push({ selector, text, file: stack[stack.length - 1]!, device: at.device, layer: at.layer, declarations: own, specificity: specificity(selector), sourceOnly: source, pseudo });
       });
     });
   }
-  read(tree.type === 'StyleSheet' ? tree.children : new css.List(), 'base');
-  return rules;
-}
-
-function matches(node: ElementNode, selector: string): boolean {
-  const tag = selector.match(/^[a-z][a-z0-9-]*/)?.[0];
-  if (tag && node.tag !== tag) return false;
-  const classes = new Set((node.attrs['class'] ?? '').split(/\s+/));
-  for (const part of selector.matchAll(/([.#])([\w-]+)/g)) {
-    if (part[1] === '.' ? !classes.has(part[2]!) : node.attrs['id'] !== part[2]) return false;
+  function sheet(content: string, file: string, stack: string[]): void {
+    try {
+      const tree = css.parse(content, { parseValue: false, parseCustomProperty: false });
+      const top = tree.type === 'StyleSheet' ? tree.children.toArray().filter((node) => node.type !== 'Comment') : [];
+      const head = top.findIndex((node) => node.type !== 'Atrule' || node.name !== 'import' && (node.name !== 'layer' || !!node.block));
+      if (head >= 0 && top.slice(head).some((node) => node.type === 'Atrule' && node.name === 'import')) throw new Error('Unsupported CSS @import after other rules');
+      read(tree.type === 'StyleSheet' ? tree.children : new css.List(), { device: 'base', layer: LAYERS.length, source: false, top: true }, stack);
+    } catch (error) { throw error instanceof CssError ? error : new CssError(file, error instanceof Error ? error.message : 'Invalid CSS'); }
   }
-  return true;
+  sheet(text, opts.file, [opts.file]);
+  return { rules, tokens, sourceOnly, sourceOnlyFiles };
 }
 
-export function applyStyles(root: ElementNode, rules: Rule[], inline: Map<string, StyleMap>): void {
-  function visit(node: ElementNode): void {
+/** The token each `--group-name` resolves to over every stylesheet of a page, in load order: layer order, then source order. */
+export function winningTokens(tokens: Token[]): Token[] {
+  const winners = new Map<string, Token>();
+  const ordered = tokens.map((token, order) => ({ token, order })).sort((a, b) => a.token.layer - b.token.layer || a.order - b.order);
+  for (const { token } of ordered) winners.set(`--${token.group}-${token.name}`, token);
+  return [...winners.values()];
+}
+
+export function cascadeTokens(tokens: Token[]): Tokens {
+  const result: Tokens = {};
+  for (const token of winningTokens(tokens)) (Object.hasOwn(result, token.group) ? result[token.group]! : (result[token.group] = {}))[token.name] = token.value;
+  return result;
+}
+
+/**
+ * Compiles source classes into style maps over the fully expanded source tree (R3). A `wrapper` root is a
+ * synthetic page root that is not itself styled. `matched` receives the resting rules matching each element.
+ */
+export function applyStyles(root: ElementNode, rules: Rule[], inline: Map<string, StyleMap>, opts: { wrapper?: boolean; matched?: Map<ElementNode, Rule[]> } = {}): void {
+  const known = new Set<string>();
+  for (const rule of rules) css.walk(rule.selector, (part) => { if (part.type === 'ClassSelector') known.add(part.name); });
+  const resting = rules.map((rule, order) => ({ rule, order })).filter(({ rule }) => !rule.sourceOnly);
+  const visible = rules.filter((rule) => rule.pseudo);
+  const tree = (node: ElementNode, parent: TreeNode | null, index: number, siblings: number): TreeNode => ({
+    tag: node.tag, attrs: { ...node.attrs }, parent, index, siblings, text: node.children.map((child) => child.kind === 'text' ? child.text : '').join(''),
+  });
+  function visit(node: ElementNode, view: TreeNode, styled: boolean): void {
     for (const className of (node.attrs['class'] ?? '').split(/\s+/).filter(Boolean)) {
-      if (!rules.some((rule) => [...rule.selector.matchAll(/\.([\w-]+)/g)].some((match) => match[1] === className))) {
-        throw new Error(`Unresolved CSS class ${className}; utility classes and Tailwind are unsupported`);
-      }
+      if (!known.has(className)) throw new Error(`Unresolved CSS class ${className}; utility classes and Tailwind are unsupported`);
     }
-    const matching = rules.map((rule, order) => ({ rule, order })).filter(({ rule }) => matches(node, rule.selector))
-      .sort((a, b) => a.rule.specificity[0] - b.rule.specificity[0] || a.rule.specificity[1] - b.rule.specificity[1] || a.rule.specificity[2] - b.rule.specificity[2] || a.order - b.order);
-    for (const device of ['base', 'tablet', 'mobile'] as const) {
-      const style: StyleMap = {};
-      for (const { rule } of matching) {
-        if (rule.device === 'base' || rule.device === device || (device === 'mobile' && rule.device === 'tablet')) Object.assign(style, rule.declarations);
+    const elements = node.children.filter((child) => child.kind !== 'text');
+    view.tags = elements.map((child) => child.kind === 'element' ? child.tag : '');
+    elements.forEach((child, index) => {
+      if (child.kind === 'element') visit(child, tree(child, view, index, elements.length), true);
+    });
+    if (styled) {
+      for (const rule of visible) {
+        if (!hasPseudoElement(view, rule.pseudo!) || !matchSelector(view, rule.selector)) continue;
+        throw new CssError(rule.file, `Unsupported CSS pseudo-element ::${rule.pseudo} in ${rule.text}: it renders at rest on a matched element`);
       }
-      Object.assign(style, inline.get(node.id));
-      // Canonical style maps sort properties. Mixed shorthand/longhand order cannot be retained.
-      for (const shorthand of ['all', 'margin', 'padding', 'border', 'background', 'font', 'flex', 'grid', 'animation', 'transition', 'outline', 'list-style', 'overflow', 'gap', 'inset']) {
-        if (Object.hasOwn(style, shorthand) && Object.keys(style).some((property) => property !== shorthand && (shorthand === 'all' || property.startsWith(`${shorthand}-`)))) {
-          throw new Error(`Unsupported CSS mixed shorthand and longhand: ${shorthand}`);
+      const matching = resting.filter(({ rule }) => {
+        try { return matchSelector(view, rule.selector); }
+        catch (error) { throw new CssError(rule.file, `${error instanceof Error ? error.message : 'Invalid selector'} in ${rule.text}`); }
+      })
+        .sort((a, b) => a.rule.layer - b.rule.layer || a.rule.specificity[0] - b.rule.specificity[0] || a.rule.specificity[1] - b.rule.specificity[1] || a.rule.specificity[2] - b.rule.specificity[2] || a.order - b.order);
+      for (const device of ['base', 'tablet', 'mobile'] as const) {
+        const style: StyleMap = {};
+        // Keys are kept in the order they were last set, so the check below sees the cascade order.
+        const origin = new Map<string, Rule | null>();
+        const set = (map: StyleMap | undefined, rule: Rule | null) => { for (const [property, value] of Object.entries(map ?? {})) { delete style[property]; style[property] = value; origin.set(property, rule); } };
+        for (const { rule } of matching) {
+          if (rule.device === 'base' || rule.device === device || (device === 'mobile' && rule.device === 'tablet')) set(rule.declarations, rule);
         }
+        const own = inline.get(node.id);
+        for (const [property, value] of Object.entries(own ?? {})) {
+          if (/!\s*important\s*$/i.test(value)) throw new Error(`Unsupported inline style ${property}: !important`);
+        }
+        set(own, null);
+        // Canonical style maps sort properties on export. Where one declaration sets or resets a longhand of another,
+        // their cascade order must be their sorted order, or the exported page would resolve them differently.
+        // Logical properties are mapped for horizontal writing (shorthands.ts), so any other writing mode fails.
+        for (const property of ['writing-mode', '-webkit-writing-mode']) {
+        const mode = style[property];
+        if (mode !== undefined && !/^(?:horizontal-tb|initial|inherit|unset|revert|revert-layer)$/i.test(mode.trim())) {
+          const rule = origin.get(property);
+          const message = `Unsupported CSS writing-mode ${mode.trim()} in ${rule ? rule.text : 'inline style'}`;
+          throw rule ? new CssError(rule.file, message) : new Error(message);
+        }
+        }
+        // A declaration whose every longhand a later one resets has no effect: dropping it keeps the result exactly.
+        const cascade = Object.keys(style);
+        cascade.forEach((earlier, i) => { if (cascade.slice(i + 1).some((later) => resets(earlier, later))) delete style[earlier]; });
+        const order = Object.keys(style);
+        order.forEach((earlier, i) => order.slice(i + 1).forEach((later) => {
+          if (earlier < later || !overlaps(earlier, later)) return;
+          const from = [origin.get(earlier), origin.get(later)];
+          const where = [...new Set(from.map((rule) => rule ? rule.text : 'inline style'))].join(' and ');
+          const message = `Unsupported CSS declaration order: ${earlier} before ${later} in ${where}`;
+          const file = from[1]?.file ?? from[0]?.file;
+          throw file ? new CssError(file, message) : new Error(message);
+        }));
+        if (device === 'base' || matching.some(({ rule }) => rule.device !== 'base')) node.style[device] = style;
       }
-      if (device === 'base' || matching.some(({ rule }) => rule.device !== 'base')) node.style[device] = style;
+      opts.matched?.set(node, matching.map(({ rule }) => rule));
     }
-    for (const child of node.children) if (child.kind === 'element') visit(child);
     // The design model owns its generated class attribute; source classes are compiled into style maps.
     delete node.attrs['class'];
   }
-  visit(root);
+  visit(root, tree(root, null, 0, 1), !opts.wrapper);
 }

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'preact/hooks';
 import type { JSX } from 'preact';
-import type { ImportResponse, NodeSelection } from '@hub/protocol';
+import type { ImportDiagnostic, ImportResponse, NodeSelection } from '@hub/protocol';
 import type { ApiClient } from '../../net/api.js';
 import type { WsClient } from '../../net/ws.js';
 import type { BlobCache } from '../../canvas/cache.js';
@@ -9,6 +9,9 @@ import { CanvasView } from '../../canvas/index.js';
 import './design.css';
 import { EditorPanel } from './EditorPanel.js';
 import { SourceSamples } from './SourceSamples.js';
+import { importNote } from './import-result.js';
+
+const Diagnostics = ({ items }: { items: ImportDiagnostic[] }) => <ul>{items.map((diagnostic, index) => <li key={index}>{diagnostic.file && `${diagnostic.file}: `}{diagnostic.message}</li>)}</ul>;
 
 export interface DesignAreaProps { app: string; api: ApiClient; ws: WsClient; source: TileSource; cache: BlobCache }
 export function DesignArea({ app, api, ws, source, cache }: DesignAreaProps): JSX.Element {
@@ -25,7 +28,7 @@ export function DesignArea({ app, api, ws, source, cache }: DesignAreaProps): JS
   const [selection, setSelection] = useState<NodeSelection | null>(null);
   const [revision, setRevision] = useState<string | null>(null);
   const [sampleBusy,setSampleBusy]=useState(false);
-  const imported=useCallback((out:ImportResponse)=>{setResult(out);if(out.ok){setRevision(out.revision);setSelection(null);setNote(`Imported ${out.rebuilt.length} pages; reused ${out.reused.length}.${out.removed.length?` Removed ${out.removed.length} source routes.`:''}`);setPreviewVersion(value=>value+1)}},[]);
+  const imported=useCallback((out:ImportResponse)=>{setResult(out);if(out.ok){setRevision(out.revision);setSelection(null);setNote(importNote(out));setPreviewVersion(value=>value+1)}},[]);
   const edited = useCallback((next: string, warnings: string[]) => { setRevision(next); setNote(warnings.join(' ') || 'Design updated.'); setPreviewVersion((value) => value + 1); setSelection(null); }, []);
   useEffect(() => { let active = true; void api.designSummary(app).then((summary) => { if (active) setRevision((current) => current ?? summary.revision); }).catch(() => {}); return () => { active = false; }; }, [app, api]);
   useEffect(() => {
@@ -64,7 +67,11 @@ export function DesignArea({ app, api, ws, source, cache }: DesignAreaProps): JS
     {error && <p class="design-status" role="alert">{error}</p>}
     {result && !result.ok && <div class="design-status" role="alert">
       <p>Import was not applied. Your previous design and edits are preserved.</p>
-      {result.kind === 'source' ? <ul>{result.diagnostics.map((diagnostic, index) => <li key={index}>{diagnostic.file && `${diagnostic.file}: `}{diagnostic.message}</li>)}</ul> : <ul>{result.conflicts.map((conflict) => <li key={conflict.index}>Edit {conflict.index + 1}: {conflict.message}</li>)}<li>{result.blocked.length} later edits are blocked.</li></ul>}
+      {result.kind === 'source' ? <Diagnostics items={result.diagnostics} /> : <ul>{result.conflicts.map((conflict) => <li key={conflict.index}>Edit {conflict.index + 1}: {conflict.message}</li>)}<li>{result.blocked.length} later edits are blocked.</li></ul>}
+    </div>}
+    {result?.ok && result.failed.length > 0 && <div class="design-status" role="alert">
+      <p>These routes were not imported. Each keeps its previous version, if it had one.</p>
+      <ul>{result.failed.map((failure) => <li key={failure.route}>{failure.route}<Diagnostics items={failure.diagnostics} /></li>)}</ul>
     </div>}
     {result?.ok && result.warnings.length > 0 && <p class="design-status" role="alert">{result.warnings.join(' ')}</p>}
     <div class="design-workspace"><div class="design-canvas"><CanvasView key={previewVersion} source={source} cache={cache} onSelect={setSelection} />

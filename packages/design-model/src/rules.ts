@@ -40,6 +40,20 @@ export const DENIED_TAGS: ReadonlySet<string> = new Set([
   'xmp', 'plaintext', 'noembed', 'noframes', 'listing',
 ]);
 
+// The SVG attributes whose names are mixed case (the HTML parser's "adjust SVG attributes" table). SVG reads
+// attribute names case-sensitively, so these are the only attribute names that may hold uppercase letters.
+export const SVG_CASED_ATTRS: ReadonlySet<string> = new Set([
+  'attributeName', 'attributeType', 'baseFrequency', 'baseProfile', 'calcMode', 'clipPathUnits', 'diffuseConstant',
+  'edgeMode', 'filterUnits', 'glyphRef', 'gradientTransform', 'gradientUnits', 'kernelMatrix', 'kernelUnitLength',
+  'keyPoints', 'keySplines', 'keyTimes', 'lengthAdjust', 'limitingConeAngle', 'markerHeight', 'markerUnits',
+  'markerWidth', 'maskContentUnits', 'maskUnits', 'numOctaves', 'pathLength', 'patternContentUnits',
+  'patternTransform', 'patternUnits', 'pointsAtX', 'pointsAtY', 'pointsAtZ', 'preserveAlpha', 'preserveAspectRatio',
+  'primitiveUnits', 'refX', 'refY', 'repeatCount', 'repeatDur', 'requiredExtensions', 'requiredFeatures',
+  'specularConstant', 'specularExponent', 'spreadMethod', 'startOffset', 'stdDeviation', 'stitchTiles',
+  'surfaceScale', 'systemLanguage', 'tableValues', 'targetX', 'targetY', 'textLength', 'viewBox', 'viewTarget',
+  'xChannelSelector', 'yChannelSelector', 'zoomAndPan',
+]);
+
 const TAG_PATTERN = /^[a-z][a-z0-9-]*$/;
 
 export function validateTag(tag: string): string | null {
@@ -57,6 +71,7 @@ export function validateAttrValue(name: string, value: string): string | null {
   if (name === 'srcdoc') return 'Attribute srcdoc is not allowed';
   // Op logs are decoded without a shape check, so a value can arrive here as another type.
   if (typeof value !== 'string') return `Attribute ${name} must have a string value`;
+  if (name === 'data-d-shell' && value !== 'html') return 'Attribute data-d-shell must be "html"';
   const normalized = value.replace(IGNORED_IN_URL, '').toLowerCase();
   if (UNSAFE_URL_PREFIXES.some((prefix) => normalized.startsWith(prefix))) {
     return `Unsafe URL in attribute ${name}`;

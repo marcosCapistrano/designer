@@ -1,4 +1,6 @@
-import { applyOp, canonicalStringify, decodeOpLog, encodeOpLog, parseDoc, serializeDoc, type DesignDoc, type Result } from '@hub/design-model';
+import { applyOp, canonicalStringify, decodeOpLog, encodeOpLog, parseDoc, serializeDoc, type DesignDoc, type Result, type Tokens } from '@hub/design-model';
+import { mergeTokens } from './tokens.js';
+import type { RouteInlining, TokenSource } from './types.js';
 import type { SyncBaseline, SyncState } from './synchronize.js';
 import { choicesProblem } from './choices.js';
 import { createHash } from 'node:crypto';
@@ -7,6 +9,23 @@ const SHA = /^[a-f0-9]{64}$/;
 const object = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value);
 const path = (value: unknown): value is string => typeof value === 'string' && !value.includes('\\') && !value.includes('\0') && value.split('/').every((part) => part !== '' && part !== '.' && part !== '..');
 function fail(error: string): Result<SyncState> { return { ok: false, error }; }
+const tokenSources = (value: unknown): value is TokenSource[] => Array.isArray(value) && value.every((token) => object(token) && Object.keys(token).length === 4 && ['group', 'name', 'value', 'file'].every((key) => typeof token[key] === 'string') && path(token['file']));
+const strings = (value: unknown): value is string[] => Array.isArray(value) && value.every((item) => typeof item === 'string');
+const REASONS = ['children', 'optional-prop', 'prop-css'];
+const routeInlining = (value: unknown): value is RouteInlining => object(value) && Object.keys(value).length === 4 && strings(value['encountered']) && strings(value['input'])
+  && Array.isArray(value['inline']) && value['inline'].every((item) => object(item) && Object.keys(item).length === 3 && ['key', 'component', 'file'].every((key) => typeof item[key] === 'string') && path(item['file']))
+  && object(value['reasons']) && Object.values(value['reasons']).every((reason) => REASONS.includes(reason as string));
+
+/** The document tokens a stored baseline defines, merged over its routes. */
+export function baselineTokens(baseline: SyncBaseline): Tokens {
+  const tokens: Tokens = {};
+  const origins = new Map<string, TokenSource>();
+  for (const page of Object.values(baseline.pages)) {
+    const conflict = mergeTokens(tokens, origins, page.tokens ?? []);
+    if (conflict) throw new Error(conflict.message);
+  }
+  return tokens;
+}
 
 /** The canonical design files, with source baselines and the pending log stored alongside them. */
 export function serializeSyncState(state: SyncState): Record<string, string> {
@@ -42,9 +61,12 @@ export function parseSyncState(files: Record<string, string>): Result<SyncState>
     const base = metadata['baseline'];
     if (!Number.isSafeInteger(base['version']) || (base['version'] as number) < 1 || typeof base['sourcePathsHash'] !== 'string' || !SHA.test(base['sourcePathsHash']) || !object(base['pages'])) return fail('Invalid baseline metadata');
     if (base['choicesHash'] !== undefined && (typeof base['choicesHash'] !== 'string' || !SHA.test(base['choicesHash']) || base['choicesHash'] !== createHash('sha256').update(canonicalStringify(metadata['choices'] ?? {})).digest('hex'))) return fail('Preview choices do not match the cached baseline');
+    if (base['adaptersHash'] !== undefined && (typeof base['adaptersHash'] !== 'string' || !SHA.test(base['adaptersHash']))) return fail('Invalid adapters hash');
     const clean: DesignDoc = { meta: { version: 1, seq: 0 }, pages: {}, components: {}, tokens: {} };
+    const tokenOrigins = new Map<string, TokenSource>();
     for (const [route, value] of Object.entries(base['pages'])) {
       if (!route.startsWith('/') || !object(value) || !object(value['entry']) || !object(value['page']) || !object(value['hashes'])) return fail(`Invalid baseline for ${route}`);
+      if ((value['stale'] !== undefined && value['stale'] !== true) || (value['sourceOnly'] !== undefined && !(object(value['sourceOnly']) && Object.entries(value['sourceOnly']).every(([file, count]) => path(file) && Number.isSafeInteger(count) && (count as number) > 0)))) return fail(`Invalid baseline for ${route}`);
       const entry = value['entry'];
       if (entry['route'] !== route || !path(entry['file']) || (entry['exportName'] !== undefined && typeof entry['exportName'] !== 'string') || (entry['layouts'] !== undefined && (!Array.isArray(entry['layouts']) || !entry['layouts'].every(path)))) return fail(`Invalid route entry for ${route}`);
       if (typeof value['commit'] !== 'string' || !value['commit'].trim()) return fail(`Missing baseline commit for ${route}`);
@@ -61,6 +83,12 @@ export function parseSyncState(files: Record<string, string>): Result<SyncState>
           componentFiles[`components/${name}.json`] = canonicalStringify(definition);
         }
       }
+      if (value['tokens'] !== undefined) {
+        if (!tokenSources(value['tokens'])) return fail(`Invalid baseline tokens for ${route}`);
+        const conflict = mergeTokens(clean.tokens, tokenOrigins, value['tokens']);
+        if (conflict) return fail(`Baseline ${route}: ${conflict.message}`);
+      }
+      if (value['inlining'] !== undefined && !routeInlining(value['inlining'])) return fail(`Invalid baseline inlining for ${route}`);
       const parsed = parseDoc({ 'meta.json': canonicalStringify(clean.meta), 'tokens.json': '{}', [`pages/${page['id']}.json`]: canonicalStringify(page), ...componentFiles });
       if (!parsed.ok) return fail(`Baseline ${route}: ${parsed.error}`);
       Object.assign(clean.pages, parsed.value.pages);
@@ -69,6 +97,9 @@ export function parseSyncState(files: Record<string, string>): Result<SyncState>
         clean.components[name] = definition;
       }
     }
+    const inlined = base['inlined'];
+    if (inlined !== undefined && !(Array.isArray(inlined) && inlined.every((item) => object(item) && Object.keys(item).length === 4 && typeof item['route'] === 'string' && Object.hasOwn(base['pages'] as object, item['route'])
+      && typeof item['component'] === 'string' && path(item['file']) && REASONS.includes(item['reason'] as string)))) return fail('Invalid inlined components');
     const combined = parseDoc(serializeDoc(clean));
     if (!combined.ok) return fail(`Baseline: ${combined.error}`);
     let replayed = combined.value;

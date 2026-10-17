@@ -13,7 +13,12 @@ import { isPlainObject } from '../shape.js';
 import type { HandlerMap } from './handler.js';
 import { lookupNode, ownValue, requireElement, requireNode, validateAttrName } from './util.js';
 
-const NAME_PATTERN = /^[a-z][a-z0-9-]*$/;
+// A token group has no dash: `--group-name` is split back at its first dash, so a dashed group would not round-trip.
+const GROUP_PATTERN = /^[a-z][a-z0-9]*$/;
+// Groups saved before that rule may still hold dashes; deleting their tokens stays possible.
+const LEGACY_GROUP_PATTERN = /^[a-z][a-z0-9-]*$/;
+// A token name follows its group in `--group-name`, so it may start with a digit and use `_` (`--space-0_5`).
+const TOKEN_NAME_PATTERN = /^[a-z0-9_][a-z0-9_-]*$/;
 
 // setStyle and setName apply to element and instance nodes. validate has already rejected text nodes.
 function requireNonText(draft: DesignDoc, id: string): ElementNode | InstanceNode {
@@ -100,7 +105,8 @@ export const basicHandlers: HandlerMap = {
       const found = lookupNode(doc, op.node);
       if (!found.ok) return found.error;
       if (found.hit.node.kind !== 'element') return `Node ${op.node} is not an element`;
-      const nameProblem = validateAttrName(op.name);
+      const { container, node } = found.hit;
+      const nameProblem = validateAttrName(op.name, container.kind === 'page' && ownValue(doc.pages, container.key)?.root === node);
       if (nameProblem !== null) return nameProblem;
       if (op.value === null) return null;
       // Inside a component, a placeholder in the value is filled in by every instance of it.
@@ -129,8 +135,9 @@ export const basicHandlers: HandlerMap = {
 
   setToken: {
     validate(_doc, op) {
-      // group and name become CSS custom property names, so they must match NAME_PATTERN.
-      if (!NAME_PATTERN.test(op.group) || !NAME_PATTERN.test(op.name)) {
+      // group and name become the CSS custom property name `--group-name`.
+      const group = op.value === null ? LEGACY_GROUP_PATTERN : GROUP_PATTERN;
+      if (!group.test(op.group) || !TOKEN_NAME_PATTERN.test(op.name)) {
         return `Invalid token name: group "${op.group}", name "${op.name}"`;
       }
       if (op.value === null) return null;

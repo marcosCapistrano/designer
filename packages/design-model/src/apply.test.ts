@@ -3,6 +3,7 @@ import { applyOp, applyOpInternal, validateOp, validateOpInternal } from './appl
 import { canonicalStringify } from './canonical.js';
 import { sampleDoc } from './fixtures.js';
 import { findNode } from './tree.js';
+import { exportPage } from './export.js';
 import type { DesignDoc, DesignNode, NodeStyle, Op, Page } from './types.js';
 
 function applied(doc: DesignDoc, op: Op): DesignDoc {
@@ -138,6 +139,22 @@ describe('setAttr', () => {
     expect(error).toContain('is not allowed');
   });
 
+  test.each(['viewBox', 'preserveAspectRatio', 'stdDeviation'])('accepts the case-sensitive SVG attribute %s', (name) => {
+    expect(attrsOf(applied(sampleDoc(), { op: 'setAttr', node: 'n3', name, value: '0 0 1 1' }), 'n3')).toEqual({ [name]: '0 0 1 1' });
+  });
+
+  test.each(['strokeWidth', 'fillRule', 'ViewBox'])('rejects the camelCase name %s, which no SVG attribute has', (name) => {
+    expect(rejected(sampleDoc(), { op: 'setAttr', node: 'n3', name, value: '1' })).toContain('is not allowed');
+  });
+
+  test('sets data-d-shell only on a page root, and only to html', () => {
+    const doc = sampleDoc();
+    const root = Object.values(doc.pages)[0]!.root.id;
+    expect(attrsOf(applied(doc, { op: 'setAttr', node: root, name: 'data-d-shell', value: 'html' }), root)).toEqual({ 'data-d-shell': 'html' });
+    expect(rejected(doc, { op: 'setAttr', node: root, name: 'data-d-shell', value: 'body' })).toBe('Attribute data-d-shell must be "html"');
+    expect(rejected(doc, { op: 'setAttr', node: 'n3', name: 'data-d-shell', value: 'html' })).toBe('Attribute "data-d-shell" is only allowed on a page root');
+  });
+
   test('rejects an event handler attribute', () => {
     const error = rejected(sampleDoc(), { op: 'setAttr', node: 'n3', name: 'onclick', value: 'alert(1)' });
     expect(error).toBe('Attribute "onclick" is not allowed');
@@ -200,14 +217,36 @@ describe('setToken', () => {
     expect(next.tokens).toEqual({ color: { primary: '#3366ff' }, constructor: { x: '1' } });
   });
 
+  test('accepts token names that start with a digit or contain an underscore, and exports them as --group-name', () => {
+    const one = applied(sampleDoc(), { op: 'setToken', group: 'space', name: '0_5', value: '0.125rem' });
+    const two = applied(one, { op: 'setToken', group: 'container', name: '2xl', value: '42rem' });
+    expect(two.tokens).toMatchObject({ space: { '0_5': '0.125rem' }, container: { '2xl': '42rem' } });
+    const exported = exportPage(two, Object.keys(two.pages)[0]!);
+    expect(exported.ok && exported.value.css).toContain('--container-2xl:42rem;--space-0_5:0.125rem;');
+  });
+
   test.each([
     ['Color', 'primary'],
     ['color', 'Primary'],
     ['color', 'primary name'],
     ['', 'x'],
+    ['space', '-x'],
+    ['space', ''],
+    ['space_x', '1'],
+    ['1space', 'x'],
+    // The importer splits `--group-name` at the first dash, so a dashed group would not round-trip.
+    ['brand-color', 'x'],
   ])('rejects token group %j and name %j', (group, name) => {
     const error = rejected(sampleDoc(), { op: 'setToken', group, name, value: '1px' });
     expect(error).toContain('Invalid token name');
+  });
+
+  test('deletes a dashed token group saved before groups lost their dashes', () => {
+    const doc = structuredClone(sampleDoc());
+    doc.tokens['brand-color'] = { x: '#f00' };
+    const next = applied(doc, { op: 'setToken', group: 'brand-color', name: 'x', value: null });
+    expect(Object.hasOwn(next.tokens, 'brand-color')).toBe(false);
+    expect(rejected(doc, { op: 'setToken', group: 'brand-color', name: 'y', value: '1px' })).toContain('Invalid token name');
   });
 
   test('rejects a token value that would break out of the CSS block', () => {

@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { applyBatch, classifyBatch, decodeOpLog, describeOp, type DesignDoc, type DesignNode, type Op } from '@hub/design-model';
 import type { NodeSelection, DesignTarget, DesignSelection, DesignEditResult } from '@hub/protocol';
-import type { StoredSync, SyncState } from '@hub/sync';
+import { baselineTokens, type StoredSync, type SyncState } from '@hub/sync';
 import type { BuildService } from '../build/service.js';
 import { BuildError } from '../build/ci.js';
 import type { SyncService } from '../sync/service.js';
@@ -19,7 +19,7 @@ function decodeOps(value: unknown): Op[] {
   return decoded.value;
 }
 function baselineDoc(state: SyncState): DesignDoc {
-  const doc: DesignDoc = { meta: { version: 1, seq: state.doc.meta.seq }, pages: {}, components: {}, tokens: {} };
+  const doc: DesignDoc = { meta: { version: 1, seq: state.doc.meta.seq }, pages: {}, components: {}, tokens: baselineTokens(state.baseline) };
   for (const saved of Object.values(state.baseline.pages)) { doc.pages[saved.page.id] = structuredClone(saved.page); Object.assign(doc.components, structuredClone(saved.components ?? {})); }
   return doc;
 }
