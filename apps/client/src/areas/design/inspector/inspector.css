@@ -33,3 +33,30 @@
 .inspector-raw { display: flex; flex-direction: column; gap: var(--s2); }
 @media (hover: hover) { .inspector-chip:hover:not(.inspector-chip-on) { color: var(--text); } }
 .inspector-chip:focus-visible, .inspector-section-head:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.inspector-title { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0; padding-top: var(--s1); }
+.inspector-name {
+  box-sizing: border-box; width: 100%; min-height: 36px; margin: 0; padding: 0 var(--s1);
+  border: 1px solid transparent; border-radius: var(--radius-s); background: transparent; color: var(--text);
+  font: inherit; font-size: var(--text-l); font-weight: 600; text-overflow: ellipsis;
+}
+span.inspector-name { display: flex; align-items: center; overflow: hidden; white-space: nowrap; }
+input.inspector-name:focus { border-color: var(--accent); background: var(--surface-2); outline: none; }
+@media (hover: hover) { input.inspector-name:hover:not(:focus) { border-color: var(--border); } }
+.inspector-kind { padding: 0 var(--s1); color: var(--text-2); font-size: var(--text-s); }
+.inspector-path { padding: 0 var(--s1); color: #b18cff; font-size: var(--text-s); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.inspector-section-row { display: flex; align-items: center; gap: var(--s2); }
+.inspector-section-row .inspector-section-head { flex: 1; }
+.inspector-section-empty .inspector-section-head { color: var(--text-2); font-weight: 500; cursor: default; }
+.inspector-add {
+  flex: 0 0 auto; width: 36px; height: 36px; padding: 0; border: 0; border-radius: var(--radius-s);
+  background: transparent; color: var(--text-2); font: inherit; font-size: 20px; text-align: center; text-align-last: center;
+  appearance: none; -webkit-appearance: none; cursor: pointer;
+  background-image: linear-gradient(var(--text-2), var(--text-2)), linear-gradient(var(--text-2), var(--text-2));
+  background-size: 14px 1.8px, 1.8px 14px; background-position: center; background-repeat: no-repeat; color: transparent;
+}
+.inspector-add option { color: var(--text); background: var(--surface); font-size: var(--text-m); }
+@media (hover: hover) { .inspector-add:hover { background-color: var(--surface-2); } }
+.inspector-add:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.inspector-component { display: flex; align-items: center; justify-content: space-between; gap: var(--s2); padding: var(--s2) var(--s3); border: 1px solid rgba(177, 140, 255, 0.4); border-radius: var(--radius); background: rgba(177, 140, 255, 0.08); }
+.inspector-component-title { min-width: 0; overflow: hidden; color: #b18cff; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.inspector-hint { color: var(--text-2); font-size: var(--text-s); }

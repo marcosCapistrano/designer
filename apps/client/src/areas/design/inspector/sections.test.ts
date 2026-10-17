@@ -1,8 +1,12 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { DesignTarget, Device } from '@hub/protocol';
-import { byTestId, elements, inputEvent, props } from '../../../ui/test-vnode.js';
+import { byTestId, elements, inputEvent, props, text } from '../../../ui/test-vnode.js';
 import { BorderSection, FillSection, PropsSection, RawSection, SizeSection, SpacingSection, TextSection, TypographySection, VisibilitySection } from './sections.js';
 import type { SectionProps } from './sections.js';
+import { FIELDS } from './fields.js';
+
+/** Every field added, so the section tests see each control whether or not it has a value. */
+const ALL = new Set(Object.entries(FIELDS).flatMap(([section, fields]) => fields.map((f) => `${section}:${f.prop}`)));
 
 const h3: DesignTarget = {
   id: 'n1', kind: 'element', shared: false, tag: 'h3', text: 'Title', textNode: 't1',
@@ -12,7 +16,7 @@ const h3: DesignTarget = {
 function render(Section: (p: SectionProps) => unknown, device: Device = 'base', target: DesignTarget = h3, extra: Partial<SectionProps> = {}) {
   const onEdit = vi.fn();
   const onLink = vi.fn();
-  const p: SectionProps = { target, device, epoch: 0, pending: new Set(), locked: false, linked: { padding: false, margin: false }, onLink, onEdit, ...extra };
+  const p: SectionProps = { target, device, epoch: 0, pending: new Set(), locked: false, linked: { padding: false, margin: false }, added: ALL, onLink, onEdit, ...extra };
   const els = elements(Section(p) as never);
   return { onEdit, onLink, get: (id: string) => byTestId(els, id), els };
 }
@@ -145,5 +149,35 @@ describe('RawSection', () => {
       currentTarget: { elements: { namedItem: (n: string) => ({ value: n === 'prop' ? ' letter-spacing ' : '0.02em' }) } },
     } as unknown as Event);
     expect(s.onEdit).toHaveBeenCalledWith('raw:letter-spacing', [{ op: 'setStyle', node: 'n1', device: 'mobile', prop: 'letter-spacing', value: '0.02em' }]);
+  });
+});
+
+describe('fields shown', () => {
+  const none = new Set<string>();
+  const has = (s: ReturnType<typeof render>, id: string) => s.els.some((e) => props(e)['data-testid'] === id);
+  it('only fields with values show', () => {
+    const t = render(TypographySection, 'base', h3, { added: none });
+    expect(has(t, 'typography-font-size-input')).toBe(true);
+    expect(has(t, 'typography-color-input')).toBe(true);
+    expect(has(t, 'typography-line-height-input')).toBe(false);
+    expect(has(t, 'typography-font-weight')).toBe(false);
+    expect(render(BorderSection, 'base', h3, { added: none }).els.some((e) => String(props(e)['data-testid'] ?? '').startsWith('border-'))).toBe(false);
+    const sp = render(SpacingSection, 'base', h3, { added: none });
+    expect(has(sp, 'spacing-padding-top-input')).toBe(true);
+    expect(has(sp, 'spacing-margin-top-input')).toBe(false);
+  });
+  it('inherited values count as values', () => {
+    const t = render(TypographySection, 'mobile', h3, { added: none });
+    expect(has(t, 'typography-font-size-input')).toBe(true);
+    expect(has(t, 'typography-font-weight')).toBe(true);
+  });
+  it('an added field shows empty', () => {
+    const t = render(BorderSection, 'base', h3, { added: new Set(['border:border-radius']) });
+    expect(props(t.get('border-border-radius-input')).defaultValue).toBe('');
+  });
+  it('template text shows the per-instance hint', () => {
+    expect(() => render(TextSection).get('text-template-hint')).toThrow();
+    const t = render(TextSection, 'base', { ...h3, text: '{{title}}' });
+    expect(text(t.get('text-template-hint'))).toBe('Filled per instance from props');
   });
 });

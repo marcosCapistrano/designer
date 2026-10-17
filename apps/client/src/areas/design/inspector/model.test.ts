@@ -65,7 +65,7 @@ describe('inspector model', () => {
     const ops = [{ op: 'setStyle', node: 'n1', device: 'base', prop: 'color', value: 'red' }];
     const edit = t.model.edit('typography:color', ops);
     expect(pendingFor(t.model.state(), 'n1').has('typography:color')).toBe(true);
-    expect(t.api.editDesign).toHaveBeenCalledWith('a', 'r7', ops, sel('n1'));
+    expect(t.api.editDesign).toHaveBeenCalledWith('a', 'r7', ops, sel('n1'), undefined);
     const result: DesignEditResult = { mode: 'applied', revision: 'r8', warnings: [] };
     t.edits[0]!.resolve(result);
     await edit;
@@ -136,5 +136,44 @@ describe('inspector model', () => {
     t.edits[0]!.reject(new Error('Invalid value'));
     await edit;
     expect(t.model.state().errors).toEqual({ typography: 'Invalid value' });
+  });
+});
+
+describe('inspector model modes', () => {
+  it('page mode drops shared targets', async () => {
+    const t = setup();
+    const done = t.model.select(sel('n1'), { mode: 'page' });
+    t.loads[0]!.resolve(info('n1'));
+    await done;
+    expect(t.model.state().info!.targets.map((x) => x.id)).toEqual(['n1']);
+  });
+  it('component mode keeps only shared targets', async () => {
+    const t = setup();
+    const done = t.model.select(sel('n1'), { mode: 'component', scope: { component: 'Card' } });
+    t.loads[0]!.resolve(info('n1'));
+    await done;
+    expect(t.model.state().info!.targets.map((x) => x.id)).toEqual(['n1-c']);
+    expect(t.model.state().targetId).toBe('n1-c');
+  });
+  it('keeps every target when the mode would leave none', async () => {
+    const t = setup();
+    const done = t.model.select(sel('n1'), { mode: 'component', scope: { component: 'Card' } });
+    t.loads[0]!.resolve({ ...info('n1'), targets: [info('n1').targets[0]!] });
+    await done;
+    expect(t.model.state().info!.targets.map((x) => x.id)).toEqual(['n1']);
+  });
+  it('edits in component mode carry the scope', async () => {
+    const t = setup();
+    const done = t.model.select(sel('n1'), { mode: 'component', scope: { component: 'Card' } });
+    t.loads[0]!.resolve(info('n1'));
+    await done;
+    void t.model.edit('fill:background-color', [{ op: 'setStyle' }]);
+    expect(t.api.editDesign).toHaveBeenLastCalledWith('a', 'r1', [{ op: 'setStyle' }], sel('n1'), { component: 'Card' });
+    const page = setup();
+    const again = page.model.select(sel('n1'), { mode: 'page' });
+    page.loads[0]!.resolve(info('n1'));
+    await again;
+    void page.model.edit('fill:background-color', [{ op: 'setStyle' }]);
+    expect(page.api.editDesign).toHaveBeenLastCalledWith('a', 'r1', [{ op: 'setStyle' }], sel('n1'), undefined);
   });
 });

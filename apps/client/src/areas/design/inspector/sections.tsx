@@ -7,6 +7,8 @@ import { Stepper } from '../../../ui/Stepper.js';
 import { Toggle } from '../../../ui/Toggle.js';
 import { commitHandlers } from '../../../ui/commit.js';
 import { effectiveStyle, inheritedLabel, sideProps, sideValues } from './values.js';
+import { shownFields } from './fields.js';
+import type { FieldSection } from './fields.js';
 import type { SideKind } from './values.js';
 
 export interface SectionProps {
@@ -17,14 +19,21 @@ export interface SectionProps {
   pending: ReadonlySet<string>;
   locked: boolean;
   linked: Record<SideKind, boolean>;
+  /** Fields added from a section's + menu, as `section:prop`; they show even without a value. */
+  added: ReadonlySet<string>;
   onLink(kind: SideKind, linked: boolean): void;
+  /** Starts editing the target's component in place (instance targets). */
+  onEnterComponent?(targetId: string): void;
   onEdit(key: string, ops: unknown[]): void;
 }
 
 const setStyle = (p: SectionProps, prop: string, value: string | null) => ({ op: 'setStyle', node: p.target.id, device: p.device, prop, value });
 
-/** A stepper or color field bound to one property on the chosen tier. */
-function field(p: SectionProps, section: string, prop: string, label: string, kind: 'length' | 'color'): JSX.Element {
+const shows = (p: SectionProps, section: FieldSection, prop: string): boolean => shownFields(section, p.target, p.device, p.added).includes(prop);
+
+/** A stepper or color field bound to one property on the chosen tier, or nothing when the target does not show it. */
+function field(p: SectionProps, section: FieldSection, prop: string, label: string, kind: 'length' | 'color'): JSX.Element | null {
+  if (!shows(p, section, prop)) return null;
   const shown = effectiveStyle(p.target.style, p.device, prop);
   const key = `${section}:${prop}`;
   const common = {
@@ -50,6 +59,7 @@ export function TextSection(p: SectionProps): JSX.Element | null {
     <label class="ui-field">
       <span class="ui-field-label">Text{p.pending.has('text:text') && <span class="ui-spinner" aria-hidden="true" />}</span>
       <textarea key={`text:${p.epoch}:${text}`} class="ui-textarea" data-testid="text-text" defaultValue={text} disabled={p.locked || p.pending.has('text:text')} onBlur={onBlur} />
+      {text.includes('{{') && <span class="inspector-hint" data-testid="text-template-hint">Filled per instance from props</span>}
     </label>
   );
 }
@@ -62,14 +72,14 @@ export function TypographySection(p: SectionProps): JSX.Element {
   return (
     <div class="inspector-grid">
       {field(p, 'typography', 'font-size', 'Size', 'length')}
-      <label class="ui-field">
+      {shows(p, 'typography', 'font-weight') && <label class="ui-field">
         <span class="ui-field-label">Weight{p.pending.has('typography:font-weight') && <span class="ui-spinner" aria-hidden="true" />}</span>
         <select class="ui-select" data-testid="typography-font-weight" value={weight.value} disabled={p.locked || p.pending.has('typography:font-weight')}
           onChange={(event) => { const v = (event as unknown as { currentTarget: { value: string } }).currentTarget.value; p.onEdit('typography:font-weight', [setStyle(p, 'font-weight', v || null)]); }}>
           <option value="">{weight.inherited ? inheritedLabel(weight.inherited) : 'Default'}</option>
           {options.map((w) => <option key={w} value={w}>{w}</option>)}
         </select>
-      </label>
+      </label>}
       {field(p, 'typography', 'line-height', 'Line height', 'length')}
       {field(p, 'typography', 'color', 'Color', 'color')}
     </div>
@@ -80,7 +90,8 @@ export const FillSection = (p: SectionProps): JSX.Element => <div class="inspect
 
 const SIDE_LABELS = ['Top', 'Right', 'Bottom', 'Left'];
 
-function sides(p: SectionProps, kind: SideKind): JSX.Element {
+function sides(p: SectionProps, kind: SideKind): JSX.Element | null {
+  if (!shows(p, 'spacing', kind)) return null;
   const shown = sideValues(p.target.style, p.device, kind);
   const props = sideProps(kind);
   const linked = p.linked[kind];
@@ -118,7 +129,7 @@ export function SpacingSection(p: SectionProps): JSX.Element {
     <div class="inspector-stack">
       {sides(p, 'padding')}
       {sides(p, 'margin')}
-      <div class="inspector-grid">{field(p, 'spacing', 'gap', 'Gap', 'length')}</div>
+      {shows(p, 'spacing', 'gap') && <div class="inspector-grid">{field(p, 'spacing', 'gap', 'Gap', 'length')}</div>}
     </div>
   );
 }
@@ -182,5 +193,18 @@ export function RawSection(p: SectionProps): JSX.Element {
       <label class="ui-field"><span class="ui-field-label">Value</span><input name="value" class="ui-input ui-mono" placeholder="Blank removes it" disabled={p.locked} data-testid="raw-value" /></label>
       <button type="submit" class="ui-button ui-button-primary" disabled={p.locked} data-testid="raw-apply">Apply</button>
     </form>
+  );
+}
+
+/** An instance: its component, its props, and the way into editing the component itself. */
+export function ComponentSection(p: SectionProps): JSX.Element {
+  return (
+    <div class="inspector-stack">
+      <div class="inspector-component">
+        <span class="inspector-component-title">{p.target.title ?? p.target.component}</span>
+        <button type="button" class="ui-button" disabled={p.locked} data-testid="inspector-edit-component" onClick={() => p.onEnterComponent?.(p.target.id)}>Edit component</button>
+      </div>
+      <PropsSection {...p} />
+    </div>
   );
 }
