@@ -60,8 +60,11 @@ describe('import service', () => {
   it('keeps saved design on render failure and lets the user retry preview', async () => {
     const s = await setup();
     s.deps.render = async () => { throw new Error('browser unavailable'); };
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
     expect(await s.service.import('demo', { mode: 'next' })).toMatchObject({ ok: true, manifest: null, warnings: [expect.stringContaining('Preview')] });
     expect(await s.store.load()).not.toBeNull();
+    expect(errors).toHaveBeenCalledWith(expect.stringContaining('browser unavailable'));
+    errors.mockRestore();
     s.deps.render = async () => ({ manifest: { version: 2, pages: [] }, warnings: [] });
     expect(await s.service.retryPreview('demo')).toMatchObject({ warnings: [] });
     await s.service.close();

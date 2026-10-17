@@ -3,7 +3,7 @@ import type { DesignDoc } from '@hub/design-model';
 import { ADAPTERS_FILE, FsSyncStore, countSourceOnly, discoverNextRoutes, projectAliases, synchronizePages, type SyncResult, type SyncState, type SyncStore } from '@hub/sync';
 import { APP_MANIFEST_FILE, APP_NAME_RE, routeIncluded } from '@hub/protocol/manifest';
 import { parseAdapters } from '@hub/protocol/adapters';
-import { DEFAULT_FRAME_SIZES, type DesignSummary, ImportRequest, ImportResponse, type RenderManifest } from '@hub/protocol';
+import { DEFAULT_FRAME_SIZES, type DesignSummary, type ImportRequest, type ImportResponse, type RenderManifest } from '@hub/protocol';
 import { BrowserPool, FsTileStore, renderDoc } from '@hub/renderer';
 import type { AppRegistry } from '../apps/registry.js';
 import { BuildError } from '../build/ci.js';
@@ -112,7 +112,10 @@ export class SyncService {
         this.deps.hub.broadcast({ type: 'render.ready', app, manifest: out.manifest });
       }
       return { manifest: out.manifest, warnings: out.failed.map((key) => `Preview failed for ${key}; the last good image is retained.`) };
-    } catch { return { manifest: null, warnings: ['Design saved. Preview could not be updated; retry the preview.'] }; }
+    } catch (error) {
+      console.error(`Preview render failed for ${app}: ${JSON.stringify(error instanceof Error ? error.message.slice(0, 500) : String(error))}`);
+      return { manifest: null, warnings: ['Design saved. Preview could not be updated; retry the preview.'] };
+    }
   }
   async retryPreview(app: string) {
     return this.deps.build.withCheckout(app, async () => {
