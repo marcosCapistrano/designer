@@ -25,6 +25,8 @@ export function describeOp(before: DesignDoc, op: Op): string {
       return `${labelOf(before, op.node)}: remove`;
     case 'moveNode':
       return `${labelOf(before, op.node)}: move to ${labelOf(before, op.parent)} at ${op.index}`;
+    case 'setName':
+      return op.name === null ? `${labelOf(before, op.node)}: clear data-name` : `${labelOf(before, op.node)}: set data-name to "${op.name}"`;
     case 'extractComponent':
       return `${labelOf(before, op.node)}: extract as component ${op.component}`;
     case 'setToken': {

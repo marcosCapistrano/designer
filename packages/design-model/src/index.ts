@@ -12,4 +12,6 @@ export { validateDoc } from './validate.js';
 export { SVG_CASED_ATTRS, validateTag } from './rules.js';
 export { exportPage } from './export.js';
 export { describeOp } from './describe.js';
+export { componentTitle, componentUses, displayName, layerOutline } from './names.js';
+export type { LayerOutline } from './names.js';
 export { sampleDoc } from './fixtures.js';

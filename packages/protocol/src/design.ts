@@ -18,7 +18,13 @@ export interface DesignTarget {
   attrs?: Record<string, string>; style?: { base: Record<string, string>; tablet?: Record<string, string>; mobile?: Record<string, string> };
   props?: Record<string, string>;
   declaredProps?: Record<string, string>;
+  /** Display name: the layer's own name, else its tag or component title. */
+  name?: string;
+  /** For an instance: its component's title. */
+  title?: string;
 }
+export interface LayerNode { id: string; name: string; kind: 'element' | 'text' | 'instance'; component?: string; text?: string; children: LayerNode[] }
+export interface DesignLayers { revision: string; root: LayerNode; components: Record<string, { title: string; uses: number }> }
 export interface DesignSelection { revision: string; targets: DesignTarget[]; selection: NodeSelection }
 export interface DesignProposal { id: string; revision: string; descriptions: string[]; manifest: RenderManifest | null; warnings: string[] }
 export type DesignEditResult = { mode: 'applied'; revision: string; warnings: string[] } | { mode: 'preview'; proposal: DesignProposal };
