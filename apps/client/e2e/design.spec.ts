@@ -26,21 +26,25 @@ async function importPages(page: Page): Promise<void> {
 
 const toasts = (page: Page) => page.locator('.ui-toasts');
 
-/** Taps the last hit box of the first page's 1440×900 frame with the Select tool, as the first-page fit (clear of the chrome) places it. */
-async function selectLastBox(page: Page): Promise<void> {
+/** The screen point of the last hit box of the first page's 1440×900 frame, as the first-page fit (clear of the chrome) places it. */
+async function lastBoxPoint(page: Page): Promise<{ x: number; y: number }> {
   const manifest = await (await page.request.get('/api/apps/demo/render/manifest.json')).json();
   const boxes = await (await page.request.get(`/api/apps/demo/render/hitmaps/${manifest.pages[0].renders['1440x900'].hash}.json`)).json();
   const box = boxes[boxes.length - 1];
-  const canvas = page.getByTestId('canvas').first();
-  const bounds = await canvas.boundingBox();
+  const bounds = await page.getByTestId('canvas').first().boundingBox();
   if (!bounds) throw new Error('No canvas');
   const { frames } = await (await page.request.get('/api/apps/demo/design/frames')).json();
   const firstPage = layoutFrames(frames, manifest).filter((f) => f.pageId === manifest.pages[0].pageId);
   const camera = fitRectInset(layoutBounds(firstPage), { w: bounds.width, h: bounds.height }, 40, CANVAS_INSETS);
   const desktop = firstPage.find((f) => f.w === 1440 && f.viewportHeight === 900)!;
-  const point = worldToScreen(camera, { x: desktop.x + box.x + box.w / 2, y: desktop.y + box.y + box.h / 2 });
+  return worldToScreen(camera, { x: desktop.x + box.x + box.w / 2, y: desktop.y + box.y + box.h / 2 });
+}
+
+/** Taps the last hit box (the second Button instance) with the Select tool. */
+async function selectLastBox(page: Page): Promise<void> {
+  const point = await lastBoxPoint(page);
   await page.getByTestId('tool-select').first().click();
-  await canvas.click({ position: point });
+  await page.getByTestId('canvas').first().click({ position: point });
   await expect(page.getByTestId('inspector')).toBeVisible();
 }
 
@@ -107,14 +111,18 @@ test('Design chat streams a proposal, persists messages and waits for Apply', as
   await expect(page.getByRole('log', { name: 'Design messages' })).toContainText('Make all buttons purple');
 });
 
-test('tap editing supports immediate instance edits, undo/redo and shared previews before Apply', async ({ page }) => {
+test('a tapped component is its instance: instance edits apply at once, with undo and redo', async ({ page }) => {
   await openDesign(page, 'demo');
   await importPages(page);
   await expect(toasts(page)).toContainText('Imported');
   const initial = await pending(page);
   await selectLastBox(page);
-  await page.getByTestId('typography-color-input').fill('red');
-  await page.getByTestId('typography-color-input').press('Enter');
+  await expect(page.getByTestId('inspector-kind')).toHaveText('Button');
+  // A box without text has no Typography, and empty sections add their fields from +.
+  await expect(page.getByTestId('section-typography')).toHaveCount(0);
+  await page.getByTestId('section-fill-add').selectOption('background-color');
+  await page.getByTestId('fill-background-color-input').fill('red');
+  await page.getByTestId('fill-background-color-input').press('Enter');
   // A successful inspector edit is confirmed by the field, not a toast.
   await expect.poll(() => pending(page)).toBe(initial + 1);
   await expect(page.getByTestId('topbar-undo')).toBeEnabled();
@@ -123,18 +131,40 @@ test('tap editing supports immediate instance edits, undo/redo and shared previe
   await expect(page.getByTestId('topbar-redo')).toBeEnabled();
   await page.getByTestId('topbar-redo').click();
   await expect.poll(() => pending(page)).toBe(initial + 1);
-  await expect(page.getByTestId('topbar-undo')).toBeEnabled();
-  await page.getByTestId('inspector').getByRole('button', { name: /button.*Shared/ }).click();
-  await expect(page.getByTestId('inspector-shared-note')).toBeVisible();
-  const before = await (await page.request.get('/api/apps/demo/render/manifest.json')).text();
+});
+
+test('tapping a layer row selects it on the canvas, with its name in the inspector', async ({ page }) => {
+  await openDesign(page, 'demo');
+  await importPages(page);
+  await expect(toasts(page)).toContainText('Imported');
+  await selectLastBox(page);
+  await expect(page.getByTestId('layers')).toBeVisible();
+  const heading = page.getByTestId('layers').getByRole('treeitem').filter({ hasText: 'Imported demo' });
+  await heading.getByRole('button', { name: /h1/ }).click();
+  await expect(heading).toHaveAttribute('aria-selected', 'true');
+  await expect(page.getByTestId('inspector-name')).toHaveValue('h1');
+  await expect(page.getByTestId('inspector-kind')).toHaveText('Text');
+});
+
+test('Edit component edits every instance at once; Done leaves', async ({ page }) => {
+  await openDesign(page, 'demo');
+  await importPages(page);
+  await expect(toasts(page)).toContainText('Imported');
+  const initial = await pending(page);
+  await selectLastBox(page);
+  await page.getByTestId('inspector-edit-component').click();
+  await expect(page.getByTestId('mode-chip')).toContainText('used 2×');
+  await expect(page.getByTestId('inspector-shared-note')).toHaveCount(0);
+  // The component's text color is set (the chat test made the buttons purple), so its field shows.
+  await expect(page.getByTestId('inspector-kind')).toHaveText('Text');
   await page.getByTestId('typography-color-input').fill('blue');
   await page.getByTestId('typography-color-input').press('Enter');
-  await expect(page.getByTestId('preview-banner')).toBeVisible();
-  expect(await pending(page)).toBe(initial + 1);
-  expect(await (await page.request.get('/api/apps/demo/render/manifest.json')).text()).toBe(before);
-  await page.getByTestId('preview-apply').click();
+  await expect.poll(() => pending(page)).toBe(initial + 1);
   await expect(page.getByTestId('preview-banner')).toHaveCount(0);
-  expect(await pending(page)).toBe(initial + 2);
+  await page.getByTestId('topbar-undo').click();
+  await expect.poll(() => pending(page)).toBe(initial);
+  await page.getByTestId('mode-done').click();
+  await expect(page.getByTestId('mode-chip')).toHaveCount(0);
 });
 
 test('on a tablet-width screen the inspector is a bottom sheet and chat stays reachable', async ({ page }) => {
@@ -152,4 +182,25 @@ test('on a tablet-width screen the inspector is a bottom sheet and chat stays re
   const sheet = await page.getByTestId('inspector-sheet').boundingBox();
   expect(sheet!.y + sheet!.height).toBeLessThanOrEqual(chat!.y + 1);
   await expect(page.getByTestId('section-raw')).toBeVisible();
+});
+
+test('on a tablet, a double tap enters a component and a tap outside leaves it; layers open as a sheet', async ({ page }) => {
+  await page.setViewportSize({ width: 834, height: 1194 });
+  await openDesign(page, 'demo');
+  await importPages(page);
+  await expect(toasts(page)).toContainText('Imported');
+  const point = await lastBoxPoint(page);
+  await page.getByTestId('tool-select').first().click();
+  const canvas = page.getByTestId('canvas').first();
+  await canvas.dblclick({ position: point });
+  await expect(page.getByTestId('mode-chip')).toBeVisible();
+  // The top-left of the first frame is outside the instance.
+  await canvas.click({ position: { x: point.x, y: point.y - 60 } });
+  await expect(page.getByTestId('mode-chip')).toHaveCount(0);
+  await expect(page.getByTestId('layers')).toHaveCount(0);
+  await page.getByTestId('topbar-layers').click();
+  await expect(page.getByTestId('layers')).toBeVisible();
+  // The sheet covers the left of the canvas: tap the canvas to its right.
+  await canvas.click({ position: { x: 600, y: point.y } });
+  await expect(page.getByTestId('layers')).toHaveCount(0);
 });

@@ -1131,6 +1131,21 @@ describe('CanvasController fits around the app chrome', () => {
     h.c.fitAll();
     expect(h.c.camera).toEqual(fitRectInset(layoutBounds(h.c.frames), { w: 800, h: 600 }, 40, insets));
   });
+  it('keeps the selection in view when the insets grow over it', async () => {
+    const h = ready(undefined, undefined, { insets });
+    h.c.setCamera({ x: 0, y: -100, scale: 1 });
+    await h.c.tap(30, 130); // n3 at 20..120 x 20..60, shown at 120..160 below the top bar
+    expect(h.c.selection?.nodeIds).toEqual(['n3']);
+    h.c.setInsets({ ...insets, left: 280 });
+    // n3 now starts right of the panel.
+    expect(20 - h.c.camera.x).toBeGreaterThanOrEqual(280);
+    expect(h.c.camera.y).toBe(-100);
+    const still = ready(undefined, undefined, { insets });
+    still.c.setCamera({ x: -400, y: -100, scale: 1 });
+    await still.c.tap(430, 130);
+    still.c.setInsets({ ...insets, left: 280 });
+    expect(still.c.camera).toEqual({ x: -400, y: -100, scale: 1 });
+  });
   it('fits with insets changed after mount', () => {
     const h = ready(undefined, undefined, { insets });
     const wider = { ...insets, left: 280 };
@@ -1194,6 +1209,19 @@ describe('CanvasController component scope', () => {
     t = 1100;
     await c.tap(80, 18);
     expect(onDoubleTap).toHaveBeenCalledTimes(1);
+  });
+
+  it('a double tap counts while the hit map is still loading', async () => {
+    let t = 0;
+    const d = deferredMaps();
+    const onDoubleTap = vi.fn();
+    const h = ready(() => t, d.hitMaps, { onDoubleTap });
+    void h.c.tap(15, 15);
+    t = 100;
+    const second = h.c.tap(16, 15);
+    d.pending.get('hb')!.ok(scoped['hb']!);
+    await second;
+    expect(onDoubleTap).toHaveBeenCalledWith({ pageId: 'home', device: 'base', nodeIds: ['a'] });
   });
 
   it('box select dedupes scoped ids', async () => {

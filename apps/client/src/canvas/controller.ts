@@ -254,7 +254,20 @@ export class CanvasController {
 
   /** The floating chrome changed (a panel docked or closed): later fits and reveals keep clear of it. */
   setInsets(insets: Insets): void {
+    const box = this.selectedWorldBox();
+    const wasShown = box !== null && this.inView(box);
     this.deps = { ...this.deps, insets };
+    // A panel that opens over the selection moves the canvas so what was tapped stays in view.
+    if (box !== null && wasShown) this.reveal(box);
+  }
+
+  /** The selection's box in world space, or null with no selection or no loaded boxes. */
+  private selectedWorldBox(): Rect | null {
+    const h = this.highlight();
+    if (h === null || h.boxes.length === 0) return null;
+    const x0 = Math.min(...h.boxes.map((b) => b.x)), y0 = Math.min(...h.boxes.map((b) => b.y));
+    const x1 = Math.max(...h.boxes.map((b) => b.x + b.w)), y1 = Math.max(...h.boxes.map((b) => b.y + b.h));
+    return { x: h.frame.x + x0, y: h.frame.y + y0, w: x1 - x0, h: y1 - y0 };
   }
 
   /** Fits every frame into the view. Does nothing while there are no frames. */
@@ -304,7 +317,12 @@ export class CanvasController {
   /** `x`, `y` are screen CSS px. */
   async tap(x: number, y: number): Promise<void> {
     const token = ++this.selectToken;
+    // Whether this tap completes a double tap is decided now: a first tap still waiting for its hit map is
+    // superseded by the second and never finishes.
     const at = this.deps.now();
+    const last = this.lastTap;
+    const double = last !== null && at - last.t <= DOUBLE_TAP_MS && Math.hypot(x - last.x, y - last.y) <= DOUBLE_TAP_SLOP;
+    this.lastTap = double ? null : { x, y, t: at };
     const world = screenToWorld(this.cam, { x, y });
     const frame = frameAt(this.layout, world);
     const hash = frame ? renderHash(frame) : null;
@@ -327,14 +345,8 @@ export class CanvasController {
       return;
     }
     this.select({ frameId: frame.frameId, nodeIds: [id] });
-    const last = this.lastTap;
-    if (last !== null && at - last.t <= DOUBLE_TAP_MS && Math.hypot(x - last.x, y - last.y) <= DOUBLE_TAP_SLOP) {
-      this.lastTap = null;
-      const reported = this.reported(this.selected);
-      if (reported !== null) this.deps.onDoubleTap?.(reported);
-    } else {
-      this.lastTap = { x, y, t: at };
-    }
+    const reported = this.reported(this.selected);
+    if (double && reported !== null) this.deps.onDoubleTap?.(reported);
   }
 
   /** In component mode, a selection outside the instance: the app steps out. */
@@ -386,12 +398,25 @@ export class CanvasController {
   }
 
   /** Pans, at the current scale, so `r` (world) is in the view clear of the chrome; nothing when it already is. */
-  private reveal(r: Rect): void {
+  /** The world rect visible between the chrome. */
+  private clearView(): { left: number; top: number; right: number; bottom: number } {
     const insets = this.deps.insets ?? NO_INSETS;
     const s = this.cam.scale;
-    const left = this.cam.x + insets.left / s, top = this.cam.y + insets.top / s;
-    const right = this.cam.x + (this.viewSize.w - insets.right) / s, bottom = this.cam.y + (this.viewSize.h - insets.bottom) / s;
-    if (r.x >= left && r.y >= top && r.x + r.w <= right && r.y + r.h <= bottom) return;
+    return {
+      left: this.cam.x + insets.left / s, top: this.cam.y + insets.top / s,
+      right: this.cam.x + (this.viewSize.w - insets.right) / s, bottom: this.cam.y + (this.viewSize.h - insets.bottom) / s,
+    };
+  }
+
+  private inView(r: Rect): boolean {
+    const { left, top, right, bottom } = this.clearView();
+    return r.x >= left && r.y >= top && r.x + r.w <= right && r.y + r.h <= bottom;
+  }
+
+  private reveal(r: Rect): void {
+    const s = this.cam.scale;
+    const { left, top, right, bottom } = this.clearView();
+    if (this.inView(r)) return;
     const m = REVEAL_MARGIN / s;
     const dx = r.x < left ? r.x - m - left : r.x + r.w > right ? Math.min(r.x + r.w + m - right, r.x - m - left) : 0;
     const dy = r.y < top ? r.y - m - top : r.y + r.h > bottom ? Math.min(r.y + r.h + m - bottom, r.y - m - top) : 0;

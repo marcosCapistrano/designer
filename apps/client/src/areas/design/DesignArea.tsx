@@ -262,7 +262,8 @@ export function DesignArea({ app, api, ws, source, cache }: DesignAreaProps): JS
 
   useEffect(() => {
     let active = true;
-    void api.designSummary(app).then((s) => { if (active) setRevision((r) => r ?? s.revision); }).catch(() => {});
+    // The first page's outline loads before any tap, so a first double tap can enter a component.
+    void api.designSummary(app).then((s) => { if (active) { setRevision((r) => r ?? s.revision); setPage((p) => p ?? s.pages[0]?.id ?? null); } }).catch(() => {});
     return () => { active = false; };
   }, [app, api]);
   useEffect(() => {
@@ -320,13 +321,18 @@ export function DesignArea({ app, api, ws, source, cache }: DesignAreaProps): JS
   }, []);
 
   /** Edits instance `id`'s component in place, entering any instance it sits in, and selects its root layer. */
-  const enterComponent = useCallback((id: string) => {
-    const { layers: l } = live.current;
-    if (subtree(l?.root ?? { id: '', name: '', kind: 'element', children: [] }, id)?.kind !== 'instance') return;
+  const enterComponent = useCallback(async (id: string, pageId?: string) => {
+    let l = live.current.layers;
+    const at = pageId ?? live.current.page;
+    // The outline may still be loading (a double tap right after the first selection), or be another page's.
+    if (at && (!l || !subtree(l.root, id))) {
+      try { l = await api.designLayers(app, at); setLayers(l); } catch { return; }
+    }
+    if (!l || subtree(l.root, id)?.kind !== 'instance') return;
     setMode([...enterPath(id), id]);
-    const root = l ? rootOf(l.root, id) : null;
+    const root = rootOf(l.root, id);
     if (root) selectLayers([root]);
-  }, [selectLayers]);
+  }, [app, api, selectLayers]);
 
   const stepOut = useCallback((reselect: boolean) => {
     const { mode: m } = live.current;
@@ -371,7 +377,7 @@ export function DesignArea({ app, api, ws, source, cache }: DesignAreaProps): JS
         onSelect={onCanvasSelect}
         layers={layers} page={page} layersVisible={layersVisible} mode={mode} handleRef={handleRef}
         present={presentIn(handleRef.current?.selectionBoxes() ?? null)}
-        onDoubleTap={(s) => enterComponent(s.nodeIds[0]!)}
+        onDoubleTap={(s) => void enterComponent(s.nodeIds[0]!, s.pageId)}
         onOutside={() => stepOut(false)}
         onLayersToggle={() => setLayersPref(layersVisible ? 'closed' : 'open')}
         onLayersClose={() => setLayersPref('closed')}
@@ -381,9 +387,9 @@ export function DesignArea({ app, api, ws, source, cache }: DesignAreaProps): JS
           setMode(enterPath(id));
           selectLayers([id]);
         }}
-        onLayerEnter={enterComponent}
+        onLayerEnter={(id) => void enterComponent(id)}
         onModeDone={() => stepOut(true)}
-        onEnterComponent={() => { const id = selection?.nodeIds[0]; if (id) enterComponent(id); }}
+        onEnterComponent={() => { const id = selection?.nodeIds[0]; if (id) void enterComponent(id, selection.pageId); }}
         onResult={(r) => onResult(r, 'chat')}
         onInspectorResult={(r) => onResult(r, 'inspector')}
         onApply={() => proposal && void act(async () => onResult(await api.applyDesign(app, proposal.id), 'apply'), 'Apply failed.')}
