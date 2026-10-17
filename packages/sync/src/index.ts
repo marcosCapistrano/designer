@@ -11,3 +11,4 @@ export { baselineTokens } from './files.js';
 export { choiceKey, choicesProblem } from './choices.js';
 export { ADAPTERS_FILE } from './adapters.js';
 export type { Adapter, Adapters } from './adapters.js';
+export { longhands, definiteLonghands, PROPERTY_ALIASES, SHORTHANDS } from './shorthands.js';

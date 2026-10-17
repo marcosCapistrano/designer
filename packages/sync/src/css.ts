@@ -195,15 +195,21 @@ export function applyStyles(root: ElementNode, rules: Rule[], inline: Map<string
         for (const { rule } of matching) {
           if (rule.device === 'base' || rule.device === device || (device === 'mobile' && rule.device === 'tablet')) set(rule.declarations, rule);
         }
-        set(inline.get(node.id), null);
+        const own = inline.get(node.id);
+        for (const [property, value] of Object.entries(own ?? {})) {
+          if (/!\s*important\s*$/i.test(value)) throw new Error(`Unsupported inline style ${property}: !important`);
+        }
+        set(own, null);
         // Canonical style maps sort properties on export. Where one declaration sets or resets a longhand of another,
         // their cascade order must be their sorted order, or the exported page would resolve them differently.
         // Logical properties are mapped for horizontal writing (shorthands.ts), so any other writing mode fails.
-        const mode = style['writing-mode'];
+        for (const property of ['writing-mode', '-webkit-writing-mode']) {
+        const mode = style[property];
         if (mode !== undefined && !/^(?:horizontal-tb|initial|inherit|unset|revert|revert-layer)$/i.test(mode.trim())) {
-          const rule = origin.get('writing-mode');
+          const rule = origin.get(property);
           const message = `Unsupported CSS writing-mode ${mode.trim()} in ${rule ? rule.text : 'inline style'}`;
           throw rule ? new CssError(rule.file, message) : new Error(message);
+        }
         }
         // A declaration whose every longhand a later one resets has no effect: dropping it keeps the result exactly.
         const cascade = Object.keys(style);

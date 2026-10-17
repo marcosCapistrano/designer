@@ -12,7 +12,8 @@ const STATIC_STATE = new Set(['disabled', 'enabled', 'checked', 'required', 'opt
 // Pseudo-elements the resting frame never shows (the renderer hides scrollbars). Every other pseudo-element is taken
 // to render at rest, so a rule for one fails when it applies to an element in the tree (Ruling Q); before/after are
 // handled by their content.
-const SOURCE_PSEUDO = /^(?:selection|backdrop|target-text|spelling-error|grammar-error|-webkit-scrollbar(?:-.+)?|-webkit-resizer|-webkit-inner-spin-button|-webkit-outer-spin-button|-webkit-search-cancel-button)$/;
+// Chromium drops a rule with a -moz-/-ms- pseudo-element; view transitions and highlights never exist at rest.
+const SOURCE_PSEUDO = /^(?:selection|backdrop|target-text|spelling-error|grammar-error|highlight|view-transition(?:-.+)?|-moz-.+|-ms-.+|-webkit-scrollbar(?:-.+)?|-webkit-resizer|-webkit-inner-spin-button|-webkit-outer-spin-button|-webkit-search-cancel-button)$/;
 // Legacy names of standard pseudo-elements.
 const PSEUDO_ALIASES: Record<string, string> = { '-webkit-input-placeholder': 'placeholder', '-webkit-file-upload-button': 'file-selector-button' };
 const LOGICAL = new Set(['is', 'where', 'not']);

@@ -73,9 +73,10 @@ describe('incremental source synchronization', () => {
 
   // Bump SYNC_VERSION (and this pin) whenever extraction output changes for the same source. 9: Ruling P shell marker,
   // Ruling Q static states and hover media, React prop-name mapping, aria/data booleans, declaration-order and
-  // resting pseudo-element failures. A saved baseline from the version before is never reused.
-  it('SYNC_VERSION is 9, and a baseline from an earlier version is rebuilt with the current semantics', () => {
-    expect(SYNC_VERSION).toBe(9);
+  // resting pseudo-element failures. 10: Chromium's explicit alias list (no blanket -webkit- stripping), inline
+  // !important rejected, vendor/transition pseudo-elements source-only. A saved baseline from the version before is never reused.
+  it('SYNC_VERSION is 10, and a baseline from an earlier version is rebuilt with the current semantics', () => {
+    expect(SYNC_VERSION).toBe(10);
     const shell = {
       'app/layout.tsx': `import './globals.css'; export default ({ children }: { children: unknown }) => <html><body>{children}</body></html>;`,
       'app/globals.css': 'html { font-size: 62.5% } @media (hover: hover) { .x { color: red } }',

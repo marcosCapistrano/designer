@@ -263,4 +263,26 @@ describe('stylesheet parsing', () => {
     expect(() => style('.a { writing-mode: vertical-rl }')).toThrow('Unsupported CSS writing-mode vertical-rl in .a');
     expect(style('.a { writing-mode: horizontal-tb }').base).toEqual({ 'writing-mode': 'horizontal-tb' });
   });
+
+  // R2-I1: only Chromium's real aliases share a property; a distinct or prefixed-only -webkit- property is kept.
+  it('keeps -webkit- properties that Chromium does not alias to the standard name', () => {
+    expect(style('.a { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden }').base)
+      .toEqual({ display: '-webkit-box', '-webkit-box-orient': 'vertical', '-webkit-line-clamp': '2', 'line-clamp': '2', overflow: 'hidden' });
+    expect(style('.a { -webkit-border-image: url(a.png) 30; border-image: url(b.png) 30; -webkit-box-decoration-break: clone; box-decoration-break: slice }').base)
+      .toEqual({ '-webkit-border-image': 'url(a.png) 30', 'border-image': 'url(b.png) 30', '-webkit-box-decoration-break': 'clone', 'box-decoration-break': 'slice' });
+    expect(style('.a { -webkit-text-stroke: 1px red; text-stroke: 2px blue }').base).toEqual({ '-webkit-text-stroke': '1px red', 'text-stroke': '2px blue' });
+    expect(style('.a { -webkit-user-select: none; user-select: text }').base).toEqual({ 'user-select': 'text' });
+    expect(() => style('.a { -webkit-writing-mode: vertical-rl }')).toThrow('Unsupported CSS writing-mode vertical-rl in .a');
+  });
+
+  it('rejects !important in inline styles, as in stylesheets (R2-M2)', () => {
+    const node = el('p', 'a');
+    expect(() => applyStyles(node, parse('.a { color: red }').rules, new Map([[node.id, { 'margin-left': '2px !important', margin: '4px' }]]))).toThrow('Unsupported inline style margin-left: !important');
+  });
+
+  it('keeps vendor and transition-only pseudo-elements source-only (R2-M3)', () => {
+    const parsed = parse('.a { color: red } .a::-moz-selection { color: blue } .a::-ms-clear { display: none } ::view-transition-old(root) { opacity: 0 } ::view-transition { color: red } .a::highlight(x) { color: red }');
+    applyStyles(el('p', 'a'), parsed.rules, new Map());
+    expect(parsed.sourceOnly).toBe(5);
+  });
 });
