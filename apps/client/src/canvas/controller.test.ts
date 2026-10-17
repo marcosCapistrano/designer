@@ -772,6 +772,18 @@ describe('CanvasController frames of any size', () => {
     expect(moved.stale).toBe(before);
   });
 
+  it('where frames overlap, a tap and a marquee select in the frame drawn on top', async () => {
+    const { c, flush, onSelect } = sizedReady();
+    // The 1600 frame (later, so painted on top) moved over the 1440 frame.
+    c.setFrames(frames.map((f) => (f.width === 1600 ? { ...f, x: 0 } : f)));
+    c.setCamera({ x: 0, y: 0, scale: 0.5 });
+    flush();
+    await c.tap(15, 15);
+    expect(onSelect).toHaveBeenLastCalledWith({ pageId: 'p1', device: 'base', nodeIds: ['a16'] });
+    await c.selectBox({ x: 5, y: 5 }, { x: 70, y: 40 });
+    expect(onSelect).toHaveBeenLastCalledWith({ pageId: 'p1', device: 'base', nodeIds: ['a16'] });
+  });
+
   it('requests the stale tiles of a pending frame', () => {
     const { c, tiles, flush } = sizedReady();
     c.setFrames(frames.map((f) => (f.width === 1600 ? { ...f, width: 1680 } : f)));

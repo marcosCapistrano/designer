@@ -37,6 +37,7 @@ export function layoutFrames(
     if (page === undefined) continue;
     const render = page.renders[sizeKey(f)] ?? null;
     const pending = render === null;
+    const stale = pending ? lastRenders?.get(f.id) ?? null : null;
     out.push({
       frameId: f.id,
       pageId: f.pageId,
@@ -45,18 +46,21 @@ export function layoutFrames(
       x: f.x,
       y: f.y,
       w: f.width,
-      h: Math.max(render?.height ?? 0, f.viewportHeight),
+      // A pending frame keeps its stale render's height, so its pinned tiles are not cut off at the fold.
+      h: Math.max((render ?? stale)?.height ?? 0, f.viewportHeight),
       viewportHeight: f.viewportHeight,
       render,
-      stale: pending ? lastRenders?.get(f.id) ?? null : null,
+      stale,
       pending,
     });
   }
   return out;
 }
 
+/** The frame under `p`. Frames are painted in order, so where they overlap the last one is on top and wins. */
 export function frameAt(frames: readonly Frame[], p: Point): Frame | null {
-  for (const f of frames) {
+  for (let i = frames.length - 1; i >= 0; i--) {
+    const f = frames[i]!;
     if (f.x <= p.x && p.x < f.x + f.w && f.y <= p.y && p.y < f.y + f.h) return f;
   }
   return null;

@@ -36,6 +36,12 @@ describe('hitHandle', () => {
     expect(hitHandle(frames, { x: 1450, y: 1100 }, 1)).toBeNull();
   });
 
+  it('where frames overlap, the handle of the frame painted on top wins', () => {
+    const two = [frame(), frame({ frameId: 'fb' })];
+    expect(hitHandle(two, { x: 100, y: -10 }, 1)).toEqual({ frameId: 'fb', kind: 'move' });
+    expect(hitHandle(two, { x: 1450, y: 500 }, 1)).toEqual({ frameId: 'fb', kind: 'width' });
+  });
+
   it('at scale 0.25 the bands are four times as wide in world px', () => {
     expect(hitHandle(frames, { x: 100, y: -70 }, 0.25)).toEqual({ frameId: 'fa', kind: 'move' });
     expect(hitHandle(frames, { x: 100, y: -90 }, 0.25)).toBeNull();

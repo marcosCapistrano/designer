@@ -73,15 +73,17 @@ describe('layoutFrames', () => {
     expect(frames.map((f) => f.frameId)).toEqual(['fa', 'fb', 'fc', 'fd']);
   });
 
-  it('a size with no render is pending at its viewport height, with the frame\'s last render as stale', () => {
-    const last = render('base', 1200, 'old');
+  it('a size with no render is pending, with the frame\'s last render as stale and as tall as it', () => {
+    const last = render('base', 4200, 'old');
     const frames = layoutFrames(FRAMES, manifest, new Map([['fd', last], ['fa', render('base', 5, 'x')]]));
     const fd = frames.find((f) => f.frameId === 'fd');
-    expect(fd).toMatchObject({ render: null, pending: true, stale: last, h: 900 });
+    // The stale tiles keep their size, so the page does not vanish below the fold while it re-renders.
+    expect(fd).toMatchObject({ render: null, pending: true, stale: last, h: 4200 });
     const fa = frames.find((f) => f.frameId === 'fa');
     expect(fa).toMatchObject({ pending: false, stale: null });
     expect(fa?.render).toBe(manifest.pages[0]!.renders['1440x900']);
-    expect(layoutFrames(FRAMES, manifest).find((f) => f.frameId === 'fd')?.stale).toBeNull();
+    // With no last render, a pending frame is its viewport height.
+    expect(layoutFrames(FRAMES, manifest).find((f) => f.frameId === 'fd')).toMatchObject({ stale: null, h: 900 });
   });
 });
 
@@ -90,6 +92,16 @@ describe('frameAt', () => {
     const frames = layoutFrames(FRAMES, manifest);
     expect(frameAt(frames, { x: 1700, y: 50 })).toMatchObject({ frameId: 'fb' });
     expect(frameAt(frames, { x: 1600, y: 50 })).toBeNull();
+  });
+
+  it('where frames overlap, returns the one painted on top (the later one)', () => {
+    const over: CanvasFrame[] = [
+      { id: 'fa', pageId: FRAMES[0]!.pageId, x: 0, y: 0, width: 1440, viewportHeight: 900 },
+      { id: 'fb', pageId: FRAMES[0]!.pageId, x: 100, y: 100, width: 1440, viewportHeight: 900 },
+    ];
+    const frames = layoutFrames(over, manifest);
+    expect(frameAt(frames, { x: 200, y: 200 })).toMatchObject({ frameId: 'fb' });
+    expect(frameAt(frames, { x: 50, y: 50 })).toMatchObject({ frameId: 'fa' });
   });
 });
 

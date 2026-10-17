@@ -40,7 +40,9 @@ export function hitHandle(frames: readonly Frame[], p: Point, scale: number): Ha
   if (scale < LABEL_MIN_SCALE || frameAt(frames, p) !== null) return null;
   const band = HANDLE_PX / scale;
   const label = LABEL_BAND_PX / scale;
-  for (const f of frames) {
+  // Last first, like frameAt: where frames overlap, the one painted on top owns the handle.
+  for (let i = frames.length - 1; i >= 0; i--) {
+    const f = frames[i]!;
     if (f.x <= p.x && p.x < f.x + f.w && f.y - label <= p.y && p.y < f.y) return { frameId: f.frameId, kind: 'move' };
     const right = f.x + f.w;
     if (p.x < right || p.x >= right + band) continue;
