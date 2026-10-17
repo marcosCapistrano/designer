@@ -37,7 +37,8 @@ export interface SyncDeps {
 export class SyncService {
   private readonly stores = new Map<string, SyncStore>();
   private readonly pool = new BrowserPool();
-  private readonly rendering = new Set<string>();
+  private readonly rendering = new Map<string, Promise<void>>();
+  private readonly dirty = new Set<string>();
   constructor(private readonly deps: SyncDeps) {}
   async close(): Promise<void> { await this.pool.close(); }
   async load(app: string) { await this.entry(app); return this.store(app).load(); }
@@ -121,18 +122,29 @@ export class SyncService {
       return this.preview(app, saved.state.doc);
     });
   }
-  /** Starts a background render when the saved frame layout has sizes the manifest lacks; one at a time per app. */
+  /**
+   * Starts a background render when the saved frame layout has sizes the manifest lacks. One runs at a time per
+   * app; a call during a render marks the app dirty and the layout is checked again when that render finishes.
+   */
   ensureRendered(app: string): void {
     const frames = this.deps.frames;
-    if (!frames || this.rendering.has(app)) return;
-    this.rendering.add(app);
-    void (async () => {
+    if (!frames) return;
+    if (this.rendering.has(app)) { this.dirty.add(app); return; }
+    const run = (async () => {
       try {
-        const manifest = await new FsTileStore(renderDir(this.deps.dataDir, app)).readManifest();
-        if (await frames.missingRenders(app, manifest)) await this.retryPreview(app);
-      } catch (error) {
-        if (!(error instanceof BuildError && error.status === 409)) console.error(`Frame render failed for ${app}: ${JSON.stringify(error instanceof Error ? error.message.slice(0, 500) : String(error))}`);
-      } finally { this.rendering.delete(app); }
+        do {
+          this.dirty.delete(app);
+          try {
+            const manifest = await new FsTileStore(renderDir(this.deps.dataDir, app)).readManifest();
+            if (await frames.missingRenders(app, manifest)) await this.retryPreview(app);
+          } catch (error) {
+            if (!(error instanceof BuildError && error.status === 409)) console.error(`Frame render failed for ${app}: ${JSON.stringify(error instanceof Error ? error.message.slice(0, 500) : String(error))}`);
+          }
+        } while (this.dirty.has(app));
+      } finally { this.rendering.delete(app); this.dirty.delete(app); }
     })();
+    this.rendering.set(app, run);
   }
+  /** Resolves when no background frame render is running for the app (for tests). */
+  async whenRendered(app: string): Promise<void> { await this.rendering.get(app); }
 }

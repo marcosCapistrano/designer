@@ -10,7 +10,7 @@ import { SessionStore } from '../auth/sessions.js';
 import { createApp } from '../app.js';
 import type { BuildService } from '../build/service.js';
 import { openDb, type Db } from '../db.js';
-import type { SyncService } from '../sync/service.js';
+import { SyncService } from '../sync/service.js';
 import { CanvasFrames } from './frames.js';
 
 const PASS = 'correct horse battery staple';
@@ -81,5 +81,31 @@ describe('frame routes', () => {
     const h = await auth();
     expect((await app.request('/api/apps/nope/design/frames', { headers: h })).status).toBe(404);
     expect((await put(h, { frames: [] }, 'nope')).status).toBe(404);
+  });
+
+  it('PUT with a new size schedules one render even when sent twice quickly', async () => {
+    const frames = new CanvasFrames({ db, pages: async () => [{ pageId: 'p1' }], manifest: async () => null });
+    const sync = new SyncService({
+      registry: new AppRegistry(join(root, 'apps')), build: { withCheckout: async (_a: string, f: () => unknown) => f() } as never,
+      hub: { broadcast: () => {} }, dataDir: join(root, 'data'), frames,
+    });
+    let finish!: () => void;
+    const retry = vi.spyOn(sync, 'retryPreview').mockImplementation(() => new Promise((resolve) => { finish = () => { resolve({ manifest: null, warnings: [] }); }; }));
+    const real = createApp({
+      sessions: new SessionStore(db), limiter: new LoginLimiter(), passphraseHash: hashPassphrase(PASS, Buffer.alloc(16, 1)),
+      registry: new AppRegistry(join(root, 'apps')), build: {} as unknown as BuildService, sync, frames, dataDir: join(root, 'data'),
+    });
+    const login = await real.request('/api/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ passphrase: PASS }) });
+    const h = { cookie: `hub_session=${/hub_session=([^;]+)/.exec(login.headers.get('set-cookie') ?? '')![1]}`, 'sec-fetch-site': 'same-origin', 'content-type': 'application/json' };
+    const body = JSON.stringify({ frames: [{ id: 'f0123456789abcdef', pageId: 'p1', x: 0, y: 0, width: 1280, viewportHeight: 800 }] });
+    expect((await real.request('/api/apps/demo/design/frames', { method: 'PUT', headers: h, body })).status).toBe(200);
+    await vi.waitFor(() => expect(retry).toHaveBeenCalledTimes(1));
+    expect((await real.request('/api/apps/demo/design/frames', { method: 'PUT', headers: h, body })).status).toBe(200);
+    expect(retry).toHaveBeenCalledTimes(1); // second PUT during the render does not start a second one
+    finish(); // the manifest stays null, so the re-check after the render runs exactly one more
+    await vi.waitFor(() => expect(retry).toHaveBeenCalledTimes(2));
+    finish();
+    await sync.whenRendered('demo');
+    await sync.close();
   });
 });

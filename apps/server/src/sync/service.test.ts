@@ -145,19 +145,39 @@ describe('import service', () => {
     expect(await s.service.summary('demo')).toMatchObject({ sourceOnlyRules: 2, inlined });
     await s.service.close();
   });
-  it('renders from the saved frame sizes and ensureRendered runs one render at a time', async () => {
+  it('ensureRendered runs one render at a time and re-checks once after a call during a render', async () => {
     const s = await setup();
     let missing = true;
-    const frames = { sizesByPage: vi.fn(async () => () => {return [{ width: 1280, viewportHeight: 800 }]; }), missingRenders: vi.fn(async () => missing) };
+    const frames = { sizesByPage: vi.fn(), missingRenders: vi.fn(async () => missing) };
     const service = new SyncService({ ...s.deps, frames: frames as never });
-    const retry2 = vi.spyOn(service, 'retryPreview').mockImplementation(async () => { await new Promise((r) => setTimeout(r, 20)); missing = false; return { manifest: null, warnings: [] }; });
+    const gates: (() => void)[] = [];
+    const retry = vi.spyOn(service, 'retryPreview').mockImplementation(() => new Promise((resolve) => { gates.push(() => { resolve({ manifest: null, warnings: [] }); }); }));
     service.ensureRendered('demo');
+    await vi.waitFor(() => expect(retry).toHaveBeenCalledTimes(1));
+    service.ensureRendered('demo'); // arrives during the render, e.g. a PUT adding a size
+    expect(retry).toHaveBeenCalledTimes(1);
+    gates[0]!(); // first render finishes; the new size is still missing
+    await vi.waitFor(() => expect(retry).toHaveBeenCalledTimes(2));
+    missing = false;
+    gates[1]!();
+    await service.whenRendered('demo');
+    expect(retry).toHaveBeenCalledTimes(2);
+    await service.close();
+    await s.service.close();
+  });
+  it('ensureRendered does not render again when nothing is missing after the render', async () => {
+    const s = await setup();
+    let missing = true;
+    const frames = { sizesByPage: vi.fn(), missingRenders: vi.fn(async () => missing) };
+    const service = new SyncService({ ...s.deps, frames: frames as never });
+    let finish!: () => void;
+    const retry = vi.spyOn(service, 'retryPreview').mockImplementation(() => new Promise((resolve) => { finish = () => { missing = false; resolve({ manifest: null, warnings: [] }); }; }));
     service.ensureRendered('demo');
-    await new Promise((r) => setTimeout(r, 60));
-    expect(retry2).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => expect(retry).toHaveBeenCalledTimes(1));
     service.ensureRendered('demo');
-    await new Promise((r) => setTimeout(r, 30));
-    expect(retry2).toHaveBeenCalledTimes(1); // nothing missing now
+    finish();
+    await service.whenRendered('demo');
+    expect(retry).toHaveBeenCalledTimes(1);
     await service.close();
     await s.service.close();
   });
@@ -167,9 +187,8 @@ describe('import service', () => {
     const service = new SyncService({ ...s.deps, frames: frames as never });
     const log = vi.spyOn(console, 'error').mockImplementation(() => {});
     service.ensureRendered('demo');
-    await new Promise((r) => setTimeout(r, 30));
+    await service.whenRendered('demo');
     expect(log).not.toHaveBeenCalled();
-    service.ensureRendered('demo');
     await service.close();
     log.mockRestore();
   });
