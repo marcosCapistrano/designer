@@ -9,7 +9,7 @@ import type { BlobCache } from './cache.js';
 import { liveKeys } from './cache.js';
 import { CanvasController } from './controller.js';
 import type { LayerTransform } from './controller.js';
-import type { Point } from './geom.js';
+import type { Camera, Point } from './geom.js';
 import type { FrameStore } from './frames.js';
 import { HitMapStore } from './hitmaps.js';
 import { TileLoader } from './loader.js';
@@ -31,6 +31,8 @@ export interface CanvasRuntimeOptions {
   requestFrame: (cb: () => void) => void;
   now: () => number;
   onSelect?: (s: NodeSelection | null) => void;
+  /** Called after every camera change (pan, zoom, fit). */
+  onCamera?: (camera: Camera) => void;
   /** A tap on a frame's label band: the frame and the screen point tapped. */
   onFrameMenu?: (frameId: string, screen: Point) => void;
   /** Whether frames can be moved, resized or opened in the menu (default true); previews turn it off. */
@@ -93,6 +95,7 @@ export function createCanvasRuntime(opts: CanvasRuntimeOptions): CanvasRuntime {
     },
     now: opts.now,
     onSelect: opts.onSelect,
+    onCamera: opts.onCamera,
     onFramesChange: (frames) => framesChanged(frames),
     onFrameMenu: opts.onFrameMenu,
     framesEditable: opts.framesEditable,

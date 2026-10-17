@@ -33,11 +33,11 @@ export interface MenuDraft {
 }
 
 const BUTTON =
-  'font:inherit;min-height:44px;min-width:44px;padding:6px 10px;border:1px solid #dadce0;border-radius:6px;background:#fff;color:#202124;cursor:pointer';
+  'font:inherit;min-height:44px;min-width:44px;padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--surface-2);color:var(--text);cursor:pointer';
 const BUTTON_OFF = BUTTON + ';opacity:.45;cursor:default';
-const HEADING = 'margin:10px 0 4px;font-size:12px;font-weight:600;color:#5f6368;text-transform:uppercase';
+const HEADING = 'margin:10px 0 4px;font-size:12px;font-weight:600;color:var(--text-2);text-transform:uppercase';
 const GRID = 'display:flex;flex-wrap:wrap;gap:6px';
-const INPUT = 'font:inherit;min-height:44px;box-sizing:border-box;width:84px;padding:6px 8px;border:1px solid #dadce0;border-radius:6px';
+const INPUT = 'font:inherit;min-height:44px;box-sizing:border-box;width:84px;padding:6px 8px;border:1px solid var(--border);border-radius:6px;background:var(--surface-2);color:var(--text)';
 
 const presetLabel = (p: FrameSize): string => `${p.width} × ${p.viewportHeight}`;
 const presetKey = (p: FrameSize): string => `${p.width}x${p.viewportHeight}`;
@@ -102,7 +102,7 @@ export function FrameMenuView({ frame, frames, onChange, onClose, draft, setDraf
   };
 
   return (
-    <div data-testid="frame-menu" style="padding:8px 10px 10px;font-size:14px;color:#202124">
+    <div data-testid="frame-menu" style="padding:8px 10px 10px;font-size:14px;color:var(--text)">
       <div style="display:flex;align-items:center;justify-content:space-between;gap:8px">
         <strong>Frame</strong>
         <button type="button" data-testid="menu-close" aria-label="Close" style={BUTTON} onClick={onClose}>
@@ -151,7 +151,7 @@ export function FrameMenuView({ frame, frames, onChange, onClose, draft, setDraf
         </button>
       </div>
       {draft.error !== null && (
-        <div data-testid="custom-error" role="alert" style="margin-top:4px;color:#d93025;font-size:13px">
+        <div data-testid="custom-error" role="alert" style="margin-top:4px;color:var(--danger);font-size:13px">
           {draft.error}
         </div>
       )}
@@ -172,7 +172,7 @@ export function FrameMenuView({ frame, frames, onChange, onClose, draft, setDraf
         ))}
       </div>
       {full !== null && (
-        <div data-testid="add-note" style="margin-top:4px;color:#5f6368;font-size:13px">
+        <div data-testid="add-note" style="margin-top:4px;color:var(--text-2);font-size:13px">
           {full}
         </div>
       )}
@@ -191,7 +191,7 @@ export function FrameMenuView({ frame, frames, onChange, onClose, draft, setDraf
           type="button"
           data-testid="delete"
           disabled={!canDelete}
-          style={canDelete ? BUTTON + ';color:#d93025' : BUTTON_OFF + ';color:#d93025'}
+          style={canDelete ? BUTTON + ';color:var(--danger)' : BUTTON_OFF + ';color:var(--danger)'}
           onClick={() => canDelete && onChange(deleteFrame(frames, frame))}
         >
           Delete

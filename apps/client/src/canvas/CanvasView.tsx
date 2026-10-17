@@ -13,6 +13,9 @@ import { FrameMenu } from './FrameMenu.js';
 import type { PointerIn, Tool, WheelIn } from './gestures.js';
 import type { Frame } from './layout.js';
 import { COLORS } from './painter.js';
+import { IconButton } from '../ui/IconButton.js';
+import { HandIcon, MicIcon, PointerIcon } from '../ui/icons.js';
+import './canvas.css';
 import type { LoaderStats } from './loader.js';
 import type { CanvasRuntime } from './runtime.js';
 import { createCanvasRuntime } from './runtime.js';
@@ -35,6 +38,10 @@ export interface CanvasViewProps {
    */
   framesEditable?: boolean;
   onSelect?: (s: NodeSelection | null) => void;
+  /** Called with the camera scale whenever it changes (pans included), for a zoom readout. */
+  onZoom?: (scale: number) => void;
+  /** Set on mount to a function that fits every frame into view; cleared on unmount. */
+  fitRef?: { current: (() => void) | null };
   debug?: boolean;
 }
 
@@ -55,21 +62,13 @@ declare global {
   }
 }
 
-const TOOLS: ReadonlyArray<{ tool: Tool; label: string }> = [
-  { tool: 'pan', label: 'Pan' },
-  { tool: 'select', label: 'Select' },
+const TOOLS: ReadonlyArray<{ tool: Tool; label: string; icon: () => JSX.Element }> = [
+  { tool: 'pan', label: 'Pan', icon: HandIcon },
+  { tool: 'select', label: 'Select', icon: PointerIcon },
 ];
 
-const TOOLBAR_STYLE =
-  'position:absolute;left:50%;bottom:12px;transform:translateX(-50%);display:flex;flex-wrap:wrap;justify-content:center;width:max-content;max-width:calc(100% - 24px);gap:8px;padding:6px;background:#fff;border-radius:10px;box-shadow:0 1px 4px rgba(0,0,0,.2)';
 const ERROR_STYLE =
-  'position:absolute;left:12px;top:12px;max-width:calc(100% - 24px);padding:8px 12px;background:#fff;border-radius:8px;color:#d93025;font-size:13px';
-
-function buttonStyle(pressed: boolean): string {
-  return pressed
-    ? 'font:inherit;min-height:44px;padding:6px 10px;border:1px solid #1a73e8;border-radius:6px;background:#e8f0fe;color:#1a73e8;cursor:pointer'
-    : 'font:inherit;min-height:44px;padding:6px 10px;border:1px solid #dadce0;border-radius:6px;background:#fff;color:#202124;cursor:pointer';
-}
+  'position:absolute;left:12px;top:72px;max-width:calc(100% - 24px);padding:8px 12px;background:var(--surface-2);border:1px solid var(--border);border-left:4px solid var(--danger);border-radius:8px;color:var(--text);font-size:13px';
 
 const MENU_WIDTH = 340;
 
@@ -80,10 +79,10 @@ function menuPanelStyle(at: { x: number; y: number }, root: HTMLElement | null):
   const width = Math.min(MENU_WIDTH, w - 16);
   const left = Math.max(8, Math.min(at.x, w - width - 8));
   const top = Math.max(8, Math.min(at.y, h - 120));
-  return `position:absolute;left:${left}px;top:${top}px;width:${width}px;max-height:${h - top - 8}px;overflow-y:auto;box-sizing:border-box;background:#fff;border-radius:10px;box-shadow:0 2px 12px rgba(0,0,0,.3);touch-action:pan-y`;
+  return `position:absolute;left:${left}px;top:${top}px;width:${width}px;max-height:${h - top - 8}px;overflow-y:auto;box-sizing:border-box;background:var(--surface);border:1px solid var(--border);border-radius:10px;box-shadow:var(--shadow);touch-action:pan-y`;
 }
 
-export function CanvasView({ source, cache, frames, framesEditable = true, onSelect, debug = false }: CanvasViewProps): JSX.Element {
+export function CanvasView({ source, cache, frames, framesEditable = true, onSelect, onZoom, fitRef, debug = false }: CanvasViewProps): JSX.Element {
   const rootRef = useRef<HTMLDivElement>(null);
   const layersRef = useRef<HTMLDivElement>(null);
   const baseRef = useRef<HTMLCanvasElement>(null);
@@ -134,6 +133,7 @@ export function CanvasView({ source, cache, frames, framesEditable = true, onSel
       requestFrame: (cb) => requestAnimationFrame(() => cb()),
       now: () => performance.now(),
       onSelect,
+      onCamera: onZoom ? (camera) => onZoom(camera.scale) : undefined,
       onError: setError,
       onFrameMenu: (frameId, p) => setMenu({ frameId, x: p.x, y: p.y }),
       framesEditable,
@@ -141,6 +141,7 @@ export function CanvasView({ source, cache, frames, framesEditable = true, onSel
     const { controller, loader } = runtime;
     runtimeRef.current = runtime;
     controllerRef.current = controller;
+    if (fitRef) fitRef.current = () => controller.fitAll();
 
     const sizeToRoot = (): void => {
       controller.resize(root.clientWidth, root.clientHeight, devicePixelRatio || 1);
@@ -225,6 +226,7 @@ export function CanvasView({ source, cache, frames, framesEditable = true, onSel
       root.removeEventListener('wheel', onWheel);
       observer.disconnect();
       controllerRef.current = null;
+      if (fitRef) fitRef.current = null;
       runtimeRef.current = null;
       if (debug) delete window.__hubCanvas;
     };
@@ -292,22 +294,12 @@ export function CanvasView({ source, cache, frames, framesEditable = true, onSel
           </div>
         </>
       )}
-      <div style={TOOLBAR_STYLE} onPointerDown={(e) => e.stopPropagation()}>
-        {TOOLS.map(({ tool: t, label }) => {
-          const on = tool === t;
-          return (
-            <button
-              key={t}
-              type="button"
-              data-testid={`tool-${t}`}
-              aria-pressed={on ? 'true' : 'false'}
-              style={buttonStyle(on)}
-              onClick={() => chooseTool(t)}
-            >
-              {label}
-            </button>
-          );
-        })}
+      <div class="canvas-tool-pill" onPointerDown={(e) => e.stopPropagation()}>
+        {TOOLS.map(({ tool: t, label, icon: Icon }) => (
+          <IconButton key={t} label={label} icon={<Icon />} pressed={tool === t} onClick={() => chooseTool(t)} data-testid={`tool-${t}`} />
+        ))}
+        <span class="canvas-tool-divider" aria-hidden="true" />
+        <IconButton label="Voice coming later" icon={<MicIcon />} disabled data-testid="mic" />
       </div>
     </div>
   );

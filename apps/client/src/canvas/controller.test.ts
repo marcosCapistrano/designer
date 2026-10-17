@@ -5,6 +5,7 @@ import type { ControllerDeps } from './controller.js';
 import { CanvasController } from './controller.js';
 import { createNullCache } from './cache.js';
 import { fitRect } from './geom.js';
+import { layoutBounds } from './layout.js';
 import type { PointerIn } from './gestures.js';
 import { TileLoader } from './loader.js';
 import type { TileWant } from './loader.js';
@@ -1061,5 +1062,56 @@ describe('CanvasController frame drags', () => {
       c.setFrames([{ ...F[0]!, width: 1023, x: 8 }]);
       expect(onSelect.mock.calls.length).toBe(calls);
     });
+  });
+});
+
+describe('CanvasController fit-all and camera reports', () => {
+  it('fits every frame of every page into the view, not just the first page', () => {
+    const two: RenderManifest = { ...M, pages: [...M.pages, { ...M.pages[0]!, pageId: 'p2', name: '/two', route: '/two' }] };
+    const h = harness();
+    h.c.resize(800, 600, 1);
+    h.c.setManifest(two);
+    h.c.setFrames(framesFor(two));
+    h.flush();
+    const firstPage = h.c.camera;
+    h.c.fitAll();
+    expect(new Set(h.c.frames.map((f) => f.pageId)).size).toBe(2);
+    expect(h.c.camera).toEqual(fitRect(layoutBounds(h.c.frames), { w: 800, h: 600 }, 40));
+    expect(h.c.camera.scale).toBeLessThan(firstPage.scale);
+  });
+
+  it('leaves the camera alone when there are no frames', () => {
+    const onCamera = vi.fn();
+    const h = harness(undefined, undefined, { onCamera });
+    h.c.resize(800, 600, 1);
+    const before = h.c.camera;
+    h.c.fitAll();
+    expect(h.c.camera).toEqual(before);
+    expect(onCamera).not.toHaveBeenCalled();
+  });
+
+  it('reports the camera after a pan, a zoom, a fit and an explicit camera', () => {
+    const onCamera = vi.fn();
+    const h = ready(undefined, undefined, { onCamera });
+    onCamera.mockClear();
+    h.c.panBy(10, 0);
+    h.c.zoomAt(100, 100, 2);
+    h.c.fitAll();
+    h.c.setCamera({ x: 1, y: 2, scale: 0.3 });
+    expect(onCamera).toHaveBeenCalledTimes(4);
+    expect(onCamera.mock.calls[0]![0].x).not.toBe(onCamera.mock.calls[1]![0].x);
+    expect(onCamera.mock.calls[1]![0].scale).toBeGreaterThan(onCamera.mock.calls[0]![0].scale);
+    expect(onCamera.mock.calls[2]![0]).toEqual(fitRect(layoutBounds(h.c.frames), { w: 800, h: 600 }, 40));
+    expect(onCamera.mock.calls[3]![0]).toEqual({ x: 1, y: 2, scale: 0.3 });
+  });
+
+  it('reports the first-page fit', () => {
+    const onCamera = vi.fn();
+    const h = harness(undefined, undefined, { onCamera });
+    h.c.resize(800, 600, 1);
+    h.c.setManifest(M);
+    h.c.setFrames(MF);
+    h.flush();
+    expect(onCamera).toHaveBeenCalledWith(h.c.camera);
   });
 });

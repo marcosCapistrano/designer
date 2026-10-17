@@ -565,3 +565,14 @@ describe('createCanvasRuntime frame saves', () => {
     }
   });
 });
+
+describe('createCanvasRuntime camera reports', () => {
+  it('forwards camera changes to onCamera', () => {
+    const onCamera = vi.fn();
+    const h = harness({ onCamera });
+    h.rt.controller.resize(800, 600, 1);
+    h.rt.controller.panBy(5, 0);
+    expect(onCamera).toHaveBeenCalledWith(h.rt.controller.camera);
+    h.rt.dispose();
+  });
+});

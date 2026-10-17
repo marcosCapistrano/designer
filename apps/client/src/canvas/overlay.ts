@@ -13,7 +13,7 @@ export interface OverlayInput {
   marquee: Rect | null; // screen CSS px
 }
 
-export const SELECT_COLOR = '#1a73e8';
+export const SELECT_COLOR = '#4c8dff'; // --accent
 
 export function paintOverlay(ctx: CanvasRenderingContext2D, input: OverlayInput): void {
   const { camera, dpr, selection, marquee } = input;
@@ -28,7 +28,7 @@ export function paintOverlay(ctx: CanvasRenderingContext2D, input: OverlayInput)
         camera,
         dpr,
       );
-      ctx.fillStyle = 'rgba(26,115,232,0.08)';
+      ctx.fillStyle = 'rgba(76,141,255,0.12)';
       ctx.fillRect(d.x, d.y, d.w, d.h);
       ctx.strokeStyle = SELECT_COLOR;
       ctx.lineWidth = 2 * dpr;
@@ -41,7 +41,7 @@ export function paintOverlay(ctx: CanvasRenderingContext2D, input: OverlayInput)
     const y = marquee.y * dpr;
     const w = marquee.w * dpr;
     const h = marquee.h * dpr;
-    ctx.fillStyle = 'rgba(26,115,232,0.12)';
+    ctx.fillStyle = 'rgba(76,141,255,0.16)';
     ctx.fillRect(x, y, w, h);
     ctx.strokeStyle = SELECT_COLOR;
     ctx.lineWidth = dpr;

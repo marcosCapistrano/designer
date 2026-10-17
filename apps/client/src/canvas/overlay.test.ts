@@ -24,7 +24,7 @@ describe('paintOverlay', () => {
     paintOverlay(ctx, input());
     expect(calls.find(c => c.m === 'strokeRect')).toMatchObject({
       a: [20, 20, 100, 40],
-      stroke: '#1a73e8',
+      stroke: '#4c8dff',
       lw: 4,
     });
   });
@@ -34,7 +34,7 @@ describe('paintOverlay', () => {
     paintOverlay(ctx, input({ selection: null, marquee: { x: 10, y: 10, w: 50, h: 30 } }));
     expect(calls.find(c => c.m === 'fillRect')).toMatchObject({
       a: [20, 20, 100, 60],
-      fill: 'rgba(26,115,232,0.12)',
+      fill: 'rgba(76,141,255,0.16)',
     });
     expect(calls.find(c => c.m === 'strokeRect')).toMatchObject({ a: [20, 20, 100, 60], lw: 2 });
   });

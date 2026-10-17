@@ -47,6 +47,8 @@ export interface ControllerDeps {
   requestFrame: (cb: () => void) => void;
   now: () => number;
   onSelect?: (s: NodeSelection | null) => void;
+  /** Called after every camera change: pans, zooms, fits and explicit cameras. */
+  onCamera?: (camera: Camera) => void;
   /** A frame drag was released with the frame changed: the whole layout, to save. */
   onFramesChange?: (frames: CanvasFrame[]) => void;
   /** A tap (not a drag) on a frame's label band: the frame and the tap's screen point, to open its menu at. */
@@ -231,7 +233,16 @@ export class CanvasController {
     // An explicit camera wins over the deferred first-page fit, whichever came first.
     this.needsFit = false;
     this.cameraSet = true;
-    this.schedule();
+    this.cameraChanged();
+  }
+
+  /** Fits every frame into the view. Does nothing while there are no frames. */
+  fitAll(): void {
+    if (this.layout.length === 0 || this.viewSize.w === 0) return;
+    this.cam = fitRect(layoutBounds(this.layout), this.viewSize, FIT_PADDING);
+    this.needsFit = false;
+    this.cameraSet = true;
+    this.cameraChanged();
   }
 
   /** The frame layout as the canvas holds it, mid-drag changes included. */
@@ -259,14 +270,14 @@ export class CanvasController {
   panBy(dx: number, dy: number): void {
     if (dx === 0 && dy === 0) return;
     this.cam = panCamera(this.cam, dx, dy);
-    this.schedule();
+    this.cameraChanged();
   }
 
   zoomAt(x: number, y: number, factor: number): void {
     if (factor === 1) return;
     this.cam = zoomCamera(this.cam, { x, y }, factor);
     this.lastZoom = this.deps.now();
-    this.schedule();
+    this.cameraChanged();
   }
 
   /** `x`, `y` are screen CSS px. */
@@ -495,6 +506,12 @@ export class CanvasController {
     if (pageFrames.length === 0) return;
     this.cam = fitRect(layoutBounds(pageFrames), this.viewSize, FIT_PADDING);
     this.needsFit = false;
+    this.deps.onCamera?.(this.cam);
+  }
+
+  private cameraChanged(): void {
+    this.deps.onCamera?.(this.cam);
+    this.schedule();
   }
 
   private select(s: FrameSelection | null): void {

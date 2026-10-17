@@ -1,0 +1,19 @@
+/* The canvas's own floating controls. The tool pill sits above the chat bar (64px) at the bottom center. */
+.canvas-tool-pill {
+  position: absolute;
+  left: 50%;
+  bottom: calc(64px + var(--s3));
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  gap: var(--s1);
+  padding: var(--s1);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--overlay);
+  -webkit-backdrop-filter: blur(12px);
+  backdrop-filter: blur(12px);
+  box-shadow: var(--shadow);
+  transform: translateX(-50%);
+}
+.canvas-tool-divider { width: 1px; height: 24px; margin: 0 var(--s1); background: var(--border); }
