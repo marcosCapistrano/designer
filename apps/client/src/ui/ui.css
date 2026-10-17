@@ -284,3 +284,17 @@
 .ui-input-muted { color: var(--text-3); }
 .ui-toast-warning { border-left: 4px solid var(--warning); }
 .ui-toast-passive { pointer-events: none; }
+
+/* A menu whose button shows its current choice (the Design tab's page picker). */
+.ui-menu-text {
+  display: inline-flex; align-items: center; gap: var(--s1); max-width: 220px; min-height: var(--touch); padding: 0 var(--s2);
+  border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface-2); color: var(--text);
+  font: inherit; font-size: var(--text-m); cursor: pointer;
+}
+.ui-menu-text-value { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ui-menu-caret { color: var(--text-2); font-size: 12px; }
+.ui-menu-text:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+@media (hover: hover) { .ui-menu-text:hover { background: var(--border); } }
+.ui-menu-item-on { color: var(--accent); font-weight: 600; }
+.ui-menu-item-on::after { content: '✓'; margin-left: auto; padding-left: var(--s3); }
+.ui-menu:has(> .ui-menu-text) .ui-menu-list { left: 0; right: auto; }

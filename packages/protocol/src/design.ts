@@ -25,7 +25,8 @@ export interface DesignTarget {
 }
 /** Edits made while editing one component in place: they apply at once when they stay inside its definition. */
 export interface EditScope { component: string }
-export interface LayerNode { id: string; name: string; kind: 'element' | 'text' | 'instance'; component?: string; text?: string; children: LayerNode[] }
+/** `root`: for an instance, the hit-map id of its component root (the instance row stands for it). */
+export interface LayerNode { id: string; name: string; kind: 'element' | 'text' | 'instance'; component?: string; root?: string; text?: string; children: LayerNode[] }
 export interface DesignLayers { revision: string; root: LayerNode; components: Record<string, { title: string; uses: number }> }
 export interface DesignSelection { revision: string; targets: DesignTarget[]; selection: NodeSelection }
 export interface DesignProposal { id: string; revision: string; descriptions: string[]; manifest: RenderManifest | null; warnings: string[] }

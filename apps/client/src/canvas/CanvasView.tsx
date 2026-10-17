@@ -1,6 +1,6 @@
 // The canvas component: owns the two paint layers, wires DOM events into the
 // controller, and renders the tool toolbar. Source, frames, framesEditable, cache,
-// onSelect, onDoubleTap, onOutside and debug are read once at mount; the app passes stable values. scope and insets follow their props.
+// onSelect, onDoubleTap and debug are read once at mount; the app passes stable values. scope and insets follow their props.
 
 import { useEffect, useRef, useState } from 'preact/hooks';
 import type { JSX } from 'preact';
@@ -48,18 +48,18 @@ export interface CanvasViewProps {
   fitRef?: { current: (() => void) | null };
   /** Set on mount to the canvas's selection and scope controls; cleared on unmount. */
   handleRef?: { current: CanvasHandle | null };
-  /** Component mode: the instance path being edited on `pageId`, or null outside it. */
+  /** Component mode: the instance being edited on `pageId` (everything else dims), or null outside it. */
   scope?: { prefix: string; pageId: string } | null;
   /** A double tap, with what it selected. Read at mount. */
   onDoubleTap?: (s: NodeSelection) => void;
-  /** In component mode, a tap outside the instance being edited. Read at mount. */
-  onOutside?: () => void;
   debug?: boolean;
 }
 
 /** What the app drives on the canvas besides its props. */
 export interface CanvasHandle {
   selectNodes(pageId: string, nodeIds: string[]): Promise<void>;
+  /** Fits one page's frames into the view. */
+  fitPage(pageId: string): void;
   /** The selected frame's hit map, or null. */
   selectionBoxes(): readonly HitBox[] | null;
 }
@@ -101,7 +101,7 @@ function menuPanelStyle(at: { x: number; y: number }, root: HTMLElement | null):
   return `position:absolute;left:${left}px;top:${top}px;width:${width}px;max-height:${h - top - 8}px;overflow-y:auto;box-sizing:border-box;background:var(--surface);border:1px solid var(--border);border-radius:10px;box-shadow:var(--shadow);touch-action:pan-y`;
 }
 
-export function CanvasView({ source, cache, frames, framesEditable = true, onSelect, onCamera, initialCamera, insets, fitRef, handleRef, scope = null, onDoubleTap, onOutside, debug = false }: CanvasViewProps): JSX.Element {
+export function CanvasView({ source, cache, frames, framesEditable = true, onSelect, onCamera, initialCamera, insets, fitRef, handleRef, scope = null, onDoubleTap, debug = false }: CanvasViewProps): JSX.Element {
   const rootRef = useRef<HTMLDivElement>(null);
   const layersRef = useRef<HTMLDivElement>(null);
   const baseRef = useRef<HTMLCanvasElement>(null);
@@ -159,13 +159,12 @@ export function CanvasView({ source, cache, frames, framesEditable = true, onSel
       onFrameMenu: (frameId, p) => setMenu({ frameId, x: p.x, y: p.y }),
       framesEditable,
       onDoubleTap,
-      onOutside,
     });
     const { controller, loader } = runtime;
     runtimeRef.current = runtime;
     controllerRef.current = controller;
     if (fitRef) fitRef.current = () => controller.fitAll();
-    if (handleRef) handleRef.current = { selectNodes: (pageId, ids) => controller.selectNodes(pageId, ids), selectionBoxes: () => controller.selectionBoxes() };
+    if (handleRef) handleRef.current = { selectNodes: (pageId, ids) => controller.selectNodes(pageId, ids), selectionBoxes: () => controller.selectionBoxes(), fitPage: (pageId) => controller.fitPage(pageId) };
 
     const sizeToRoot = (): void => {
       controller.resize(root.clientWidth, root.clientHeight, devicePixelRatio || 1);

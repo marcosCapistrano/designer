@@ -56,6 +56,14 @@ describe('Menu', () => {
     (props(byTestId(els, 'menu')).onClick as () => void)();
     expect(setOpen).toHaveBeenCalledWith(true);
   });
+  it('can show its current choice as text, and marks the checked item', () => {
+    const els = elements(MenuView({ label: 'Pages', text: '/ads/grid', open: true, setOpen: vi.fn(), items: [{ label: '/ads', run: () => {}, 'data-testid': 'a' }, { label: '/ads/grid', run: () => {}, checked: true, 'data-testid': 'g' }], 'data-testid': 'menu' }));
+    expect(text(byTestId(els, 'menu'))).toContain('/ads/grid');
+    expect(String(props(byTestId(els, 'menu')).class)).toContain('ui-menu-text');
+    expect(props(byTestId(els, 'g'))['aria-checked']).toBe('true');
+    expect(props(byTestId(els, 'g')).role).toBe('menuitemradio');
+    expect(props(byTestId(els, 'a'))['aria-checked']).toBe('false');
+  });
 });
 
 describe('ToastStack', () => {

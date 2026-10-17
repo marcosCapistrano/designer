@@ -24,3 +24,4 @@ export const ComponentIcon = () => icon(<path d="M12 3l3.5 3.5L12 10 8.5 6.5zM12
 export const LayersIcon = () => icon(<path d="M12 3l9 5-9 5-9-5zM3 13l9 5 9-5" />);
 export const ChevronIcon = () => icon(<path d="M9 6l6 6-6 6" />);
 export const EnterIcon = () => icon(<path d="M10 7l5 5-5 5M4 12h11M20 4v16" />);
+export const UpIcon = () => icon(<path d="M12 19V5M6 11l6-6 6 6" />);

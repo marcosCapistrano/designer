@@ -17,7 +17,7 @@ const info: DesignSelection = {
 const base: InspectorState = { info, loading: false, error: null, targetId: 'n1', device: 'tablet', pending: new Set(), errors: {}, epoch: 0 };
 
 function render(state: Partial<InspectorState> = {}, extra: Partial<InspectorViewProps> = {}) {
-  const handlers = { onTarget: vi.fn(), onDevice: vi.fn(), onToggleSection: vi.fn(), onLink: vi.fn(), onEdit: vi.fn(), onClose: vi.fn(), onRetry: vi.fn(), onAdd: vi.fn(), onEnterComponent: vi.fn() };
+  const handlers = { onTarget: vi.fn(), onDevice: vi.fn(), onToggleSection: vi.fn(), onLink: vi.fn(), onEdit: vi.fn(), onClose: vi.fn(), onRetry: vi.fn(), onAdd: vi.fn(), onEnterComponent: vi.fn(), onParent: vi.fn() };
   const els = elements(InspectorView({ state: { ...base, ...state }, sections: {}, linked: { padding: false, margin: false }, locked: false, added: new Set(), mode: 'page', path: null, ...handlers, ...extra }));
   return { ...handlers, els, get: (id: string) => byTestId(els, id) };
 }
@@ -89,6 +89,13 @@ describe('InspectorView', () => {
     expect(text(render().get('inspector-kind'))).toBe('Text');
     expect(text(render({ targetId: 'c1' }).get('inspector-kind'))).toBe('AdListCard');
     expect(() => render().get('inspector-path')).toThrow();
+  });
+
+  it('selects the parent layer from the header, when there is one', () => {
+    const v = render();
+    click(v.get('inspector-parent'));
+    expect(v.onParent).toHaveBeenCalled();
+    expect(() => render({}, { onParent: undefined }).get('inspector-parent')).toThrow();
   });
 
   it('renaming commits setName', () => {

@@ -812,9 +812,38 @@ describe('CanvasController frame drags', () => {
     const h = ready();
     h.c.setCamera({ x: 1000, y: -40, scale: 1 });
     h.flush();
+    // Only the selected frame can be resized.
+    void h.c.selectFrame(MF[0]!.id);
+    h.flush();
     h.onSelect.mockClear();
     return h;
   }
+
+  it('a tap on a frame title selects the frame; a tap on the selected frame title opens its menu', () => {
+    const h = ready();
+    h.c.setCamera({ x: 1000, y: -40, scale: 1 });
+    h.flush();
+    h.c.pointer(pen('down', 100, 30));
+    h.c.pointer(pen('up', 100, 30));
+    expect(h.c.selection).toEqual({ pageId: 'home', device: 'base', nodeIds: ['n1'] });
+    expect(h.onFrameMenu).not.toHaveBeenCalled();
+    h.c.pointer(pen('down', 100, 30));
+    h.c.pointer(pen('up', 100, 30));
+    expect(h.onFrameMenu).toHaveBeenCalledWith(MF[0]!.id, { x: 100, y: 30 });
+  });
+
+  it('only the selected frame can be resized, and only its handles are drawn', () => {
+    const h = ready();
+    h.c.setCamera({ x: 1000, y: -40, scale: 1 });
+    h.flush();
+    const touch = (kind: PointerIn['kind'], x: number, y: number): PointerIn => ({ ...pen(kind, x, y), pointerType: 'touch' });
+    h.c.pointer(touch('down', 450, 500));
+    h.c.pointer(touch('move', 550, 500));
+    h.c.pointer(touch('up', 550, 500));
+    expect(baseOf(h.c).w).toBe(1440);
+    expect(h.onFramesChange).not.toHaveBeenCalled();
+    expect(h.c.camera.x).toBe(900); // the drag panned instead
+  });
 
   it('a pen drag on the right band in select tool resizes live, draws the readout, and reports the layout once on release', async () => {
     const { c, flush, base, overlay, onSelect, onFramesChange } = atRightEdge();
@@ -1031,7 +1060,9 @@ describe('CanvasController frame drags', () => {
       h.flush();
       // The right edge is at screen x 524.
       h.c.setCamera({ x: 500, y: -40, scale: 1 });
+      void h.c.selectFrame(F[0]!.id);
       h.flush();
+      h.onSelect.mockClear();
       return h;
     }
 
@@ -1078,6 +1109,21 @@ describe('CanvasController fit-all and camera reports', () => {
     expect(new Set(h.c.frames.map((f) => f.pageId)).size).toBe(2);
     expect(h.c.camera).toEqual(fitRect(layoutBounds(h.c.frames), { w: 800, h: 600 }, 40));
     expect(h.c.camera.scale).toBeLessThan(firstPage.scale);
+  });
+
+  it('fits one page’s frames, clear of the insets', () => {
+    const two: RenderManifest = { ...M, pages: [...M.pages, { ...M.pages[0]!, pageId: 'p2', name: '/two', route: '/two' }] };
+    const insets = { top: 56, right: 0, bottom: 136, left: 0 };
+    const h = harness(undefined, undefined, { insets });
+    h.c.resize(800, 600, 1);
+    h.c.setManifest(two);
+    h.c.setFrames(framesFor(two));
+    h.flush();
+    h.c.fitPage('p2');
+    expect(h.c.camera).toEqual(fitRectInset(layoutBounds(h.c.frames.filter((f) => f.pageId === 'p2')), { w: 800, h: 600 }, 40, insets));
+    const before = h.c.camera;
+    h.c.fitPage('missing');
+    expect(h.c.camera).toEqual(before);
   });
 
   it('leaves the camera alone when there are no frames', () => {
@@ -1170,31 +1216,19 @@ describe('CanvasController component scope', () => {
   const scopedMaps: ControllerDeps['hitMaps'] = { get: (h) => scoped[h], load: async (h) => scoped[h] ?? [] };
   const setup = (now: () => number = () => 0) => {
     const onDoubleTap = vi.fn();
-    const onOutside = vi.fn();
-    const h = ready(now, scopedMaps, { onDoubleTap, onOutside });
-    return { ...h, onDoubleTap, onOutside };
+    const h = ready(now, scopedMaps, { onDoubleTap });
+    return { ...h, onDoubleTap };
   };
 
-  it('tap maps hits through the scope', async () => {
+  it('a tap selects exactly what it hits, inside instances too, in or out of component mode', async () => {
     const { c } = setup();
     await c.tap(15, 15);
-    expect(c.selection?.nodeIds).toEqual(['a']);
-    c.setScope('a', 'home');
-    await c.tap(15, 15);
     expect(c.selection?.nodeIds).toEqual(['a/s']);
-    await c.tap(125, 40);
-    expect(c.selection?.nodeIds).toEqual(['a/b']);
-  });
-
-  it('tap outside the scope calls onOutside and clears', async () => {
-    const { c, onOutside } = setup();
     c.setScope('a', 'home');
-    await c.tap(15, 15);
+    await c.tap(125, 40);
+    expect(c.selection?.nodeIds).toEqual(['a/b/t']);
     await c.tap(400, 400);
-    expect(onOutside).toHaveBeenCalledTimes(1);
-    expect(c.selection).toBeNull();
-    await c.tap(790, 590);
-    expect(onOutside).toHaveBeenCalledTimes(2);
+    expect(c.selection?.nodeIds).toEqual(['n1']);
   });
 
   it('two taps within 350ms and 24px report a double tap', async () => {
@@ -1203,7 +1237,7 @@ describe('CanvasController component scope', () => {
     await c.tap(15, 15);
     t = 200;
     await c.tap(20, 18);
-    expect(onDoubleTap).toHaveBeenCalledWith({ pageId: 'home', device: 'base', nodeIds: ['a'] });
+    expect(onDoubleTap).toHaveBeenCalledWith({ pageId: 'home', device: 'base', nodeIds: ['a/s'] });
     t = 1000;
     await c.tap(20, 18);
     t = 1100;
@@ -1221,7 +1255,7 @@ describe('CanvasController component scope', () => {
     const second = h.c.tap(16, 15);
     d.pending.get('hb')!.ok(scoped['hb']!);
     await second;
-    expect(onDoubleTap).toHaveBeenCalledWith({ pageId: 'home', device: 'base', nodeIds: ['a'] });
+    expect(onDoubleTap).toHaveBeenCalledWith({ pageId: 'home', device: 'base', nodeIds: ['a/s'] });
   });
 
   it('a double tap whose second tap selects something else is not reported', async () => {
@@ -1235,10 +1269,10 @@ describe('CanvasController component scope', () => {
     expect(onDoubleTap).not.toHaveBeenCalled();
   });
 
-  it('box select dedupes scoped ids', async () => {
+  it('box select picks the outermost boxes, inside instances too', async () => {
     const { c } = setup();
     await c.selectBox({ x: 0, y: 0 }, { x: 300, y: 60 });
-    expect(c.selection?.nodeIds).toEqual(['a']);
+    expect(c.selection?.nodeIds).toEqual(['a/r', 'a/q']);
   });
 
   it('selectNodes highlights the union of an instance boxes', async () => {

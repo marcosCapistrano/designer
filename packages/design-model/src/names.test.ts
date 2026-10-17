@@ -54,16 +54,13 @@ describe('componentUses', () => {
 
 describe('layerOutline', () => {
   test('nests instance layers under their path, and text-only elements are text layers', () => {
+    // As in Figma, an instance's layers are its component root's children; the root itself is the instance.
     expect(layerOutline(doc(), 'p1')).toEqual({
       id: 'root', name: 'div', kind: 'element', children: [
         { id: 'h', name: 'h1', kind: 'text', text: 'Hi', children: [] },
-        { id: 'a', name: 'Filter Panel', kind: 'instance', component: 'C', children: [
-          { id: 'a/cr', name: 'Filter Panel', kind: 'element', children: [
-            { id: 'a/cs', name: 'span', kind: 'text', text: 'x', children: [] },
-            { id: 'a/n', name: 'D', kind: 'instance', component: 'D', children: [
-              { id: 'a/n/dr', name: 'button', kind: 'element', children: [] },
-            ] },
-          ] },
+        { id: 'a', name: 'Filter Panel', kind: 'instance', component: 'C', root: 'a/cr', children: [
+          { id: 'a/cs', name: 'span', kind: 'text', text: 'x', children: [] },
+          { id: 'a/n', name: 'D', kind: 'instance', component: 'D', root: 'a/n/dr', children: [] },
         ] },
       ],
     });

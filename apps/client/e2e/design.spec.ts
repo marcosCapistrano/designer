@@ -111,26 +111,37 @@ test('Design chat streams a proposal, persists messages and waits for Apply', as
   await expect(page.getByRole('log', { name: 'Design messages' })).toContainText('Make all buttons purple');
 });
 
-test('a tapped component is its instance: instance edits apply at once, with undo and redo', async ({ page }) => {
+test('a tap selects the layer under the finger; up selects its parent; Edit component goes inside, Done comes out', async ({ page }) => {
   await openDesign(page, 'demo');
   await importPages(page);
   await expect(toasts(page)).toContainText('Imported');
   const initial = await pending(page);
   await selectLastBox(page);
+  // The demo Button has no inner layers: the tap selects the instance, on the page.
   await expect(page.getByTestId('inspector-kind')).toHaveText('Button');
-  // A box without text has no Typography, and empty sections add their fields from +.
-  await expect(page.getByTestId('section-typography')).toHaveCount(0);
+  await expect(page.getByTestId('mode-chip')).toHaveCount(0);
   await page.getByTestId('section-fill-add').selectOption('background-color');
-  await page.getByTestId('fill-background-color-input').fill('red');
+  await page.getByTestId('fill-background-color-input').fill('blue');
   await page.getByTestId('fill-background-color-input').press('Enter');
-  // A successful inspector edit is confirmed by the field, not a toast.
   await expect.poll(() => pending(page)).toBe(initial + 1);
-  await expect(page.getByTestId('topbar-undo')).toBeEnabled();
   await page.getByTestId('topbar-undo').click();
   await expect.poll(() => pending(page)).toBe(initial);
-  await expect(page.getByTestId('topbar-redo')).toBeEnabled();
   await page.getByTestId('topbar-redo').click();
   await expect.poll(() => pending(page)).toBe(initial + 1);
+  // Inside the component, edits change every instance at once.
+  await page.getByTestId('inspector-edit-component').click();
+  await expect(page.getByTestId('mode-chip')).toContainText('used 2×');
+  await expect(page.getByTestId('inspector-kind')).toHaveText('Text');
+  await page.getByTestId('typography-color-input').fill('red');
+  await page.getByTestId('typography-color-input').press('Enter');
+  await expect.poll(() => pending(page)).toBe(initial + 2);
+  await expect(page.getByTestId('preview-banner')).toHaveCount(0);
+  await page.getByTestId('mode-done').click();
+  await expect(page.getByTestId('mode-chip')).toHaveCount(0);
+  await expect(page.getByTestId('inspector-kind')).toHaveText('Button');
+  // Up: the page's main element.
+  await page.getByTestId('inspector-parent').click();
+  await expect(page.getByTestId('inspector-kind')).toHaveText('Frame');
 });
 
 test('tapping a layer row selects it on the canvas, with its name in the inspector', async ({ page }) => {
@@ -144,27 +155,6 @@ test('tapping a layer row selects it on the canvas, with its name in the inspect
   await expect(heading).toHaveAttribute('aria-selected', 'true');
   await expect(page.getByTestId('inspector-name')).toHaveValue('h1');
   await expect(page.getByTestId('inspector-kind')).toHaveText('Text');
-});
-
-test('Edit component edits every instance at once; Done leaves', async ({ page }) => {
-  await openDesign(page, 'demo');
-  await importPages(page);
-  await expect(toasts(page)).toContainText('Imported');
-  const initial = await pending(page);
-  await selectLastBox(page);
-  await page.getByTestId('inspector-edit-component').click();
-  await expect(page.getByTestId('mode-chip')).toContainText('used 2×');
-  await expect(page.getByTestId('inspector-shared-note')).toHaveCount(0);
-  // The component's text color is set (the chat test made the buttons purple), so its field shows.
-  await expect(page.getByTestId('inspector-kind')).toHaveText('Text');
-  await page.getByTestId('typography-color-input').fill('blue');
-  await page.getByTestId('typography-color-input').press('Enter');
-  await expect.poll(() => pending(page)).toBe(initial + 1);
-  await expect(page.getByTestId('preview-banner')).toHaveCount(0);
-  await page.getByTestId('topbar-undo').click();
-  await expect.poll(() => pending(page)).toBe(initial);
-  await page.getByTestId('mode-done').click();
-  await expect(page.getByTestId('mode-chip')).toHaveCount(0);
 });
 
 test('on a tablet-width screen the inspector is a bottom sheet and chat stays reachable', async ({ page }) => {
@@ -184,7 +174,7 @@ test('on a tablet-width screen the inspector is a bottom sheet and chat stays re
   await expect(page.getByTestId('section-raw')).toBeVisible();
 });
 
-test('on a tablet, a double tap enters a component and a tap outside leaves it; layers open as a sheet', async ({ page }) => {
+test('on a tablet, a tap outside the component being edited leaves it, and the layers open as a sheet from the top bar', async ({ page }) => {
   await page.setViewportSize({ width: 834, height: 1194 });
   await openDesign(page, 'demo');
   await importPages(page);
@@ -192,9 +182,10 @@ test('on a tablet, a double tap enters a component and a tap outside leaves it; 
   const point = await lastBoxPoint(page);
   await page.getByTestId('tool-select').first().click();
   const canvas = page.getByTestId('canvas').first();
-  await canvas.dblclick({ position: point });
+  await canvas.click({ position: point });
+  await page.getByTestId('inspector-edit-component').click();
   await expect(page.getByTestId('mode-chip')).toBeVisible();
-  // The top-left of the first frame is outside the instance.
+  // Above the button, still in the page: outside the component.
   await canvas.click({ position: { x: point.x, y: point.y - 60 } });
   await expect(page.getByTestId('mode-chip')).toHaveCount(0);
   await expect(page.getByTestId('layers')).toHaveCount(0);
@@ -205,18 +196,43 @@ test('on a tablet, a double tap enters a component and a tap outside leaves it; 
   await expect(page.getByTestId('layers')).toHaveCount(0);
 });
 
-test('on a wide screen, a double tap enters a component even though the first tap opens the layers panel', async ({ page }) => {
-  await page.setViewportSize({ width: 1280, height: 800 });
+test('tapping a frame title selects the frame, and tapping it again opens the frame menu', async ({ page }) => {
   await openDesign(page, 'demo');
   await importPages(page);
   await expect(toasts(page)).toContainText('Imported');
-  const point = await lastBoxPoint(page);
-  expect(point.x).toBeLessThan(320); // under where the docked panel opens
-  await page.getByTestId('tool-select').first().click();
+  const manifest = await (await page.request.get('/api/apps/demo/render/manifest.json')).json();
   const bounds = (await page.getByTestId('canvas').first().boundingBox())!;
-  // A finger's double tap: two taps about 200ms apart, at one point on the screen.
-  await page.mouse.click(bounds.x + point.x, bounds.y + point.y);
-  await page.waitForTimeout(200);
-  await page.mouse.click(bounds.x + point.x, bounds.y + point.y);
-  await expect(page.getByTestId('mode-chip')).toBeVisible();
+  const { frames } = await (await page.request.get('/api/apps/demo/design/frames')).json();
+  const firstPage = layoutFrames(frames, manifest).filter((f) => f.pageId === manifest.pages[0].pageId);
+  const camera = fitRectInset(layoutBounds(firstPage), { w: bounds.width, h: bounds.height }, 40, CANVAS_INSETS);
+  const desktop = firstPage.find((f) => f.w === 1440 && f.viewportHeight === 900)!;
+  const title = worldToScreen(camera, { x: desktop.x, y: desktop.y });
+  await page.getByTestId('canvas').first().click({ position: { x: title.x + 20, y: title.y - 8 } });
+  await expect(page.getByTestId('inspector')).toBeVisible();
+  await expect(page.getByTestId('inspector-kind')).toHaveText('Frame');
+  await page.getByTestId('canvas').first().click({ position: { x: title.x + 20, y: title.y - 8 } });
+  await expect(page.getByTestId('frame-menu')).toBeVisible();
+});
+
+test('the page picker lists the pages and goes to the one picked', async ({ page }) => {
+  await openDesign(page, 'demo');
+  await importPages(page);
+  await expect(toasts(page)).toContainText('Imported');
+  const { pages } = await (await page.request.get('/api/apps/demo/design')).json();
+  const picker = page.getByTestId('topbar-pages');
+  await expect(picker).toContainText(pages[0].route);
+  await picker.click();
+  await expect(page.getByTestId(`page-${pages[0].id}`)).toHaveAttribute('aria-checked', 'true');
+  await page.keyboard.press('Escape');
+  const fitted = await page.getByTestId('topbar-fit').textContent();
+  // Zoom in away from the page fit, then pick the page to come back to it.
+  const bounds = (await page.getByTestId('canvas').first().boundingBox())!;
+  await page.mouse.move(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2);
+  await page.keyboard.down('Control');
+  for (let i = 0; i < 5; i++) await page.mouse.wheel(0, -200);
+  await page.keyboard.up('Control');
+  await expect(page.getByTestId('topbar-fit')).not.toHaveText(fitted!);
+  await picker.click();
+  await page.getByTestId(`page-${pages[0].id}`).click();
+  await expect(page.getByTestId('topbar-fit')).toHaveText(fitted!);
 });

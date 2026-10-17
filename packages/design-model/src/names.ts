@@ -8,6 +8,8 @@ export interface LayerOutline {
   name: string;
   kind: 'element' | 'text' | 'instance';
   component?: string;
+  /** For an instance: the hit-map id of its component root, which the instance row stands for. */
+  root?: string;
   text?: string;
   children: LayerOutline[];
 }
@@ -47,9 +49,13 @@ const MAX_DEPTH = 64;
 function outline(doc: DesignDoc, node: ElementNode | Extract<DesignNode, { kind: 'instance' }>, prefix: string, depth: number): LayerOutline {
   const id = prefix + node.id;
   if (node.kind === 'instance') {
+    // As in Figma, the instance is its component's root frame: its layers are the root's children.
     const def = ownValue(doc.components, node.component);
-    const children = def && depth < MAX_DEPTH ? [outline(doc, def.root, `${id}/`, depth + 1)] : [];
-    return { id, name: displayName(doc, node), kind: 'instance', component: node.component, children };
+    const inner = def && depth < MAX_DEPTH ? outline(doc, def.root, `${id}/`, depth + 1) : null;
+    return {
+      id, name: displayName(doc, node), kind: 'instance', component: node.component,
+      ...(inner ? { root: inner.id } : {}), ...(inner?.text ? { text: inner.text } : {}), children: inner?.children ?? [],
+    };
   }
   const textOnly = node.children.length > 0 && node.children.every((child) => child.kind === 'text');
   if (textOnly) {

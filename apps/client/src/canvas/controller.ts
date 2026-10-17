@@ -22,7 +22,7 @@ import type { Camera, Insets, Point, Rect, Size } from './geom.js';
 import { dragTo, hitHandle, settleFrame } from './frame-drag.js';
 import type { FrameDrag } from './frame-drag.js';
 import { boxSelect, hitTest, toPagePoint } from './hit.js';
-import { boxOf, scopedId } from './scope.js';
+import { boxOf } from './scope.js';
 import type { Frame } from './layout.js';
 import { frameAt, layoutBounds, layoutFrames } from './layout.js';
 import type { TileImage, TileWant } from './loader.js';
@@ -61,8 +61,6 @@ export interface ControllerDeps {
   framesEditable?: boolean;
   /** A second tap within DOUBLE_TAP_MS and DOUBLE_TAP_SLOP of the first, with what it selected. */
   onDoubleTap?: (s: NodeSelection) => void;
-  /** In component mode, a tap or box select outside the instance being edited. */
-  onOutside?: () => void;
 }
 
 /** Where the painted layers are shown: translate by (x, y) CSS px, then scale about the layer origin. */
@@ -175,6 +173,8 @@ export class CanvasController {
   private scopePage: string | null = null;
   /** The last tap, and once it has resolved, what it selected (a double tap must select the same node twice). */
   private lastTap: { x: number; y: number; t: number; id?: string } | null = null;
+  /** Frames resized here and still waiting for a render at their new size: they keep their selection meanwhile. */
+  private resized = new Set<string>();
   private marquee: Rect | null = null;
   /** A move or resize of a frame by its handle; its pointer never reaches the gesture tracker. */
   private drag: FrameDrag | null = null;
@@ -271,6 +271,16 @@ export class CanvasController {
     return { x: h.frame.x + x0, y: h.frame.y + y0, w: x1 - x0, h: y1 - y0 };
   }
 
+  /** Fits one page's frames into the view. Does nothing for a page without frames. */
+  fitPage(pageId: string): void {
+    const frames = this.layout.filter((f) => f.pageId === pageId);
+    if (frames.length === 0 || this.viewSize.w === 0) return;
+    this.cam = fitRectInset(layoutBounds(frames), this.viewSize, FIT_PADDING, this.deps.insets ?? NO_INSETS);
+    this.needsFit = false;
+    this.cameraSet = true;
+    this.cameraChanged();
+  }
+
   /** Fits every frame into the view. Does nothing while there are no frames. */
   fitAll(): void {
     if (this.layout.length === 0 || this.viewSize.w === 0) return;
@@ -330,7 +340,6 @@ export class CanvasController {
     const hash = frame ? renderHash(frame) : null;
     if (!frame || hash === null) {
       this.select(null);
-      this.outside();
       return;
     }
     const map = await this.hitMapOf(hash);
@@ -339,11 +348,10 @@ export class CanvasController {
       this.select(null);
       return;
     }
-    const hit = hitTest(map, toPagePoint(frame, world));
-    const id = hit === null ? null : scopedId(hit, this.scope);
+    // A tap selects exactly what is under it, inside components too; the app follows into component mode.
+    const id = hitTest(map, toPagePoint(frame, world));
     if (id === null) {
       this.select(null);
-      this.outside();
       return;
     }
     this.select({ frameId: frame.frameId, nodeIds: [id] });
@@ -353,13 +361,7 @@ export class CanvasController {
     if (double && (last?.id === undefined || last.id === id) && reported !== null) this.deps.onDoubleTap?.(reported);
   }
 
-  /** In component mode, a selection outside the instance: the app steps out. */
-  private outside(): void {
-    this.lastTap = null;
-    if (this.scope !== '') this.deps.onOutside?.();
-  }
-
-  /** Enters (a non-empty instance path on `pageId`) or leaves ('') component mode for later taps and box selects. */
+  /** Component mode: dims everything but instance `prefix` on `pageId` ('' leaves it). Selection is not limited by it. */
   setScope(prefix: string, pageId: string | null = null): void {
     this.scope = prefix;
     this.scopePage = prefix === '' ? null : pageId;
@@ -447,7 +449,7 @@ export class CanvasController {
       return;
     }
     const pageRect = { x: clipped.x - frame.x, y: clipped.y - frame.y, w: clipped.w, h: clipped.h };
-    const nodeIds = [...new Set(boxSelect(map, pageRect).map((id) => scopedId(id, this.scope)).filter((id): id is string => id !== null))];
+    const nodeIds = boxSelect(map, pageRect);
     this.select(nodeIds.length > 0 ? { frameId: frame.frameId, nodeIds } : null);
   }
 
@@ -484,6 +486,7 @@ export class CanvasController {
       smoothing,
       readout: this.drag?.moved ? { frameId: this.drag.frameId, kind: this.drag.kind } : null,
       handles: this.deps.framesEditable !== false,
+      handlesFor: this.selected?.frameId ?? null,
     };
     // While zooming, the last painted image is scaled on the compositor; the repaint comes at settle.
     const preview = smoothing ? null : this.previewOf(input);
@@ -573,6 +576,7 @@ export class CanvasController {
       if (r !== null) last.set(f.frameId, r);
     }
     this.lastRenders = last;
+    for (const f of this.layout) if (f.render !== null) this.resized.delete(f.frameId);
     this.index = buildIndex(this.layout);
     this.overlayDirty = true;
     this.selectToken++;
@@ -609,9 +613,10 @@ export class CanvasController {
             if (gen === this.layoutGen && this.selected === sel) this.select(null);
           },
         );
-      } else {
+      } else if (!frame || !this.resized.has(frame.frameId)) {
         this.select(null);
       }
+      // A frame waiting for a render at its new size (a resize) keeps its selection, and with it its handles.
     }
     this.schedule();
   }
@@ -644,6 +649,8 @@ export class CanvasController {
   }
 
   private select(s: FrameSelection | null): void {
+    // Only the selected frame shows resize handles, which the base layer draws.
+    if ((s?.frameId ?? null) !== (this.selected?.frameId ?? null)) this.painter.invalidate();
     this.selected = s;
     this.overlayDirty = true;
     this.deps.onSelect?.(this.reported(s));
@@ -718,7 +725,7 @@ export class CanvasController {
         if (d.moved) this.settleDrag(d);
         else {
           this.schedule();
-          if (d.kind === 'move') this.deps.onFrameMenu?.(d.frameId, { x: ev.x, y: ev.y });
+          if (d.kind === 'move') void this.labelTap(d.frameId, { x: ev.x, y: ev.y });
         }
         return true;
       }
@@ -729,11 +736,47 @@ export class CanvasController {
     if (ev.kind !== 'down' || ev.button !== 0 || this.deps.framesEditable === false) return false;
     if (this.gestures.holds(ev.id)) this.resetGestures();
     if (this.gestures.active) return false;
-    const hit = hitHandle(this.layout, screenToWorld(this.cam, ev), this.cam.scale);
+    const hit = hitHandle(this.layout, screenToWorld(this.cam, ev), this.cam.scale, (id) => this.selected?.frameId === id);
     const origin = hit ? this.canvasFrames.find((f) => f.id === hit.frameId) : undefined;
     if (!hit || !origin) return false;
     this.drag = { pointerId: ev.id, frameId: hit.frameId, kind: hit.kind, start: { x: ev.x, y: ev.y }, origin, moved: false };
     return true;
+  }
+
+  /** A tap on a frame's title selects the frame; on a frame already selected, it opens the frame menu. */
+  private async labelTap(frameId: string, at: Point): Promise<void> {
+    const root = this.cachedRoot(frameId) ?? (await this.rootOf(frameId));
+    const sel = this.selected;
+    if (sel?.frameId === frameId && root !== null && sel.nodeIds.length === 1 && sel.nodeIds[0] === root) this.deps.onFrameMenu?.(frameId, at);
+    else await this.selectFrame(frameId);
+  }
+
+  /** The frame's page root from a hit map already in memory; undefined when it is not. */
+  private cachedRoot(frameId: string): string | null | undefined {
+    const frame = this.findFrame(frameId);
+    const hash = frame ? renderHash(frame) : null;
+    const map = hash === null ? undefined : this.deps.hitMaps.get(hash);
+    return map ? (map[0]?.nodeId ?? null) : undefined;
+  }
+
+  /** The frame's page root, the first box of its hit map; null without a render or a map. */
+  private async rootOf(frameId: string): Promise<string | null> {
+    const frame = this.findFrame(frameId);
+    const hash = frame ? renderHash(frame) : null;
+    if (hash === null) return null;
+    const map = this.deps.hitMaps.get(hash) ?? (await this.hitMapOf(hash));
+    return map?.[0]?.nodeId ?? null;
+  }
+
+  /**
+   * Selects the whole frame: its page root. Its resize handles show and work while it is selected. With the
+   * frame's hit map in memory the selection is made before this returns.
+   */
+  async selectFrame(frameId: string): Promise<void> {
+    const token = ++this.selectToken;
+    const root = this.cachedRoot(frameId) ?? (await this.rootOf(frameId));
+    if (token !== this.selectToken || root === null) return;
+    this.select({ frameId, nodeIds: [root] });
   }
 
   private settleDrag(d: FrameDrag): void {
@@ -757,6 +800,7 @@ export class CanvasController {
   }
 
   private replaceFrame(next: CanvasFrame): void {
+    this.resized.add(next.id);
     this.canvasFrames = this.canvasFrames.map((f) => (f.id === next.id ? next : f));
     this.relayoutKeepingSelection();
   }

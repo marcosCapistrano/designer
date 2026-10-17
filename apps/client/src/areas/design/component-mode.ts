@@ -40,5 +40,15 @@ export function modeLabel(stack: ModeStack, layers: DesignLayers): ModeLabel | n
 
 /** The layer an instance draws as its root: what is selected on entering it. */
 export function rootOf(root: LayerNode, instance: string): string | null {
-  return subtree(root, instance)?.children[0]?.id ?? null;
+  const node = subtree(root, instance);
+  return node?.kind === 'instance' ? (node.root ?? null) : null;
+}
+
+/** The component mode a selection is edited in: the instances its layers sit inside, when they all share them. */
+export function modeFor(nodeIds: readonly string[] | null): ModeStack {
+  const [first, ...rest] = nodeIds ?? [];
+  if (first === undefined) return [];
+  const mode = enterPath(first);
+  const prefix = mode.at(-1);
+  return prefix === undefined || rest.every((id) => id.startsWith(`${prefix}/`)) ? mode : [];
 }

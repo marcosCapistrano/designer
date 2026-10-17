@@ -21,10 +21,11 @@ export interface RowOptions {
 export function layerRows(root: LayerNode, opts: RowOptions): LayerRow[] {
   const rows: LayerRow[] = [];
   const selected = new Set(opts.selected);
+  const isSelected = (node: LayerNode): boolean => selected.has(node.id) || (node.root !== undefined && selected.has(node.root));
   const visit = (node: LayerNode, depth: number): void => {
     const expandable = node.children.length > 0;
     const open = expandable && opts.open.has(node.id);
-    rows.push({ node, depth, expandable, open, selected: selected.has(node.id), present: opts.present(node.id) });
+    rows.push({ node, depth, expandable, open, selected: isSelected(node), present: opts.present(node.id) });
     if (open) for (const child of node.children) visit(child, depth + 1);
   };
   visit(root, 0);
@@ -36,15 +37,16 @@ export function autoOpen(root: LayerNode, selected: readonly string[]): Set<stri
   const open = new Set<string>();
   const want = new Set(selected);
   const visit = (node: LayerNode, path: string[]): void => {
-    if (want.has(node.id)) path.forEach((id) => open.add(id));
+    if (want.has(node.id) || (node.root !== undefined && want.has(node.root))) path.forEach((id) => open.add(id));
     for (const child of node.children) visit(child, [...path, node.id]);
   };
   visit(root, []);
   return open;
 }
 
+/** The layer with this id; a component root's id finds its instance (the instance row stands for it). */
 export function subtree(root: LayerNode, id: string): LayerNode | null {
-  if (root.id === id) return root;
+  if (root.id === id || root.root === id) return root;
   for (const child of root.children) {
     const found = subtree(child, id);
     if (found) return found;
@@ -57,4 +59,24 @@ export function presentIn(boxes: readonly HitBox[] | null): (id: string) => bool
   if (boxes === null) return () => true;
   const ids = boxes.map((b) => b.nodeId);
   return (id) => ids.some((b) => b === id || b.startsWith(`${id}/`));
+}
+
+/** The id of the layer one level up, or null for the top layer or an unknown one. */
+export function parentOf(root: LayerNode, id: string): string | null {
+  for (const child of root.children) {
+    if (child.id === id || child.root === id) return root.id;
+    const found = parentOf(child, id);
+    if (found !== null) return found;
+  }
+  return null;
+}
+
+/** The instance whose component root this id is, or null when it is not one. */
+export function instanceFor(root: LayerNode, id: string): string | null {
+  if (root.root === id) return root.id;
+  for (const child of root.children) {
+    const found = instanceFor(child, id);
+    if (found !== null) return found;
+  }
+  return null;
 }
