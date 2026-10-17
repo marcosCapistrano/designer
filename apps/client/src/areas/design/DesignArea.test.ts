@@ -33,7 +33,7 @@ function render(extra: Partial<DesignAreaViewProps> = {}) {
     app: 'adhunters-v7', api: {} as never, ws: {} as never, live, cache: {} as never, previewCache: {} as never, frames: {} as never, previewFrames: {} as never,
     revision: 'r1', proposal: null, previewSource: null, selection: null, inspectorOpen: false, selectionLabel: null,
     width: 1440, zoom: createValueStore(25), camera: null, busy: false, building: false, chatBusy: false, inspectorBusy: false, toasts: [], details: null, importOpen: false, fitRef: { current: null },
-    layers: null, layersVisible: false, mode: [], handleRef: { current: null }, present: () => true,
+    layers: null, layersVisible: false, mode: [], handleRef: { current: null }, present: () => true, pages: [], onPage: vi.fn(),
     ...h, ...extra,
   };
   const els = elements(DesignAreaView(p), [], SHALLOW);
@@ -114,11 +114,22 @@ describe('DesignAreaView status', () => {
 
 describe('TopBar', () => {
   const bar = (extra = {}) => {
-    const h = { onArea: vi.fn(), onUndo: vi.fn(), onRedo: vi.fn(), onFit: vi.fn(), onLayers: vi.fn(), onDone: vi.fn() };
+    const h = { onArea: vi.fn(), onUndo: vi.fn(), onRedo: vi.fn(), onFit: vi.fn(), onLayers: vi.fn(), onDone: vi.fn(), onPage: vi.fn() };
     const zoom = createValueStore(37);
-    const els = elements(TopBar({ app: 'adhunters-v7', area: 'design', canUndo: true, canRedo: false, zoom, menu: [], layersOpen: false, mode: null, ...h, ...extra }), [], SHALLOW);
+    const els = elements(TopBar({ app: 'adhunters-v7', area: 'design', canUndo: true, canRedo: false, zoom, menu: [], layersOpen: false, mode: null, pages: [], page: null, ...h, ...extra }), [], SHALLOW);
     return { ...h, zoom, els, get: (id: string) => byTestId(els, id) };
   };
+  it('picks a page from the pages menu, showing the current one', () => {
+    const pages = [{ id: 'p1', label: '/ads' }, { id: 'p2', label: '/ads/grid' }];
+    const v = bar({ pages, page: 'p2' });
+    const menu = props(byType(v.els, Menu));
+    expect(menu.text).toBe('/ads/grid');
+    const items = menu.items as { label: string; checked: boolean; run(): void }[];
+    expect(items.map((i) => [i.label, i.checked])).toEqual([['/ads', false], ['/ads/grid', true]]);
+    items[0]!.run();
+    expect(v.onPage).toHaveBeenCalledWith('p1');
+    expect(bar().els.filter((e) => e.type === Menu)).toHaveLength(1); // no pages: only the More menu
+  });
   it('toggles the layers panel', () => {
     const v = bar({ layersOpen: true });
     expect(props(v.get('topbar-layers'))['aria-pressed']).toBe('true');
@@ -278,6 +289,12 @@ describe('DesignAreaView layers and component mode', () => {
     (props(byTestId(bar, 'mode-done')).onClick as () => void)();
     expect(v.onModeDone).toHaveBeenCalled();
     expect(props(byType(render().els, TopBar)).mode).toBeNull();
+  });
+  it('gives the top bar the pages and the page being looked at', () => {
+    const pages = [{ id: 'p1', label: '/ads' }, { id: 'p2', label: '/ads/grid' }];
+    const bar = props(byType(render({ pages, page: 'p2' }).els, TopBar));
+    expect(bar.pages).toBe(pages);
+    expect(bar.page).toBe('p2');
   });
   it('hides the layers panel while a proposal is shown', () => {
     expect(render({ selection, layers, layersVisible: true, proposal, previewSource }).els.some((e) => e.type === LayersPanel)).toBe(false);

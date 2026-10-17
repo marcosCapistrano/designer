@@ -271,6 +271,16 @@ export class CanvasController {
     return { x: h.frame.x + x0, y: h.frame.y + y0, w: x1 - x0, h: y1 - y0 };
   }
 
+  /** Fits one page's frames into the view. Does nothing for a page without frames. */
+  fitPage(pageId: string): void {
+    const frames = this.layout.filter((f) => f.pageId === pageId);
+    if (frames.length === 0 || this.viewSize.w === 0) return;
+    this.cam = fitRectInset(layoutBounds(frames), this.viewSize, FIT_PADDING, this.deps.insets ?? NO_INSETS);
+    this.needsFit = false;
+    this.cameraSet = true;
+    this.cameraChanged();
+  }
+
   /** Fits every frame into the view. Does nothing while there are no frames. */
   fitAll(): void {
     if (this.layout.length === 0 || this.viewSize.w === 0) return;

@@ -1080,6 +1080,21 @@ describe('CanvasController fit-all and camera reports', () => {
     expect(h.c.camera.scale).toBeLessThan(firstPage.scale);
   });
 
+  it('fits one page’s frames, clear of the insets', () => {
+    const two: RenderManifest = { ...M, pages: [...M.pages, { ...M.pages[0]!, pageId: 'p2', name: '/two', route: '/two' }] };
+    const insets = { top: 56, right: 0, bottom: 136, left: 0 };
+    const h = harness(undefined, undefined, { insets });
+    h.c.resize(800, 600, 1);
+    h.c.setManifest(two);
+    h.c.setFrames(framesFor(two));
+    h.flush();
+    h.c.fitPage('p2');
+    expect(h.c.camera).toEqual(fitRectInset(layoutBounds(h.c.frames.filter((f) => f.pageId === 'p2')), { w: 800, h: 600 }, 40, insets));
+    const before = h.c.camera;
+    h.c.fitPage('missing');
+    expect(h.c.camera).toEqual(before);
+  });
+
   it('leaves the camera alone when there are no frames', () => {
     const onCamera = vi.fn();
     const h = harness(undefined, undefined, { onCamera });

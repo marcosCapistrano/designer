@@ -112,6 +112,9 @@ export interface DesignAreaViewProps {
   onLayerEnter(id: string): void;
   onModeDone(): void;
   onEnterComponent(targetId: string): void;
+  /** The design's pages, for the page picker. */
+  pages: readonly { id: string; label: string }[];
+  onPage(id: string): void;
 }
 
 function inspector(p: DesignAreaViewProps, locked: boolean, side: 'right' | 'bottom'): JSX.Element {
@@ -194,6 +197,9 @@ export function DesignAreaView(p: DesignAreaViewProps): JSX.Element {
         onLayers={p.onLayersToggle}
         mode={p.layers ? modeLabel(p.mode, p.layers) : null}
         onDone={p.onModeDone}
+        pages={p.pages}
+        page={page}
+        onPage={p.onPage}
       />
       {layersShown && layersPanel(p)}
       {p.building && <p class="design-building" role="status" data-testid="design-building">Wait for Build to finish before importing or editing.</p>}
@@ -244,6 +250,7 @@ export function DesignArea({ app, api, ws, source, cache }: DesignAreaProps): JS
   const handleRef = useRef<CanvasHandle | null>(null);
   const [layers, setLayers] = useState<DesignLayers | null>(null);
   const [page, setPage] = useState<string | null>(null);
+  const [pages, setPages] = useState<readonly { id: string; label: string }[]>([]);
   const [mode, setMode] = useState<ModeStack>([]);
   // auto: the panel follows the selection (wide screens); open/closed: the user's choice from the Layers button.
   const [layersPref, setLayersPref] = useState<'auto' | 'open' | 'closed'>('auto');
@@ -304,6 +311,18 @@ export function DesignArea({ app, api, ws, source, cache }: DesignAreaProps): JS
     if (!revision) return;
     void act(async () => onResult(await api.designHistory(app, revision, action), action), action === 'undo' ? 'Undo failed.' : 'Redo failed.');
   };
+
+  // The page list follows imports (each changes the revision).
+  useEffect(() => {
+    if (!revision) return;
+    let active = true;
+    void api.designSummary(app).then((s) => {
+      if (!active) return;
+      setPages(s.pages.map((pg) => ({ id: pg.id, label: pg.route })));
+      setPage((current) => (current && s.pages.some((pg) => pg.id === current) ? current : (s.pages[0]?.id ?? null)));
+    }).catch(() => {});
+    return () => { active = false; };
+  }, [app, api, revision]);
 
   // The outline of the page being worked on, at the current revision.
   useEffect(() => {
@@ -399,6 +418,13 @@ export function DesignArea({ app, api, ws, source, cache }: DesignAreaProps): JS
         onLayerEnter={(id) => void enterComponent(id)}
         onModeDone={() => stepOut(true)}
         onEnterComponent={() => { const id = selection?.nodeIds[0]; if (id) void enterComponent(id, selection.pageId); }}
+        pages={pages}
+        onPage={(id) => {
+          // Component mode belongs to one page: going to another leaves it.
+          if (id !== page) setMode([]);
+          setPage(id);
+          handleRef.current?.fitPage(id);
+        }}
         onResult={(r) => onResult(r, 'chat')}
         onInspectorResult={(r) => onResult(r, 'inspector')}
         onApply={() => proposal && void act(async () => onResult(await api.applyDesign(app, proposal.id), 'apply'), 'Apply failed.')}

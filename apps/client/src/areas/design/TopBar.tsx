@@ -28,6 +28,11 @@ export interface TopBarProps {
   /** The component being edited in place, or null on the page. */
   mode: ModeLabel | null;
   onDone(): void;
+  /** The design's pages; picking one fits the canvas to it. */
+  pages: readonly { id: string; label: string }[];
+  /** The page being looked at, or null before one is known. */
+  page: string | null;
+  onPage(id: string): void;
 }
 
 const AREA_OPTIONS = AREAS.map((a) => ({ value: a, label: AREA_LABEL[a] }));
@@ -37,6 +42,10 @@ export function TopBar(p: TopBarProps): JSX.Element {
     <header class="design-topbar" data-testid="topbar" onPointerDown={(e) => e.stopPropagation()}>
       <a class="design-topbar-back" href="#/" aria-label="All apps" title="All apps" data-testid="topbar-back"><BackIcon /></a>
       <h1 class="design-topbar-title" data-testid="topbar-title">{p.app}</h1>
+      {p.pages.length > 0 && (
+        <Menu label="Page" text={p.pages.find((pg) => pg.id === p.page)?.label ?? p.pages[0]!.label} data-testid="topbar-pages"
+          items={p.pages.map((pg) => ({ label: pg.label, checked: pg.id === (p.page ?? p.pages[0]!.id), run: () => p.onPage(pg.id), 'data-testid': `page-${pg.id}` }))} />
+      )}
       <Segmented value={p.area} options={AREA_OPTIONS} label="Area" onChange={p.onArea} data-testid="topbar-area" />
       <IconButton label="Layers" icon={<LayersIcon />} pressed={p.layersOpen} onClick={p.onLayers} data-testid="topbar-layers" />
       <span class="design-topbar-spacer" />

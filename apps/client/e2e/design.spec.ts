@@ -220,3 +220,26 @@ test('on a wide screen, a double tap enters a component even though the first ta
   await page.mouse.click(bounds.x + point.x, bounds.y + point.y);
   await expect(page.getByTestId('mode-chip')).toBeVisible();
 });
+
+test('the page picker lists the pages and goes to the one picked', async ({ page }) => {
+  await openDesign(page, 'demo');
+  await importPages(page);
+  await expect(toasts(page)).toContainText('Imported');
+  const { pages } = await (await page.request.get('/api/apps/demo/design')).json();
+  const picker = page.getByTestId('topbar-pages');
+  await expect(picker).toContainText(pages[0].route);
+  await picker.click();
+  await expect(page.getByTestId(`page-${pages[0].id}`)).toHaveAttribute('aria-checked', 'true');
+  await page.keyboard.press('Escape');
+  const fitted = await page.getByTestId('topbar-fit').textContent();
+  // Zoom in away from the page fit, then pick the page to come back to it.
+  const bounds = (await page.getByTestId('canvas').first().boundingBox())!;
+  await page.mouse.move(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2);
+  await page.keyboard.down('Control');
+  for (let i = 0; i < 5; i++) await page.mouse.wheel(0, -200);
+  await page.keyboard.up('Control');
+  await expect(page.getByTestId('topbar-fit')).not.toHaveText(fitted!);
+  await picker.click();
+  await page.getByTestId(`page-${pages[0].id}`).click();
+  await expect(page.getByTestId('topbar-fit')).toHaveText(fitted!);
+});

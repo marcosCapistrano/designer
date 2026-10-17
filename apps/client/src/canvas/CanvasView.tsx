@@ -60,6 +60,8 @@ export interface CanvasViewProps {
 /** What the app drives on the canvas besides its props. */
 export interface CanvasHandle {
   selectNodes(pageId: string, nodeIds: string[]): Promise<void>;
+  /** Fits one page's frames into the view. */
+  fitPage(pageId: string): void;
   /** The selected frame's hit map, or null. */
   selectionBoxes(): readonly HitBox[] | null;
 }
@@ -165,7 +167,7 @@ export function CanvasView({ source, cache, frames, framesEditable = true, onSel
     runtimeRef.current = runtime;
     controllerRef.current = controller;
     if (fitRef) fitRef.current = () => controller.fitAll();
-    if (handleRef) handleRef.current = { selectNodes: (pageId, ids) => controller.selectNodes(pageId, ids), selectionBoxes: () => controller.selectionBoxes() };
+    if (handleRef) handleRef.current = { selectNodes: (pageId, ids) => controller.selectNodes(pageId, ids), selectionBoxes: () => controller.selectionBoxes(), fitPage: (pageId) => controller.fitPage(pageId) };
 
     const sizeToRoot = (): void => {
       controller.resize(root.clientWidth, root.clientHeight, devicePixelRatio || 1);
