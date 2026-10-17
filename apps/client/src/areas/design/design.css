@@ -75,3 +75,14 @@
 .design-sample-proposal h2 { margin: 0 0 var(--s2); font-size: var(--text-l); }
 .design-sample-proposal pre { white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--mono); font-size: var(--text-s); }
 .design-source-preview { position: relative; height: 260px; margin: var(--s2) 0; }
+
+/* Component mode: what is being edited, and the way out. */
+.design-mode-chip { display: flex; align-items: center; gap: var(--s2); min-width: 0; padding: 0 var(--s1) 0 var(--s3); min-height: 40px; border: 1px solid rgba(177, 140, 255, 0.5); border-radius: 999px; background: rgba(177, 140, 255, 0.12); font-size: var(--text-m); }
+.design-mode-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-2); }
+.design-mode-text strong { color: #b18cff; }
+.design-mode-done { min-height: 32px; border-radius: 999px; }
+@media (max-width: 900px) { .design-topbar .ui-segmented { display: none; } }
+
+/* Layers: a left column on wide screens, a sheet over the canvas below 1200px. */
+.design-layers { position: absolute; top: 56px; left: 0; bottom: 0; z-index: 21; width: 280px; border-right: 1px solid var(--border); }
+.design-layers-sheet { bottom: 64px; width: min(300px, 85vw); box-shadow: var(--shadow); }

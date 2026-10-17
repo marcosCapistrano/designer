@@ -6,7 +6,8 @@ import { IconButton } from '../../ui/IconButton.js';
 import { Menu } from '../../ui/Menu.js';
 import type { MenuItem } from '../../ui/Menu.js';
 import { Segmented } from '../../ui/Segmented.js';
-import { BackIcon, MoreIcon, RedoIcon, UndoIcon } from '../../ui/icons.js';
+import { BackIcon, LayersIcon, MoreIcon, RedoIcon, UndoIcon } from '../../ui/icons.js';
+import type { ModeLabel } from './component-mode.js';
 import { useValue } from '../../ui/value-store.js';
 import type { ValueStore } from '../../ui/value-store.js';
 
@@ -22,6 +23,11 @@ export interface TopBarProps {
   zoom: ValueStore<number>;
   onFit(): void;
   menu: readonly MenuItem[];
+  layersOpen: boolean;
+  onLayers(): void;
+  /** The component being edited in place, or null on the page. */
+  mode: ModeLabel | null;
+  onDone(): void;
 }
 
 const AREA_OPTIONS = AREAS.map((a) => ({ value: a, label: AREA_LABEL[a] }));
@@ -32,7 +38,15 @@ export function TopBar(p: TopBarProps): JSX.Element {
       <a class="design-topbar-back" href="#/" aria-label="All apps" title="All apps" data-testid="topbar-back"><BackIcon /></a>
       <h1 class="design-topbar-title" data-testid="topbar-title">{p.app}</h1>
       <Segmented value={p.area} options={AREA_OPTIONS} label="Area" onChange={p.onArea} data-testid="topbar-area" />
+      <IconButton label="Layers" icon={<LayersIcon />} pressed={p.layersOpen} onClick={p.onLayers} data-testid="topbar-layers" />
       <span class="design-topbar-spacer" />
+      {p.mode && (
+        <div class="design-mode-chip" data-testid="mode-chip">
+          <span class="design-mode-text">Editing <strong>{p.mode.path}</strong> · used {p.mode.uses}×</span>
+          <button type="button" class="ui-button ui-button-primary design-mode-done" data-testid="mode-done" onClick={p.onDone}>Done</button>
+        </div>
+      )}
+      {p.mode && <span class="design-topbar-spacer" />}
       <IconButton label="Undo" icon={<UndoIcon />} disabled={!p.canUndo} onClick={p.onUndo} data-testid="topbar-undo" />
       <IconButton label="Redo" icon={<RedoIcon />} disabled={!p.canRedo} onClick={p.onRedo} data-testid="topbar-redo" />
       <ZoomReadout store={p.zoom} onFit={p.onFit} />

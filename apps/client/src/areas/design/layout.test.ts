@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { ImportResponse, RenderManifest } from '@hub/protocol';
-import { INSPECTOR_BREAKPOINT, panelLayout } from './layout.js';
+import { CANVAS_INSETS, INSPECTOR_BREAKPOINT, LAYERS_BREAKPOINT, canvasInsets, layersLayout, panelLayout } from './layout.js';
 import { importOutcome } from './import-result.js';
 import { proposalSource } from './preview-source.js';
 
@@ -63,5 +63,18 @@ describe('proposalSource', () => {
     expect(await (await s.tile('k', 0, 0)).text()).toBe('t');
     const unsub = s.subscribe(() => { throw new Error('a preview never updates'); });
     unsub();
+  });
+});
+
+describe('layers layout', () => {
+  it('docks the layers panel at 1200 px and wider, and is a sheet below', () => {
+    expect(LAYERS_BREAKPOINT).toBe(1200);
+    expect(layersLayout(1200)).toBe('docked');
+    expect(layersLayout(1199)).toBe('sheet');
+  });
+  it('keeps fits clear of a docked, open layers panel', () => {
+    expect(canvasInsets(1440, true)).toEqual({ ...CANVAS_INSETS, left: 280 });
+    expect(canvasInsets(1440, false)).toEqual(CANVAS_INSETS);
+    expect(canvasInsets(1000, true)).toEqual(CANVAS_INSETS);
   });
 });

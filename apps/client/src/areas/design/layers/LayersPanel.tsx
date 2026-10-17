@@ -1,8 +1,11 @@
 // The layers panel: the page's layer tree, Figma style. Rows select on the canvas; instances open into their
 // component's layers, and their enter button starts editing the component in place.
+import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import type { JSX } from 'preact';
+import type { LayerNode } from '@hub/protocol';
 import { IconButton } from '../../../ui/IconButton.js';
 import { ChevronIcon, CloseIcon, ComponentIcon, EnterIcon, FrameIcon, TextIcon } from '../../../ui/icons.js';
+import { autoOpen, layerRows } from './model.js';
 import type { LayerRow } from './model.js';
 import './layers.css';
 
@@ -25,6 +28,7 @@ export function LayersPanelView({ rows, title, onSelect, onToggle, onEnter, onCl
         <h2 class="layers-title">{title}</h2>
         <IconButton label="Close layers" icon={<CloseIcon />} onClick={onClose} data-testid="layers-close" />
       </header>
+      {rows.length === 0 && <p class="layers-empty" data-testid="layers-empty">Tap a frame to see its layers.</p>}
       <ul class="layers-tree" role="tree" aria-label="Layers">
         {rows.map((row) => {
           const { node } = row;
@@ -46,6 +50,41 @@ export function LayersPanelView({ rows, title, onSelect, onToggle, onEnter, onCl
           );
         })}
       </ul>
+    </div>
+  );
+}
+
+export interface LayersPanelProps {
+  /** The tree to show (the page, or the component being edited), or null before one loads. */
+  root: LayerNode | null;
+  title: string;
+  selected: readonly string[];
+  present(id: string): boolean;
+  onSelect(id: string): void;
+  onEnter(id: string): void;
+  onClose(): void;
+}
+
+/** The panel with its expansion state: the root and the selection's ancestors open, plus what the user toggled. */
+export function LayersPanel({ root, title, selected, present, onSelect, onEnter, onClose }: LayersPanelProps): JSX.Element {
+  const [toggled, setToggled] = useState<ReadonlyMap<string, boolean>>(new Map());
+  const key = selected.join('\u0000');
+  const auto = useMemo(() => (root ? autoOpen(root, selected) : new Set<string>()), [root, key]);
+  // A new selection reveals itself even inside a branch the user had closed.
+  useEffect(() => setToggled((t) => new Map([...t].filter(([id]) => !auto.has(id)))), [auto]);
+  const open = useMemo(() => {
+    const ids = new Set(auto);
+    if (root) ids.add(root.id);
+    for (const [id, on] of toggled) if (on) ids.add(id); else ids.delete(id);
+    return ids;
+  }, [auto, toggled, root]);
+  const rows = root ? layerRows(root, { open, selected, present }) : [];
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => { ref.current?.querySelector('[aria-selected="true"]')?.scrollIntoView({ block: 'nearest' }); }, [key, root]);
+  return (
+    <div ref={ref} class="layers-host">
+      <LayersPanelView rows={rows} title={title} onSelect={onSelect} onEnter={onEnter} onClose={onClose}
+        onToggle={(id) => setToggled(new Map([...toggled, [id, !open.has(id)]]))} />
     </div>
   );
 }

@@ -2,7 +2,7 @@
 // DesignArea owns the state and server calls; DesignAreaView lays the layers out and is tested without a DOM.
 import { useCallback, useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import type { JSX } from 'preact';
-import type { DesignEditResult, DesignProposal, ImportResponse, NodeSelection } from '@hub/protocol';
+import type { DesignEditResult, DesignLayers, DesignProposal, ImportResponse, NodeSelection } from '@hub/protocol';
 import type { ApiClient } from '../../net/api.js';
 import { ServerFrameStore } from '../../net/frame-store.js';
 import type { WsClient } from '../../net/ws.js';
@@ -10,6 +10,8 @@ import type { BlobCache } from '../../canvas/cache.js';
 import { createNullCache } from '../../canvas/cache.js';
 import type { TileSource } from '../../canvas/source.js';
 import { CanvasView, readOnlyFrameStore } from '../../canvas/index.js';
+import type { CanvasHandle } from '../../canvas/CanvasView.js';
+import { prefixOf } from '../../canvas/scope.js';
 import type { FrameStore } from '../../canvas/index.js';
 import { formatRoute } from '../../shell/route.js';
 import type { Area } from '../../shell/route.js';
@@ -27,7 +29,11 @@ import { ImportSheet } from './ImportSheet.js';
 import { Inspector } from './inspector/Inspector.js';
 import { importOutcome } from './import-result.js';
 import type { Details } from './import-result.js';
-import { CANVAS_INSETS, INSPECTOR_WIDTH, panelLayout } from './layout.js';
+import { INSPECTOR_WIDTH, canvasInsets, layersLayout, panelLayout } from './layout.js';
+import { alive, enter, enterPath, leave, modeLabel, rootOf } from './component-mode.js';
+import type { ModeStack } from './component-mode.js';
+import { LayersPanel } from './layers/LayersPanel.js';
+import { presentIn, subtree } from './layers/model.js';
 import { PreviewBanner } from './PreviewBanner.js';
 import { proposalSource } from './preview-source.js';
 import { resultToast } from './result-toast.js';
@@ -87,13 +93,46 @@ export interface DesignAreaViewProps {
   onChatBusy(busy: boolean): void;
   onSampleBusy(busy: boolean): void;
   onPreviewFocus(): void;
+  /** The outline of the page the layers panel and component mode are about. */
+  layers: DesignLayers | null;
+  /** The page `layers` and the mode belong to; the selection's page when unset. */
+  page?: string | null;
+  layersVisible: boolean;
+  /** Component mode: the instances being edited, outermost first; empty on the page. */
+  mode: ModeStack;
+  handleRef: { current: CanvasHandle | null };
+  /** Whether a layer has a box in the selected frame. */
+  present(id: string): boolean;
+  onDoubleTap(selection: NodeSelection): void;
+  onOutside(): void;
+  onLayersToggle(): void;
+  onLayersClose(): void;
+  onLayerSelect(id: string): void;
+  onLayerEnter(id: string): void;
+  onModeDone(): void;
+  onEnterComponent(targetId: string): void;
 }
 
 function inspector(p: DesignAreaViewProps, locked: boolean, side: 'right' | 'bottom'): JSX.Element {
+  const label = p.layers ? modeLabel(p.mode, p.layers) : null;
   return (
     <SheetView open side={side} width={side === 'right' ? INSPECTOR_WIDTH : undefined} maxHeight="55vh" label="Inspector" onClose={p.onCloseInspector} data-testid="inspector-sheet">
-      <Inspector app={p.app} api={p.api} selection={p.selection!} revision={p.revision} disabled={locked} onResult={p.onInspectorResult} onClose={p.onCloseInspector} onLabel={p.onSelectionLabel} onPending={p.onInspectorBusy} />
+      <Inspector app={p.app} api={p.api} selection={p.selection!} revision={p.revision} disabled={locked} onResult={p.onInspectorResult} onClose={p.onCloseInspector} onLabel={p.onSelectionLabel} onPending={p.onInspectorBusy}
+        mode={p.mode.length ? 'component' : 'page'} scope={label ? { component: label.component } : undefined} path={label?.path ?? null} onEnterComponent={p.onEnterComponent} />
     </SheetView>
+  );
+}
+
+function layersPanel(p: DesignAreaViewProps): JSX.Element {
+  const inner = prefixOf(p.mode);
+  const root = p.layers ? (inner ? subtree(p.layers.root, inner) : p.layers.root) : null;
+  const label = p.layers ? modeLabel(p.mode, p.layers) : null;
+  const docked = layersLayout(p.width) === 'docked';
+  return (
+    <div class={docked ? 'design-layers' : 'design-layers design-layers-sheet'} data-testid="design-layers">
+      <LayersPanel root={root} title={label ? label.title : 'Layers'} selected={p.selection?.nodeIds ?? []} present={p.present}
+        onSelect={p.onLayerSelect} onEnter={p.onLayerEnter} onClose={p.onLayersClose} />
+    </div>
   );
 }
 
@@ -105,6 +144,9 @@ export function DesignAreaView(p: DesignAreaViewProps): JSX.Element {
   const locked = p.busy || p.building || p.chatBusy || previewing;
   const history = !!p.revision && !locked && !p.inspectorBusy;
   const layout = panelLayout(p.width, p.inspectorOpen && p.selection !== null);
+  const layersShown = p.layersVisible && !previewing;
+  const page = p.page ?? p.selection?.pageId ?? null;
+  const scope = p.mode.length && page ? { prefix: prefixOf(p.mode), pageId: page } : null;
   return (
     <div class="design-area" data-testid="design-area">
       <div class="design-canvas">
@@ -117,8 +159,12 @@ export function DesignAreaView(p: DesignAreaViewProps): JSX.Element {
           onSelect={showPreview ? undefined : p.onSelect}
           onCamera={p.onCamera}
           initialCamera={p.camera ?? undefined}
-          insets={CANVAS_INSETS}
+          insets={canvasInsets(p.width, layersShown)}
           fitRef={p.fitRef}
+          handleRef={p.handleRef}
+          scope={showPreview ? null : scope}
+          onDoubleTap={showPreview ? undefined : p.onDoubleTap}
+          onOutside={showPreview ? undefined : p.onOutside}
         />
       </div>
       {!p.revision && !previewing && (
@@ -143,7 +189,12 @@ export function DesignAreaView(p: DesignAreaViewProps): JSX.Element {
           { label: 'Import pages', run: () => p.onImportOpen(true), disabled: p.building, 'data-testid': 'menu-import' },
           { label: 'Sample preview', run: () => p.onImportOpen(true), disabled: p.building, 'data-testid': 'menu-samples' },
         ]}
+        layersOpen={layersShown}
+        onLayers={p.onLayersToggle}
+        mode={p.layers ? modeLabel(p.mode, p.layers) : null}
+        onDone={p.onModeDone}
       />
+      {layersShown && layersPanel(p)}
       {p.building && <p class="design-building" role="status" data-testid="design-building">Wait for Build to finish before importing or editing.</p>}
       {previewing && <PreviewBanner proposal={p.proposal!} busy={p.busy} onApply={p.onApply} onCancel={p.onCancel} />}
       {/* Inspector and chat keep one place each in this column, so opening the inspector or rotating the tablet
@@ -188,6 +239,18 @@ export function DesignArea({ app, api, ws, source, cache }: DesignAreaProps): JS
   const [width, setWidth] = useState(1440);
   const [importOpen, setImportOpen] = useState(false);
   const [details, setDetails] = useState<Details | null>(null);
+
+  const handleRef = useRef<CanvasHandle | null>(null);
+  const [layers, setLayers] = useState<DesignLayers | null>(null);
+  const [page, setPage] = useState<string | null>(null);
+  const [mode, setMode] = useState<ModeStack>([]);
+  // auto: the panel follows the selection (wide screens); open/closed: the user's choice from the Layers button.
+  const [layersPref, setLayersPref] = useState<'auto' | 'open' | 'closed'>('auto');
+  const docked = layersLayout(width) === 'docked';
+  const layersVisible = layersPref === 'open' || (docked && layersPref === 'auto' && selection !== null);
+  // The canvas reads its callbacks once, at mount: they reach the current state through this ref.
+  const live = useRef({ layers, page, mode, docked, fromLayers: false });
+  live.current = { ...live.current, layers, page, mode, docked };
 
   const frames = useMemo(() => new ServerFrameStore(app, api), [app, api]);
   const previewFrames = useMemo(() => readOnlyFrameStore(frames), [frames]);
@@ -235,12 +298,66 @@ export function DesignArea({ app, api, ws, source, cache }: DesignAreaProps): JS
     void act(async () => onResult(await api.designHistory(app, revision, action), action), action === 'undo' ? 'Undo failed.' : 'Redo failed.');
   };
 
+  // The outline of the page being worked on, at the current revision.
+  useEffect(() => {
+    if (!page || !revision) return;
+    let active = true;
+    void api.designLayers(app, page).then((l) => {
+      if (!active) return;
+      setLayers(l);
+      // An edit can remove the instance being edited: step out of whatever is gone.
+      setMode((m) => alive(m, l.root));
+    }).catch(() => {});
+    return () => { active = false; };
+  }, [app, api, page, revision]);
+
+  /** Selects layers from outside the canvas (rows, entering and leaving components). */
+  const selectLayers = useCallback((ids: string[]) => {
+    const { page: at } = live.current;
+    if (!at) return;
+    live.current.fromLayers = true;
+    void handleRef.current?.selectNodes(at, ids).finally(() => { live.current.fromLayers = false; });
+  }, []);
+
+  /** Edits instance `id`'s component in place, entering any instance it sits in, and selects its root layer. */
+  const enterComponent = useCallback((id: string) => {
+    const { layers: l } = live.current;
+    if (subtree(l?.root ?? { id: '', name: '', kind: 'element', children: [] }, id)?.kind !== 'instance') return;
+    setMode([...enterPath(id), id]);
+    const root = l ? rootOf(l.root, id) : null;
+    if (root) selectLayers([root]);
+  }, [selectLayers]);
+
+  const stepOut = useCallback((reselect: boolean) => {
+    const { mode: m } = live.current;
+    const left = m.at(-1);
+    if (!left) return;
+    setMode(leave(m));
+    if (reselect) selectLayers([left]);
+  }, [selectLayers]);
+
+  useEffect(() => {
+    if (!mode.length) return;
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape' && !importOpen && !details) stepOut(true);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [mode.length, importOpen, details, stepOut]);
+
+  const onCanvasSelect = useCallback((s: NodeSelection | null) => {
+    setSelection(s);
+    if (s) setPage(s.pageId);
+    // A tap on the canvas closes the layers sheet on narrow screens; a row tap keeps it.
+    if (!live.current.fromLayers && !live.current.docked) setLayersPref((p) => (p === 'open' ? 'auto' : p));
+  }, []);
+
   const onImported = useCallback((out: ImportResponse) => {
     for (const o of importOutcome(out)) {
       const more = o.details;
       push({ ...o.toast, ...(more ? { action: { label: 'Details', run: () => setDetails(more) } } : {}) });
     }
-    if (out.ok) { setRevision(out.revision); setProposal(null); setSelection(null); }
+    if (out.ok) { setRevision(out.revision); setProposal(null); setSelection(null); setMode([]); }
   }, [push]);
 
   return (
@@ -251,7 +368,22 @@ export function DesignArea({ app, api, ws, source, cache }: DesignAreaProps): JS
         selection={selection} inspectorOpen={selection !== null && selection !== hiddenFor} selectionLabel={selectionLabel}
         width={width} zoom={zoom} camera={cameraRef.current} busy={busy || sampleBusy} building={building} chatBusy={chatBusy} inspectorBusy={inspectorBusy}
         toasts={toasts.items} details={details} importOpen={importOpen} fitRef={fitRef}
-        onSelect={setSelection}
+        onSelect={onCanvasSelect}
+        layers={layers} page={page} layersVisible={layersVisible} mode={mode} handleRef={handleRef}
+        present={presentIn(handleRef.current?.selectionBoxes() ?? null)}
+        onDoubleTap={(s) => enterComponent(s.nodeIds[0]!)}
+        onOutside={() => stepOut(false)}
+        onLayersToggle={() => setLayersPref(layersVisible ? 'closed' : 'open')}
+        onLayersClose={() => setLayersPref('closed')}
+        onLayerSelect={(id) => {
+          const inner = prefixOf(mode);
+          if (id === inner) { const root = layers ? rootOf(layers.root, id) : null; if (root) selectLayers([root]); return; }
+          setMode(enterPath(id));
+          selectLayers([id]);
+        }}
+        onLayerEnter={enterComponent}
+        onModeDone={() => stepOut(true)}
+        onEnterComponent={() => { const id = selection?.nodeIds[0]; if (id) enterComponent(id); }}
         onResult={(r) => onResult(r, 'chat')}
         onInspectorResult={(r) => onResult(r, 'inspector')}
         onApply={() => proposal && void act(async () => onResult(await api.applyDesign(app, proposal.id), 'apply'), 'Apply failed.')}

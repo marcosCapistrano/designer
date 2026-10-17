@@ -12,9 +12,11 @@ import { ImportSheet } from './ImportSheet.js';
 import { Inspector } from './inspector/Inspector.js';
 import { PreviewBanner } from './PreviewBanner.js';
 import { TopBar, ZoomReadout, ZoomReadoutView } from './TopBar.js';
+import { LayersPanel } from './layers/LayersPanel.js';
+import type { DesignLayers } from '@hub/protocol';
 import { createValueStore } from '../../ui/value-store.js';
 
-const SHALLOW = new Set<unknown>([CanvasView, Inspector, ChatSheet, ImportSheet, Menu, Modal, TopBar, ZoomReadout]);
+const SHALLOW = new Set<unknown>([CanvasView, Inspector, ChatSheet, ImportSheet, Menu, Modal, TopBar, ZoomReadout, LayersPanel]);
 const live = { manifest: async () => ({ version: 2 as const, pages: [] }), tile: async () => new Blob(), hitMap: async () => [], subscribe: () => () => {} };
 const previewSource = { ...live };
 const selection: NodeSelection = { pageId: 'p', device: 'base', nodeIds: ['n1'] };
@@ -25,11 +27,13 @@ function render(extra: Partial<DesignAreaViewProps> = {}) {
     onSelect: vi.fn(), onResult: vi.fn(), onInspectorResult: vi.fn(), onApply: vi.fn(), onCancel: vi.fn(), onUndo: vi.fn(), onRedo: vi.fn(), onFit: vi.fn(), onCamera: vi.fn(),
     onArea: vi.fn(), onImportOpen: vi.fn(), onImported: vi.fn(), onRetried: vi.fn(), onDismissToast: vi.fn(), onDetails: vi.fn(),
     onCloseInspector: vi.fn(), onInspectorBusy: vi.fn(), onSelectionLabel: vi.fn(), onChatBusy: vi.fn(), onSampleBusy: vi.fn(), onPreviewFocus: vi.fn(), onError: vi.fn(),
+    onDoubleTap: vi.fn(), onOutside: vi.fn(), onLayersToggle: vi.fn(), onLayersClose: vi.fn(), onLayerSelect: vi.fn(), onLayerEnter: vi.fn(), onModeDone: vi.fn(), onEnterComponent: vi.fn(),
   };
   const p: DesignAreaViewProps = {
     app: 'adhunters-v7', api: {} as never, ws: {} as never, live, cache: {} as never, previewCache: {} as never, frames: {} as never, previewFrames: {} as never,
     revision: 'r1', proposal: null, previewSource: null, selection: null, inspectorOpen: false, selectionLabel: null,
     width: 1440, zoom: createValueStore(25), camera: null, busy: false, building: false, chatBusy: false, inspectorBusy: false, toasts: [], details: null, importOpen: false, fitRef: { current: null },
+    layers: null, layersVisible: false, mode: [], handleRef: { current: null }, present: () => true,
     ...h, ...extra,
   };
   const els = elements(DesignAreaView(p), [], SHALLOW);
@@ -110,11 +114,18 @@ describe('DesignAreaView status', () => {
 
 describe('TopBar', () => {
   const bar = (extra = {}) => {
-    const h = { onArea: vi.fn(), onUndo: vi.fn(), onRedo: vi.fn(), onFit: vi.fn() };
+    const h = { onArea: vi.fn(), onUndo: vi.fn(), onRedo: vi.fn(), onFit: vi.fn(), onLayers: vi.fn(), onDone: vi.fn() };
     const zoom = createValueStore(37);
-    const els = elements(TopBar({ app: 'adhunters-v7', area: 'design', canUndo: true, canRedo: false, zoom, menu: [], ...h, ...extra }), [], SHALLOW);
+    const els = elements(TopBar({ app: 'adhunters-v7', area: 'design', canUndo: true, canRedo: false, zoom, menu: [], layersOpen: false, mode: null, ...h, ...extra }), [], SHALLOW);
     return { ...h, zoom, els, get: (id: string) => byTestId(els, id) };
   };
+  it('toggles the layers panel', () => {
+    const v = bar({ layersOpen: true });
+    expect(props(v.get('topbar-layers'))['aria-pressed']).toBe('true');
+    (props(v.get('topbar-layers')).onClick as () => void)();
+    expect(v.onLayers).toHaveBeenCalled();
+    expect(() => v.get('mode-chip')).toThrow();
+  });
   it('links back to all apps and names the app', () => {
     const b = bar();
     expect(props(b.get('topbar-back')).href).toBe('#/');
@@ -225,5 +236,50 @@ describe('DesignAreaView camera', () => {
     expect(canvas.initialCamera).toBe(camera);
     expect(canvas.onCamera).toBe(v.onCamera);
     expect(props(byType(v.els, TopBar)).zoom).toBeDefined();
+  });
+});
+
+const layers: DesignLayers = {
+  revision: 'r1',
+  root: { id: 'root', name: 'div', kind: 'element', children: [{ id: 'a', name: 'Filter Panel', kind: 'instance', component: 'Panel', children: [{ id: 'a/r', name: 'Filter Panel', kind: 'element', children: [] }] }] },
+  components: { Panel: { title: 'Filter Panel', uses: 3 } },
+};
+
+describe('DesignAreaView layers and component mode', () => {
+  it('selection shows the layers panel', () => {
+    expect(render({ selection }).els.some((e) => e.type === LayersPanel)).toBe(false);
+    const v = render({ selection, layers, layersVisible: true });
+    expect(props(byType(v.els, LayersPanel)).root).toBe(layers.root);
+    expect(props(byType(v.els, LayersPanel)).selected).toEqual(['n1']);
+  });
+  it('docked layers sit left of the canvas at 1280', () => {
+    const v = render({ selection, layers, layersVisible: true, width: 1280 });
+    expect(String(props(v.get('design-layers')).class)).not.toContain('design-layers-sheet');
+    expect((props(byType(v.els, CanvasView)).insets as { left: number }).left).toBe(280);
+    const narrow = render({ selection, layers, layersVisible: true, width: 1000 });
+    expect(String(props(narrow.get('design-layers')).class)).toContain('design-layers-sheet');
+    expect((props(byType(narrow.els, CanvasView)).insets as { left: number }).left).toBe(0);
+  });
+  it('in component mode the canvas is scoped, the layers show the component and the inspector edits it', () => {
+    const v = render({ selection, layers, layersVisible: true, mode: ['a'], inspectorOpen: true });
+    expect(props(byType(v.els, CanvasView)).scope).toEqual({ prefix: 'a', pageId: 'p' });
+    expect((props(byType(v.els, LayersPanel)).root as { id: string }).id).toBe('a');
+    const inspector = props(byType(v.els, Inspector));
+    expect(inspector.mode).toBe('component');
+    expect(inspector.scope).toEqual({ component: 'Panel' });
+    expect(inspector.path).toBe('Filter Panel');
+    expect(props(byType(render({ selection, inspectorOpen: true }).els, Inspector)).mode).toBe('page');
+  });
+  it('mode chip shows title and uses', () => {
+    const v = render({ selection, layers, mode: ['a'] });
+    expect(props(byType(v.els, TopBar)).mode).toMatchObject({ title: 'Filter Panel', uses: 3 });
+    const bar = elements(TopBar(props(byType(v.els, TopBar)) as unknown as Parameters<typeof TopBar>[0]), [], SHALLOW);
+    expect(text(byTestId(bar, 'mode-chip'))).toContain('Editing Filter Panel · used 3×');
+    (props(byTestId(bar, 'mode-done')).onClick as () => void)();
+    expect(v.onModeDone).toHaveBeenCalled();
+    expect(props(byType(render().els, TopBar)).mode).toBeNull();
+  });
+  it('hides the layers panel while a proposal is shown', () => {
+    expect(render({ selection, layers, layersVisible: true, proposal, previewSource }).els.some((e) => e.type === LayersPanel)).toBe(false);
   });
 });
