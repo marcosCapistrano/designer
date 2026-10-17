@@ -1,114 +1,151 @@
 import { expect, test } from '@playwright/test';
+import type { Page } from '@playwright/test';
 import { fitRect, worldToScreen } from '../src/canvas/geom.js';
 import { layoutBounds, layoutFrames } from '../src/canvas/layout.js';
-test('authenticated import renders pages, reuses baseline and preserves design on source diagnostics', async ({ page }) => {
+
+async function openDesign(page: Page, app: string): Promise<void> {
   await page.goto('/');
   await page.getByTestId('passphrase').fill('hub-dev-passphrase');
   await page.getByTestId('login-submit').click();
-  await page.getByTestId('app-demo').click();
+  await page.getByTestId(`app-${app}`).click();
   await page.getByTestId('tab-design').click();
-  await page.getByRole('button', { name: 'Import pages' }).click();
-  await expect(page.getByRole('status')).toContainText('Imported 1 pages; reused 0.', { timeout: 60_000 });
-  const manifest = await page.request.get('/api/apps/demo/render/manifest.json');
-  const rendered = await manifest.json();
+  await expect(page.getByTestId('topbar')).toBeVisible();
+}
+
+async function openImport(page: Page): Promise<void> {
+  await page.getByTestId('topbar-menu').click();
+  await page.getByTestId('menu-import').click();
+  await expect(page.getByTestId('import-sheet')).toBeVisible();
+}
+
+async function importPages(page: Page): Promise<void> {
+  await openImport(page);
+  await page.getByTestId('import-submit').click();
+}
+
+const toasts = (page: Page) => page.locator('.ui-toasts');
+
+/** Taps the last hit box of the first page's 1440×900 frame with the Select tool, as the first-page fit places it. */
+async function selectLastBox(page: Page): Promise<void> {
+  const manifest = await (await page.request.get('/api/apps/demo/render/manifest.json')).json();
+  const boxes = await (await page.request.get(`/api/apps/demo/render/hitmaps/${manifest.pages[0].renders['1440x900'].hash}.json`)).json();
+  const box = boxes[boxes.length - 1];
+  const canvas = page.getByTestId('canvas').first();
+  const bounds = await canvas.boundingBox();
+  if (!bounds) throw new Error('No canvas');
+  const { frames } = await (await page.request.get('/api/apps/demo/design/frames')).json();
+  const firstPage = layoutFrames(frames, manifest).filter((f) => f.pageId === manifest.pages[0].pageId);
+  const camera = fitRect(layoutBounds(firstPage), { w: bounds.width, h: bounds.height }, 40);
+  const desktop = firstPage.find((f) => f.w === 1440 && f.viewportHeight === 900)!;
+  const point = worldToScreen(camera, { x: desktop.x + box.x + box.w / 2, y: desktop.y + box.y + box.h / 2 });
+  await page.getByTestId('tool-select').first().click();
+  await canvas.click({ position: point });
+  await expect(page.getByTestId('inspector')).toBeVisible();
+}
+
+const pending = async (page: Page): Promise<number> => (await (await page.request.get('/api/apps/demo/design')).json()).pending;
+
+test('authenticated import renders pages, reuses baseline and preserves design on source diagnostics', async ({ page }) => {
+  await openDesign(page, 'demo');
+  await importPages(page);
+  await expect(toasts(page)).toContainText('Imported 1 pages; reused 0.', { timeout: 60_000 });
+  await expect(page.getByTestId('import-sheet')).toHaveCount(0);
+  const rendered = await (await page.request.get('/api/apps/demo/render/manifest.json')).json();
   expect(rendered.pages).toHaveLength(1);
   expect(rendered.pages[0].renders['1440x900'].levels.length).toBeGreaterThan(0);
   expect(rendered.pages[0].renders['1440x900'].error).toBeUndefined();
-  await page.getByRole('button', { name: 'Import pages' }).click();
-  await expect(page.getByRole('status')).toContainText('Imported 0 pages; reused 1.');
-  await page.getByRole('combobox', { name: 'Source', exact: true }).selectOption('react');
-  await page.getByLabel('Entry file').fill('missing.tsx');
-  await page.getByRole('button', { name: 'Import pages' }).click();
-  // Since the real-app import work, a missing entry is a failed route of an applied import, not a refused import.
-  await expect(page.getByRole('alert')).toContainText('These routes were not imported. Each keeps its previous version');
-  await expect(page.getByRole('alert')).toContainText('Missing source missing.tsx');
+  await importPages(page);
+  await expect(toasts(page)).toContainText('Imported 0 pages; reused 1.');
+  await openImport(page);
+  await page.getByTestId('import-mode').selectOption('react');
+  await page.getByTestId('import-file').fill('missing.tsx');
+  await page.getByTestId('import-submit').click();
+  // A missing entry is a failed route of an applied import: a sticky warning whose details name the route.
+  await expect(toasts(page)).toContainText('1 route failed to import');
+  await toasts(page).getByRole('button', { name: 'Details' }).click();
+  await expect(page.getByTestId('details')).toContainText('Missing source missing.tsx');
   expect((await (await page.request.get('/api/apps/demo/design')).json()).pages).toHaveLength(1);
 });
 
-test('dynamic source samples require review and are reused on the next import',async({page})=>{
-  await page.goto('/');
-  await page.getByTestId('passphrase').fill('hub-dev-passphrase');await page.getByTestId('login-submit').click();
-  await page.getByTestId('app-samples').click();await page.getByTestId('tab-design').click();
-  await page.getByRole('button',{name:'Import pages',exact:true}).click();
-  await expect(page.getByRole('alert')).toContainText('saved preview choice');
-  expect((await(await page.request.get('/api/apps/samples/design')).json()).imported).toBe(false);
+test('dynamic source samples require review and are reused on the next import', async ({ page }) => {
+  await openDesign(page, 'samples');
+  await importPages(page);
+  await expect(toasts(page)).toContainText('Import was not applied');
+  await toasts(page).getByRole('button', { name: 'Details' }).last().click();
+  await expect(page.getByTestId('details')).toContainText('saved preview choice');
+  await page.getByTestId('details-close').click();
+  expect((await (await page.request.get('/api/apps/samples/design')).json()).imported).toBe(false);
   await page.getByLabel('Preview state or sample data').fill('Use Alice as the sample user');
-  await page.getByRole('button',{name:'Generate sample preview',exact:true}).click();
-  await expect(page.getByRole('region',{name:'Source sample preview'})).toBeVisible();
-  expect((await(await page.request.get('/api/apps/samples/design')).json()).imported).toBe(false);
-  await page.getByRole('button',{name:'Apply samples and import',exact:true}).click();
-  await expect(page.getByRole('region',{name:'Source sample preview'})).toHaveCount(0);
-  await expect(page.getByRole('status')).toContainText('Imported 1 pages');
-  await page.getByRole('button',{name:'Import pages',exact:true}).click();
-  await expect(page.getByRole('status')).toContainText('Imported 0 pages; reused 1.');
+  await page.getByRole('button', { name: 'Generate sample preview', exact: true }).click();
+  await expect(page.getByRole('region', { name: 'Source sample preview' })).toBeVisible();
+  expect((await (await page.request.get('/api/apps/samples/design')).json()).imported).toBe(false);
+  await page.getByRole('button', { name: 'Apply samples and import', exact: true }).click();
+  await expect(page.getByRole('region', { name: 'Source sample preview' })).toHaveCount(0);
+  await expect(toasts(page)).toContainText('Imported 1 pages');
+  await page.getByTestId('import-submit').click();
+  await expect(toasts(page)).toContainText('Imported 0 pages; reused 1.');
 });
 
 test('Design chat streams a proposal, persists messages and waits for Apply', async ({ page }) => {
-  await page.goto('/');
-  await page.getByTestId('passphrase').fill('hub-dev-passphrase');
-  await page.getByTestId('login-submit').click();
-  await page.getByTestId('app-demo').click();
-  await page.getByTestId('tab-design').click();
-  await page.getByRole('button', { name: 'Import pages' }).click();
-  await expect(page.getByRole('status')).toContainText('Imported');
-  const before = (await (await page.request.get('/api/apps/demo/design')).json()).pending;
-  await page.getByLabel('Design request', { exact: true }).fill('Make all buttons purple');
-  await page.getByRole('button', { name: 'Send design request', exact: true }).click();
+  await openDesign(page, 'demo');
+  await importPages(page);
+  await expect(toasts(page)).toContainText('Imported');
+  const before = await pending(page);
+  await page.getByTestId('chat-input').fill('Make all buttons purple');
+  await page.getByTestId('chat-send').click();
+  await expect(page.getByTestId('preview-banner')).toBeVisible();
+  await page.getByTestId('chat-toggle').click();
   await expect(page.getByRole('log', { name: 'Design messages' })).toContainText('Tap Apply to change it.');
-  await expect(page.getByRole('region', { name: 'Edit preview' })).toBeVisible();
-  expect((await (await page.request.get('/api/apps/demo/design')).json()).pending).toBe(before);
-  await page.getByRole('button', { name: 'Apply changes', exact: true }).click();
-  await expect(page.getByRole('region', { name: 'Edit preview' })).toHaveCount(0);
-  expect((await (await page.request.get('/api/apps/demo/design')).json()).pending).toBe(before + 1);
+  await expect(page.getByTestId('chat-messages').getByText('Preview ready')).toBeVisible();
+  expect(await pending(page)).toBe(before);
+  await page.getByTestId('preview-apply').click();
+  await expect(page.getByTestId('preview-banner')).toHaveCount(0);
+  expect(await pending(page)).toBe(before + 1);
   await page.reload();
+  await page.getByTestId('chat-toggle').click();
   await expect(page.getByRole('log', { name: 'Design messages' })).toContainText('Make all buttons purple');
 });
 
 test('tap editing supports immediate instance edits, undo/redo and shared previews before Apply', async ({ page }) => {
-  await page.goto('/');
-  await page.getByTestId('passphrase').fill('hub-dev-passphrase');
-  await page.getByTestId('login-submit').click();
-  await page.getByTestId('app-demo').click();
-  await page.getByTestId('tab-design').click();
-  await page.getByRole('button', { name: 'Import pages' }).click();
-  await expect(page.getByRole('status')).toContainText('Imported');
-  const initialPending = (await (await page.request.get('/api/apps/demo/design')).json()).pending;
-  const selectButton = async () => {
-    const manifest = await (await page.request.get('/api/apps/demo/render/manifest.json')).json();
-    const boxes = await (await page.request.get(`/api/apps/demo/render/hitmaps/${manifest.pages[0].renders['1440x900'].hash}.json`)).json();
-    const box = boxes[boxes.length - 1];
-    const canvas = page.getByTestId('canvas').first();
-    const bounds = await canvas.boundingBox();
-    if (!bounds) throw new Error('No canvas');
-    const { frames } = await (await page.request.get('/api/apps/demo/design/frames')).json();
-    const firstPage = layoutFrames(frames, manifest).filter((f) => f.pageId === manifest.pages[0].pageId);
-    const camera = fitRect(layoutBounds(firstPage), { w: bounds.width, h: bounds.height }, 40);
-    const desktop = firstPage.find((f) => f.w === 1440 && f.viewportHeight === 900)!;
-    const point = worldToScreen(camera, { x: desktop.x + box.x + box.w / 2, y: desktop.y + box.y + box.h / 2 });
-    await page.getByTestId('tool-select').first().click();
-    await canvas.click({ position: point });
-    await expect(page.getByRole('combobox', { name: 'Edit target' })).toBeVisible();
-  };
-  await selectButton();
-  await page.getByLabel('Value (Desktop)', { exact: true }).fill('red');
-  await page.getByRole('button', { name: 'Set style', exact: true }).click();
-  await expect(page.getByRole('status')).toContainText('Design updated.');
-  expect((await (await page.request.get('/api/apps/demo/design')).json()).pending).toBe(initialPending + 1);
-  await page.getByRole('button', { name: 'Undo', exact: true }).click();
-  await expect.poll(async () => (await (await page.request.get('/api/apps/demo/design')).json()).pending).toBe(initialPending);
-  await expect(page.getByRole('button', { name: 'Redo', exact: true })).toBeEnabled();
-  await page.getByRole('button', { name: 'Redo', exact: true }).click();
-  await expect.poll(async () => (await (await page.request.get('/api/apps/demo/design')).json()).pending).toBe(initialPending + 1);
-  await expect(page.getByRole('button', { name: 'Undo', exact: true })).toBeEnabled();
-  await selectButton();
-  await page.getByRole('combobox', { name: 'Edit target' }).selectOption({ label: 'Shared component · button' });
-  await page.getByLabel('Value (Desktop)', { exact: true }).fill('blue');
+  await openDesign(page, 'demo');
+  await importPages(page);
+  await expect(toasts(page)).toContainText('Imported');
+  const initial = await pending(page);
+  await selectLastBox(page);
+  await page.getByTestId('typography-color-input').fill('red');
+  await page.getByTestId('typography-color-input').press('Enter');
+  await expect(toasts(page)).toContainText('Design updated.');
+  expect(await pending(page)).toBe(initial + 1);
+  await page.getByTestId('topbar-undo').click();
+  await expect.poll(() => pending(page)).toBe(initial);
+  await expect(page.getByTestId('topbar-redo')).toBeEnabled();
+  await page.getByTestId('topbar-redo').click();
+  await expect.poll(() => pending(page)).toBe(initial + 1);
+  await expect(page.getByTestId('topbar-undo')).toBeEnabled();
+  await page.getByTestId('inspector').getByRole('button', { name: /button.*Shared/ }).click();
+  await expect(page.getByTestId('inspector-shared-note')).toBeVisible();
   const before = await (await page.request.get('/api/apps/demo/render/manifest.json')).text();
-  await page.getByRole('button', { name: 'Set style', exact: true }).click();
-  await expect(page.getByRole('region', { name: 'Edit preview' })).toBeVisible();
-  expect((await (await page.request.get('/api/apps/demo/design')).json()).pending).toBe(initialPending + 1);
+  await page.getByTestId('typography-color-input').fill('blue');
+  await page.getByTestId('typography-color-input').press('Enter');
+  await expect(page.getByTestId('preview-banner')).toBeVisible();
+  expect(await pending(page)).toBe(initial + 1);
   expect(await (await page.request.get('/api/apps/demo/render/manifest.json')).text()).toBe(before);
-  await page.getByRole('button', { name: 'Apply changes', exact: true }).click();
-  await expect(page.getByRole('region', { name: 'Edit preview' })).toHaveCount(0);
-  expect((await (await page.request.get('/api/apps/demo/design')).json()).pending).toBe(initialPending + 2);
+  await page.getByTestId('preview-apply').click();
+  await expect(page.getByTestId('preview-banner')).toHaveCount(0);
+  expect(await pending(page)).toBe(initial + 2);
+});
+
+test('on a tablet-width screen the inspector is a bottom sheet and chat stays reachable', async ({ page }) => {
+  await page.setViewportSize({ width: 834, height: 1194 });
+  await openDesign(page, 'demo');
+  await importPages(page);
+  await expect(toasts(page)).toContainText('Imported');
+  await selectLastBox(page);
+  await expect(page.getByTestId('inspector-sheet')).toHaveClass(/ui-sheet-bottom/);
+  await page.getByTestId('chat-input').fill('Make it bigger');
+  await expect(page.getByTestId('chat-send')).toBeVisible();
+  await expect(page.getByTestId('chat-send')).toBeEnabled();
+  const send = await page.getByTestId('chat-send').boundingBox();
+  const sheet = await page.getByTestId('inspector-sheet').boundingBox();
+  expect(send!.y).toBeGreaterThanOrEqual(sheet!.y + sheet!.height - 1);
 });

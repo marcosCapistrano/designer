@@ -138,11 +138,12 @@ export function DesignAreaView(p: DesignAreaViewProps): JSX.Element {
           onResult={p.onResult} onBusy={p.onChatBusy} onPreview={p.onPreviewFocus} />
       </div>
       <ToastStack toasts={p.toasts} onDismiss={p.onDismissToast} />
+      <ImportSheet open={p.importOpen} onClose={() => p.onImportOpen(false)} app={p.app} api={p.api} source={p.live} disabled={p.building || p.busy}
+        onImported={p.onImported} onRetried={p.onRetried} onError={p.onError} onSampleBusy={p.onSampleBusy} />
+      {/* After the import sheet, so details opened from it show on top. */}
       <Modal open={p.details !== null} title={p.details?.title ?? ''} onClose={() => p.onDetails(null)} data-testid="details">
         <ul class="design-details">{p.details?.items.map((item, i) => <li key={i}>{item}</li>)}</ul>
       </Modal>
-      <ImportSheet open={p.importOpen} onClose={() => p.onImportOpen(false)} app={p.app} api={p.api} source={p.live} disabled={p.building || p.busy}
-        onImported={p.onImported} onRetried={p.onRetried} onError={p.onError} onSampleBusy={p.onSampleBusy} />
     </div>
   );
 }

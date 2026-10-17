@@ -61,6 +61,6 @@ test('the app list and an app page style themselves with classes, not inline sty
   await expect(page.locator('.app-view')).toBeVisible();
   expect(await page.locator('.app-view [style], .app-view[style]').count()).toBe(0);
   // The tab strip and the selected tab still render as designed.
-  await expect(page.getByTestId('tab-build')).toHaveCSS('border-bottom-color', 'rgb(26, 115, 232)');
+  await expect(page.getByTestId('tab-build')).toHaveCSS('border-bottom-color', 'rgb(76, 141, 255)');
   await expect(page.getByTestId('tab-design')).toHaveCSS('border-bottom-color', 'rgba(0, 0, 0, 0)');
 });

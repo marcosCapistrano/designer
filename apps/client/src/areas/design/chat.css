@@ -12,8 +12,6 @@
   padding: var(--s2) var(--s3) calc(var(--s2) + env(safe-area-inset-bottom, 0px));
   border-top: 1px solid var(--border);
   background: var(--overlay);
-  -webkit-backdrop-filter: blur(14px);
-  backdrop-filter: blur(14px);
   color: var(--text);
 }
 .chat-sheet-open { background: var(--surface); }

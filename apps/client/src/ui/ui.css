@@ -222,10 +222,11 @@
 }
 
 .ui-toasts {
-  position: absolute;
+  /* Fixed and above modals (z 50), so a toast's action stays reachable while a sheet is open. */
+  position: fixed;
   left: 50%;
   bottom: 96px;
-  z-index: 40;
+  z-index: 60;
   display: flex;
   flex-direction: column;
   align-items: center;

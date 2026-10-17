@@ -6,7 +6,7 @@
   --surface: #1c1e23;
   --surface-2: #262930;
   --border: #33363e;
-  --overlay: rgba(18, 19, 22, 0.82);
+  --overlay: rgba(18, 19, 22, 0.94); /* opaque enough without a backdrop blur, which costs every canvas frame on low-end GPUs */
   --text: #e8eaed;
   --text-2: #9aa0a6;
   --text-3: #6b7076;

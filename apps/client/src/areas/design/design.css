@@ -17,8 +17,6 @@
   padding: 0 var(--s2);
   border-bottom: 1px solid var(--border);
   background: var(--overlay);
-  -webkit-backdrop-filter: blur(14px);
-  backdrop-filter: blur(14px);
 }
 .design-topbar-back { display: grid; place-items: center; width: var(--touch); height: var(--touch); border-radius: var(--radius); color: var(--text); }
 .design-topbar-title { margin: 0; min-width: 0; overflow: hidden; font-size: var(--text-l); font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
