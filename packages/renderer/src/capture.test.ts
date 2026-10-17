@@ -245,6 +245,14 @@ test('a document-shell page resolves rem against the html font-size and paints t
   }
 });
 
+test('a dark color-scheme propagated to html paints the dark scheme canvas, as the source browser does', async () => {
+  const dark = await cap('<div data-d-id="h" data-d-shell="html"><p data-d-id="p">x</p></div>', 'html{color-scheme:dark;}');
+  const light = await cap('<div data-d-id="h"><p data-d-id="p">x</p></div>', '');
+  const at = async (png: Buffer) => [...(await sharp(png).extract({ left: 700, top: 800, width: 1, height: 1 }).raw().toBuffer()).subarray(0, 3)];
+  expect(await at(dark.png)).toEqual([18, 18, 18]);
+  expect(await at(light.png)).toEqual([255, 255, 255]);
+});
+
 test('tablet media query applies at 834px', async () => {
   const css = '[data-d-id="b"]{width:100px;height:10px}\n@media (max-width: 1023px){[data-d-id="b"]{width:200px;}}';
   const html = '<div data-d-id="b"></div>';
