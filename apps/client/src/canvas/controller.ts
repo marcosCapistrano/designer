@@ -3,8 +3,8 @@
 // frame; the frame paints the base layer, the overlay when it changed, and
 // requests the tiles the viewport needs.
 
-import { DEVICES, TILE_SIZE } from '@hub/protocol';
-import type { Device, HitBox, NodeSelection, RenderManifest, TileLevel } from '@hub/protocol';
+import { TILE_SIZE } from '@hub/protocol';
+import type { CanvasFrame, HitBox, NodeSelection, PageRender, RenderManifest, TileLevel } from '@hub/protocol';
 import {
   clampScale,
   expandRect,
@@ -27,7 +27,7 @@ import type { GestureAction, PointerIn, Tool, WheelIn } from './gestures.js';
 import { paintOverlay } from './overlay.js';
 import { BasePainter } from './painter.js';
 import type { BackBuffer, PaintInput, PaintStats } from './painter.js';
-import { pickZoom, visibleTiles } from './tiles.js';
+import { pickZoom, shownRender, visibleTiles } from './tiles.js';
 
 export interface ControllerDeps {
   base: CanvasRenderingContext2D;
@@ -84,6 +84,12 @@ interface IndexEntry {
 
 type MarqueeAction = Extract<GestureAction, { type: 'marquee' }>;
 
+/** What is selected: nodes of one frame's render. Reported to onSelect as a NodeSelection. */
+interface FrameSelection {
+  frameId: string;
+  nodeIds: string[];
+}
+
 /** The hash of the frame's render when it has tiles to draw, else null. */
 function renderHash(f: Frame): string | null {
   const r = f.render;
@@ -108,7 +114,7 @@ function largestOverlap(frames: readonly Frame[], r: Rect): Frame | null {
 function buildIndex(frames: readonly Frame[]): Map<string, IndexEntry[]> {
   const index = new Map<string, IndexEntry[]>();
   for (const frame of frames) {
-    for (const level of frame.render?.levels ?? []) {
+    for (const level of shownRender(frame)?.levels ?? []) {
       const entry: IndexEntry = { frame, level };
       const list = index.get(level.key);
       if (list) list.push(entry);
@@ -125,8 +131,10 @@ export class CanvasController {
 
   private toolValue: Tool = 'pan';
   private manifest: RenderManifest | null = null;
-  private devices: ReadonlySet<Device> = new Set(DEVICES);
+  private canvasFrames: readonly CanvasFrame[] = [];
   private layout: readonly Frame[] = [];
+  /** Frame id to the last render that frame was laid out with, shown while its size is rendering. */
+  private lastRenders = new Map<string, PageRender>();
   private index = new Map<string, IndexEntry[]>();
 
   private cam: Camera = { x: 0, y: 0, scale: 1 };
@@ -139,12 +147,12 @@ export class CanvasController {
 
   private scheduled = false;
   private overlayDirty = false;
-  private selected: NodeSelection | null = null;
+  private selected: FrameSelection | null = null;
   private marquee: Rect | null = null;
   /** Bumped by every tap, box select and relayout; a stale async result is dropped. */
   private selectToken = 0;
-  /** Bumped by every setManifest; a hit-map load started under an older manifest must not touch the selection. */
-  private manifestGen = 0;
+  /** Bumped by every setManifest and setFrames; a hit-map load started under an older layout must not touch the selection. */
+  private layoutGen = 0;
 
   private framesPainted = 0;
   private tilesDrawn = 0;
@@ -162,31 +170,13 @@ export class CanvasController {
   setManifest(m: RenderManifest): void {
     if (this.manifest === null && !this.cameraSet) this.needsFit = true;
     this.manifest = m;
-    const gen = ++this.manifestGen;
-    this.relayout();
+    this.relayoutKeepingSelection();
+  }
 
-    const sel = this.selected;
-    if (sel !== null) {
-      const frame = this.findFrame(sel.pageId, sel.device);
-      const hash = frame ? renderHash(frame) : null;
-      if (frame && hash !== null) {
-        // Both handlers ignore a load that a later manifest has superseded, so a
-        // stale rejection cannot clear a selection that a newer manifest kept.
-        void this.deps.hitMaps.load(hash).then(
-          () => {
-            if (gen !== this.manifestGen) return;
-            this.overlayDirty = true;
-            this.schedule();
-          },
-          () => {
-            if (gen === this.manifestGen && this.selected === sel) this.select(null);
-          },
-        );
-      } else {
-        this.select(null);
-      }
-    }
-    this.schedule();
+  /** Lays the canvas out from these frames (the whole layout). */
+  setFrames(frames: readonly CanvasFrame[]): void {
+    this.canvasFrames = frames.map((f) => ({ ...f }));
+    this.relayoutKeepingSelection();
   }
 
   resize(w: number, h: number, dpr: number): void {
@@ -203,15 +193,6 @@ export class CanvasController {
     // painter's blit-from-previous-image state is no longer valid.
     this.painter.invalidate();
     this.overlayDirty = true;
-    this.schedule();
-  }
-
-  setDevices(visible: ReadonlySet<Device>): void {
-    this.devices = new Set(visible);
-    this.relayout();
-    const sel = this.selected;
-    if (sel !== null && this.findFrame(sel.pageId, sel.device) === undefined) this.select(null);
-    this.painter.invalidate();
     this.schedule();
   }
 
@@ -245,7 +226,7 @@ export class CanvasController {
   }
 
   get selection(): NodeSelection | null {
-    return this.selected;
+    return this.reported(this.selected);
   }
 
   pointer(ev: PointerIn): void {
@@ -286,7 +267,7 @@ export class CanvasController {
       return;
     }
     const id = hitTest(map, toPagePoint(frame, world));
-    this.select(id === null ? null : { pageId: frame.pageId, device: frame.device, nodeIds: [id] });
+    this.select(id === null ? null : { frameId: frame.frameId, nodeIds: [id] });
   }
 
   /** `a` and `b` are screen CSS px corners. */
@@ -309,7 +290,7 @@ export class CanvasController {
     }
     const pageRect = { x: clipped.x - frame.x, y: clipped.y - frame.y, w: clipped.w, h: clipped.h };
     const nodeIds = boxSelect(map, pageRect);
-    this.select(nodeIds.length > 0 ? { pageId: frame.pageId, device: frame.device, nodeIds } : null);
+    this.select(nodeIds.length > 0 ? { frameId: frame.frameId, nodeIds } : null);
   }
 
   tileLoaded(key: string, x: number, y: number): void {
@@ -424,14 +405,59 @@ export class CanvasController {
 
   /** Recomputes frames and the tile index. Pending taps are invalidated since their frames may be gone. */
   private relayout(): void {
-    this.layout = this.manifest === null ? [] : layoutFrames(this.manifest, this.devices);
+    this.layout = this.manifest === null ? [] : layoutFrames(this.canvasFrames, this.manifest, this.lastRenders);
+    const last = new Map<string, PageRender>();
+    for (const f of this.layout) {
+      const r = f.render ?? f.stale;
+      if (r !== null) last.set(f.frameId, r);
+    }
+    this.lastRenders = last;
     this.index = buildIndex(this.layout);
     this.overlayDirty = true;
     this.selectToken++;
   }
 
-  private findFrame(pageId: string, device: Device): Frame | undefined {
-    return this.layout.find((f) => f.pageId === pageId && f.device === device);
+  /**
+   * Relayout, then keep the selection if its frame still has a render (reloading that render's hit
+   * map, which may be new), else clear it.
+   */
+  private relayoutKeepingSelection(): void {
+    const gen = ++this.layoutGen;
+    this.relayout();
+
+    const sel = this.selected;
+    if (sel !== null) {
+      const frame = this.findFrame(sel.frameId);
+      const hash = frame ? renderHash(frame) : null;
+      if (frame && hash !== null) {
+        // Both handlers ignore a load that a later layout has superseded, so a
+        // stale rejection cannot clear a selection that a newer layout kept.
+        void this.deps.hitMaps.load(hash).then(
+          () => {
+            if (gen !== this.layoutGen) return;
+            this.overlayDirty = true;
+            this.schedule();
+          },
+          () => {
+            if (gen === this.layoutGen && this.selected === sel) this.select(null);
+          },
+        );
+      } else {
+        this.select(null);
+      }
+    }
+    this.schedule();
+  }
+
+  private findFrame(frameId: string): Frame | undefined {
+    return this.layout.find((f) => f.frameId === frameId);
+  }
+
+  /** The selection as the app sees it: the frame's page and style tier. */
+  private reported(sel: FrameSelection | null): NodeSelection | null {
+    if (sel === null) return null;
+    const frame = this.findFrame(sel.frameId);
+    return frame ? { pageId: frame.pageId, device: frame.device, nodeIds: sel.nodeIds } : null;
   }
 
   /** Waits for the first page to have frames, so an empty layout never fits to the origin. */
@@ -444,17 +470,17 @@ export class CanvasController {
     this.needsFit = false;
   }
 
-  private select(s: NodeSelection | null): void {
+  private select(s: FrameSelection | null): void {
     this.selected = s;
     this.overlayDirty = true;
-    this.deps.onSelect?.(s);
+    this.deps.onSelect?.(this.reported(s));
     this.schedule();
   }
 
   private highlight(): { frame: Frame; boxes: readonly HitBox[] } | null {
     const sel = this.selected;
     if (sel === null) return null;
-    const frame = this.findFrame(sel.pageId, sel.device);
+    const frame = this.findFrame(sel.frameId);
     const hash = frame ? renderHash(frame) : null;
     if (!frame || hash === null) return null;
     const map = this.deps.hitMaps.get(hash);

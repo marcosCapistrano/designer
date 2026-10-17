@@ -4,7 +4,7 @@ import type { ImportRequest, ImportResponse, SourcePreviewProposal } from '@hub/
 import type { ApiClient } from '../../net/api.js';
 import type { TileSource } from '../../canvas/source.js';
 import { createNullCache } from '../../canvas/cache.js';
-import { CanvasView } from '../../canvas/index.js';
+import { CanvasView, MemoryFrameStore } from '../../canvas/index.js';
 interface Props { app:string;api:ApiClient;source:TileSource;request:ImportRequest;disabled:boolean;onBusy:(busy:boolean)=>void;onImported:(result:ImportResponse)=>void }
 export function SourceSamples({app,api,source,request,disabled,onBusy,onImported}:Props):JSX.Element {
   const [busy,setBusy] = useState(false);
@@ -14,6 +14,8 @@ export function SourceSamples({app,api,source,request,disabled,onBusy,onImported
   const [preferences,setPreferences]=useState('');
   const ownRequest=useRef(false);
   const cache = useMemo(()=>createNullCache(),[]);
+  // The samples' pages are not in the design yet, so the preview shows them in the default layout.
+  const previewFrames = useMemo(()=>proposal?.manifest?new MemoryFrameStore(proposal.manifest):null,[proposal]);
   const previewSource = useMemo<TileSource|null>(()=>proposal?.manifest?{manifest:async()=>proposal.manifest!,tile:(key,x,y)=>source.tile(key,x,y),hitMap:(key)=>source.hitMap(key),subscribe:()=>()=>{}}:null,[proposal,source]);
   useEffect(()=>{onBusy(busy)},[busy,onBusy]);
   useEffect(()=>{let active=true;void api.sourcePreview(app).then(state=>{if(active){setBusy(state.running);setProposal(state.proposal);setAccepted(state.acceptedSamples)}}).catch(()=>{});return()=>{active=false}},[app,api]);
@@ -44,7 +46,7 @@ export function SourceSamples({app,api,source,request,disabled,onBusy,onImported
       <h2>Review preview samples</h2><p>These are representative preview values, not live app data. Apply saves them for future imports.</p>
       {proposal.samples.map((sample,index)=><details key={index}><summary>{sample.file}: {sample.expression.slice(0,120)}</summary><pre>{JSON.stringify(sample.value,null,2)}</pre></details>)}
       {proposal.warnings.length>0&&<p role="alert">{proposal.warnings.join(' ')}</p>}
-      {previewSource&&<div class="design-source-preview"><CanvasView key={proposal.id} source={previewSource} cache={cache}/></div>}
+      {previewSource&&previewFrames&&<div class="design-source-preview"><CanvasView key={proposal.id} source={previewSource} cache={cache} frames={previewFrames}/></div>}
       <button class="shell-button" disabled={busy||disabled} onClick={()=>void apply()}>Apply samples and import</button>
       <button class="shell-button" disabled={busy} onClick={()=>void api.cancelSourcePreview(app,proposal.id).then(()=>setProposal(null)).catch(error=>setError(String(error)))}>Cancel samples</button>
     </div>}

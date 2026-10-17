@@ -1,13 +1,13 @@
 // The canvas component: owns the two paint layers, wires DOM events into the
-// controller, and renders the device and tool toolbar. Source, cache, onSelect
-// and debug are read once at mount; the app passes stable values.
+// controller, and renders the tool toolbar. Source, frames, cache, onSelect and
+// debug are read once at mount; the app passes stable values.
 
 import { useEffect, useRef, useState } from 'preact/hooks';
 import type { JSX } from 'preact';
-import { DEVICES, DEVICE_LABEL } from '@hub/protocol';
-import type { Device, NodeSelection } from '@hub/protocol';
+import type { NodeSelection } from '@hub/protocol';
 import type { CanvasController, ControllerStats } from './controller.js';
 import type { BlobCache } from './cache.js';
+import type { FrameStore } from './frames.js';
 import type { Camera } from './geom.js';
 import type { PointerIn, Tool, WheelIn } from './gestures.js';
 import type { Frame } from './layout.js';
@@ -25,6 +25,8 @@ export interface CanvasViewProps {
    * own, with `createIdbCache(name)`.
    */
   cache: BlobCache;
+  /** The frame layout to draw the manifest's pages in. */
+  frames: FrameStore;
   onSelect?: (s: NodeSelection | null) => void;
   debug?: boolean;
 }
@@ -62,24 +64,15 @@ function buttonStyle(pressed: boolean): string {
     : 'font:inherit;min-height:44px;padding:6px 10px;border:1px solid #dadce0;border-radius:6px;background:#fff;color:#202124;cursor:pointer';
 }
 
-export function CanvasView({ source, cache, onSelect, debug = false }: CanvasViewProps): JSX.Element {
+export function CanvasView({ source, cache, frames, onSelect, debug = false }: CanvasViewProps): JSX.Element {
   const rootRef = useRef<HTMLDivElement>(null);
   const layersRef = useRef<HTMLDivElement>(null);
   const baseRef = useRef<HTMLCanvasElement>(null);
   const spareRef = useRef<HTMLCanvasElement>(null);
   const overlayRef = useRef<HTMLCanvasElement>(null);
   const controllerRef = useRef<CanvasController | null>(null);
-  const [visible, setVisible] = useState<Set<Device>>(() => new Set(DEVICES));
   const [tool, setToolState] = useState<Tool>('pan');
   const [error, setError] = useState<string | null>(null);
-
-  const toggleDevice = (device: Device): void => {
-    const next = new Set(visible);
-    if (next.has(device)) next.delete(device);
-    else next.add(device);
-    setVisible(next);
-    controllerRef.current?.setDevices(next);
-  };
 
   const chooseTool = (t: Tool): void => {
     setToolState(t);
@@ -115,6 +108,7 @@ export function CanvasView({ source, cache, onSelect, debug = false }: CanvasVie
         layers.style.transform = t === null ? '' : `translate(${t.x}px,${t.y}px) scale(${t.scale})`;
       },
       source,
+      frames,
       cache,
       requestFrame: (cb) => requestAnimationFrame(() => cb()),
       now: () => performance.now(),
@@ -232,21 +226,6 @@ export function CanvasView({ source, cache, onSelect, debug = false }: CanvasVie
         </div>
       )}
       <div style={TOOLBAR_STYLE} onPointerDown={(e) => e.stopPropagation()}>
-        {DEVICES.map((device) => {
-          const on = visible.has(device);
-          return (
-            <button
-              key={device}
-              type="button"
-              data-testid={`device-${device}`}
-              aria-pressed={on ? 'true' : 'false'}
-              style={buttonStyle(on)}
-              onClick={() => toggleDevice(device)}
-            >
-              {DEVICE_LABEL[device]}
-            </button>
-          );
-        })}
         {TOOLS.map(({ tool: t, label }) => {
           const on = tool === t;
           return (

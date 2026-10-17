@@ -6,7 +6,7 @@ import { paintOverlay, type OverlayInput } from './overlay.js';
 import { fakeCtx } from './test-utils.js';
 
 const camera: Camera = { x: 0, y: 0, scale: 0.5 };
-const frame: Frame = { pageId: 'p', name: 'P', device: 'base', x: 0, y: 0, w: 1440, h: 1000, render: null };
+const frame: Frame = { frameId: 'f', pageId: 'p', name: 'P', device: 'base', x: 0, y: 0, w: 1440, h: 1000, viewportHeight: 900, render: null, stale: null, pending: true };
 const box: HitBox = { nodeId: 'n3', x: 20, y: 20, w: 100, h: 40 };
 const input = (over: Partial<OverlayInput> = {}): OverlayInput =>
   ({ camera, dpr: 2, selection: { frame, boxes: [box] }, marquee: null, ...over });

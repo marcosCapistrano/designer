@@ -78,8 +78,11 @@ test('tap editing supports immediate instance edits, undo/redo and shared previe
     const canvas = page.getByTestId('canvas').first();
     const bounds = await canvas.boundingBox();
     if (!bounds) throw new Error('No canvas');
-    const camera = fitRect(layoutBounds(layoutFrames(manifest, new Set(['base', 'tablet', 'mobile']))), { w: bounds.width, h: bounds.height }, 40);
-    const point = worldToScreen(camera, { x: box.x + box.w / 2, y: box.y + box.h / 2 });
+    const { frames } = await (await page.request.get('/api/apps/demo/design/frames')).json();
+    const firstPage = layoutFrames(frames, manifest).filter((f) => f.pageId === manifest.pages[0].pageId);
+    const camera = fitRect(layoutBounds(firstPage), { w: bounds.width, h: bounds.height }, 40);
+    const desktop = firstPage.find((f) => f.w === 1440 && f.viewportHeight === 900)!;
+    const point = worldToScreen(camera, { x: desktop.x + box.x + box.w / 2, y: desktop.y + box.y + box.h / 2 });
     await page.getByTestId('tool-select').first().click();
     await canvas.click({ position: point });
     await expect(page.getByRole('combobox', { name: 'Edit target' })).toBeVisible();

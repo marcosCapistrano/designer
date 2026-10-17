@@ -8,6 +8,8 @@
 // app with createIdbCache(name) and pass a distinct name for each.
 export { CanvasView } from './CanvasView.js';
 export type { CanvasViewProps, HubCanvasDebug } from './CanvasView.js';
+export { MemoryFrameStore } from './frames.js';
+export type { FrameStore } from './frames.js';
 export { StaticTileSource } from './source.js';
 export type { TileSource } from './source.js';
 export { createIdbCache, createNullCache } from './cache.js';

@@ -157,6 +157,10 @@ describe('hit testing and box selection', () => {
 
   it('toPagePoint', () => {
     const frame: Frame = {
+      frameId: 'f',
+      viewportHeight: 900,
+      stale: null,
+      pending: true,
       pageId: 'p1',
       name: 'Home',
       device: 'base',

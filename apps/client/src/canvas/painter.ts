@@ -46,8 +46,14 @@ export interface BackBuffer {
   present(shown: CanvasRenderingContext2D): void;
 }
 
-export const COLORS = { bg: '#e9e9ec', frame: '#ffffff', label: '#5f6368', badge: '#d93025' } as const;
+export const COLORS = { bg: '#e9e9ec', frame: '#ffffff', label: '#5f6368', badge: '#d93025', fold: '#9aa0a6' } as const;
 export const LABEL_MIN_SCALE = 0.04;
+
+/** The text above a frame: page, size and style tier, and whether its size is still rendering. */
+export function frameLabel(f: Frame): string {
+  const label = `${f.name} · ${f.w} × ${f.viewportHeight} · ${DEVICE_LABEL[f.device]} styles`;
+  return f.pending ? `${label} · Rendering…` : label;
+}
 
 /** Coarser fallbacks are tried largest first. */
 const ZOOMS_COARSE_FIRST: readonly Zoom[] = [...ZOOMS].sort((a, b) => b - a);
@@ -226,24 +232,48 @@ export class BasePainter {
         if (rectsIntersect(fr, r)) {
           ctx.fillStyle = COLORS.frame;
           ctx.fillRect(fr.x, fr.y, fr.w, fr.h);
-          for (const ref of frameTiles(frame, zoom, area)) {
-            const d = worldToDevice(ref.world, cam, dpr);
-            const image = this.tiles.get(ref.key, ref.x, ref.y);
-            if (image !== undefined) {
-              ctx.drawImage(image, d.x, d.y, d.w, d.h);
-              counts.tilesDrawn++;
-              continue;
-            }
-            counts.missing++;
-            for (const z of ZOOMS_COARSE_FIRST) {
-              const fb = fallbackFor(frame, ref, z);
-              if (fb === null) continue;
-              const coarse = this.tiles.get(fb.ref.key, fb.ref.x, fb.ref.y);
-              if (coarse !== undefined) {
-                ctx.drawImage(coarse, fb.sx, fb.sy, fb.sw, fb.sh, d.x, d.y, d.w, d.h);
-                break;
+          // Stale tiles keep their own size, so they are clipped to the frame they stand in for.
+          const clipped = frame.render === null && frame.stale !== null;
+          if (clipped) {
+            ctx.save();
+            ctx.beginPath();
+            ctx.rect(fr.x, fr.y, fr.w, fr.h);
+            ctx.clip();
+          }
+          try {
+            for (const ref of frameTiles(frame, zoom, area)) {
+              const d = worldToDevice(ref.world, cam, dpr);
+              const image = this.tiles.get(ref.key, ref.x, ref.y);
+              if (image !== undefined) {
+                ctx.drawImage(image, d.x, d.y, d.w, d.h);
+                counts.tilesDrawn++;
+                continue;
+              }
+              counts.missing++;
+              for (const z of ZOOMS_COARSE_FIRST) {
+                const fb = fallbackFor(frame, ref, z);
+                if (fb === null) continue;
+                const coarse = this.tiles.get(fb.ref.key, fb.ref.x, fb.ref.y);
+                if (coarse !== undefined) {
+                  ctx.drawImage(coarse, fb.sx, fb.sy, fb.sw, fb.sh, d.x, d.y, d.w, d.h);
+                  break;
+                }
               }
             }
+          } finally {
+            if (clipped) ctx.restore();
+          }
+          if (frame.h > frame.viewportHeight) {
+            // The fold: where the first screen of the page ends.
+            const foldY = worldToDevice({ x: frame.x, y: frame.y + frame.viewportHeight, w: 0, h: 0 }, cam, dpr).y;
+            ctx.strokeStyle = COLORS.fold;
+            ctx.lineWidth = dpr;
+            ctx.setLineDash([6 * dpr, 4 * dpr]);
+            ctx.beginPath();
+            ctx.moveTo(fr.x, foldY);
+            ctx.lineTo(fr.x + fr.w, foldY);
+            ctx.stroke();
+            ctx.setLineDash([]);
           }
           if (frame.render?.error) {
             ctx.fillStyle = COLORS.badge;
@@ -257,7 +287,7 @@ export class BasePainter {
           ctx.fillStyle = COLORS.label;
           ctx.font = `${12 * dpr}px system-ui, sans-serif`;
           ctx.textBaseline = 'bottom';
-          ctx.fillText(`${frame.name} · ${DEVICE_LABEL[frame.device]}`, fr.x, fr.y - 6 * dpr);
+          ctx.fillText(frameLabel(frame), fr.x, fr.y - 6 * dpr);
         }
       }
     } finally {

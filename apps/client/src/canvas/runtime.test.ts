@@ -1,12 +1,13 @@
 import { describe, expect, it, vi } from 'vitest';
 import { DEVICE_VIEWPORT_HEIGHT, DEVICE_WIDTH } from '@hub/protocol';
-import type { Device, PageRender, RenderManifest } from '@hub/protocol';
+import type { CanvasFrame, Device, PageRender, RenderManifest } from '@hub/protocol';
 import type { BlobCache } from './cache.js';
 import { liveKeys } from './cache.js';
 import { createCanvasRuntime } from './runtime.js';
 import type { CanvasRuntimeOptions } from './runtime.js';
 import type { TileSource } from './source.js';
-import { fakeCtx } from './test-utils.js';
+import type { FrameStore } from './frames.js';
+import { fakeCtx, framesFor } from './test-utils.js';
 
 const settle = () => new Promise<void>((r) => setTimeout(r, 0));
 
@@ -56,10 +57,35 @@ function controlledSource() {
       };
     },
   };
+  // Like the server, the frames store lays out every page it knows: page 'a' to start with, then
+  // every page of the manifests the test has delivered.
+  const known: RenderManifest = { version: 2, pages: [...manifestOf('a').pages] };
+  const seen = (m: unknown): void => {
+    if (typeof m !== 'object' || m === null || !Array.isArray((m as RenderManifest).pages)) return;
+    for (const page of (m as RenderManifest).pages) {
+      if (!known.pages.some((p) => p.pageId === page.pageId)) known.pages.push(page);
+    }
+  };
+  const frameStore = {
+    load: vi.fn(async (): Promise<CanvasFrame[]> => framesFor(known)),
+    save: vi.fn(async (f: readonly CanvasFrame[]) => [...f]),
+  } satisfies FrameStore;
   const push = (m: RenderManifest) => {
+    seen(m);
     for (const cb of [...subscribers]) cb(m);
   };
-  return { source, resolveManifest, rejectManifest, push, subscribers, tiles };
+  return {
+    source,
+    resolveManifest: (m: RenderManifest) => {
+      seen(m);
+      resolveManifest(m);
+    },
+    rejectManifest,
+    push,
+    subscribers,
+    tiles,
+    frameStore,
+  };
 }
 
 function harness(overrides: Partial<CanvasRuntimeOptions> = {}) {
@@ -78,6 +104,7 @@ function harness(overrides: Partial<CanvasRuntimeOptions> = {}) {
     base: base.ctx,
     overlay: overlay.ctx,
     source: src.source,
+    frames: src.frameStore,
     cache,
     requestFrame,
     now: () => 0,
@@ -142,6 +169,7 @@ describe('createCanvasRuntime manifests', () => {
 
     const m = manifestOf('b');
     h.push(m);
+    await settle();
 
     expect(h.rt.controller.frames.map((f) => f.pageId)).toEqual(['b', 'b', 'b']);
     expect(h.gc).toHaveBeenCalledWith(liveKeys(m));
@@ -154,6 +182,7 @@ describe('createCanvasRuntime manifests', () => {
     await settle();
 
     h.push({ version: 1 } as unknown as RenderManifest);
+    await settle();
 
     expect(h.onError).toHaveBeenLastCalledWith(expect.stringMatching(/^Could not load the render manifest: /));
     expect(h.rt.controller.frames.map((f) => f.pageId)).toEqual(['a', 'a', 'a']);
@@ -225,7 +254,7 @@ describe('createCanvasRuntime dispose', () => {
     h.rt.controller.setCamera({ x: 5, y: 5, scale: 0.5 });
     h.rt.controller.tileLoaded('aq', 0, 0);
     h.rt.controller.resize(400, 300, 2);
-    h.rt.controller.setDevices(new Set<Device>(['base']));
+    h.rt.controller.setFrames([]);
 
     expect(h.requestFrame.mock.calls.length).toBe(before);
   });
@@ -297,5 +326,51 @@ describe('createCanvasRuntime layers', () => {
     expect(show).toHaveBeenCalledTimes(1);
     expect(show.mock.calls[0]![0]).toMatchObject({ scale: expect.closeTo(1.2, 10) });
     h.rt.dispose();
+  });
+});
+
+describe('createCanvasRuntime frames', () => {
+  it('lays the manifest out from the frames store', async () => {
+    const h = harness();
+    h.resolveManifest(manifestOf('a'));
+    await settle();
+    expect(h.frameStore.load).toHaveBeenCalledTimes(1);
+    expect(h.rt.controller.frames.map((f) => f.frameId)).toEqual(framesFor(manifestOf('a')).map((f) => f.id));
+  });
+
+  it('reloads the frames when a manifest brings a page they do not cover', async () => {
+    const h = harness();
+    h.resolveManifest(manifestOf('a'));
+    await settle();
+    h.push(manifestOf('a'));
+    await settle();
+    expect(h.frameStore.load).toHaveBeenCalledTimes(1);
+
+    h.push(manifestOf('b'));
+    await settle();
+    expect(h.frameStore.load).toHaveBeenCalledTimes(2);
+    expect(h.rt.controller.frames.map((f) => f.pageId)).toEqual(['b', 'b', 'b']);
+  });
+
+  it('shows an error when the frames cannot be loaded, and a manifest does not hide it', async () => {
+    const failing: FrameStore = {
+      load: async () => {
+        throw new Error('HTTP 500');
+      },
+      save: async (f) => [...f],
+    };
+    const h = harness({ frames: failing });
+    h.resolveManifest(manifestOf('a'));
+    await settle();
+    expect(h.onError).toHaveBeenLastCalledWith('Could not load the canvas frames: HTTP 500');
+    expect(h.rt.controller.frames).toEqual([]);
+  });
+
+  it('a frames load that finishes after dispose is ignored', async () => {
+    const h = harness();
+    h.rt.dispose();
+    h.resolveManifest(manifestOf('a'));
+    await settle();
+    expect(h.rt.controller.frames).toEqual([]);
   });
 });

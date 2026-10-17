@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useState } from 'preact/hooks';
+import { useCallback, useEffect, useMemo, useState } from 'preact/hooks';
 import type { JSX } from 'preact';
 import type { ImportDiagnostic, ImportResponse, NodeSelection } from '@hub/protocol';
 import type { ApiClient } from '../../net/api.js';
+import { ServerFrameStore } from '../../net/frame-store.js';
 import type { WsClient } from '../../net/ws.js';
 import type { BlobCache } from '../../canvas/cache.js';
 import type { TileSource } from '../../canvas/source.js';
@@ -28,6 +29,7 @@ export function DesignArea({ app, api, ws, source, cache }: DesignAreaProps): JS
   const [selection, setSelection] = useState<NodeSelection | null>(null);
   const [revision, setRevision] = useState<string | null>(null);
   const [sampleBusy,setSampleBusy]=useState(false);
+  const frames = useMemo(() => new ServerFrameStore(app, api), [app, api]);
   const imported=useCallback((out:ImportResponse)=>{setResult(out);if(out.ok){setRevision(out.revision);setSelection(null);setNote(importNote(out));setPreviewVersion(value=>value+1)}},[]);
   const edited = useCallback((next: string, warnings: string[]) => { setRevision(next); setNote(warnings.join(' ') || 'Design updated.'); setPreviewVersion((value) => value + 1); setSelection(null); }, []);
   useEffect(() => { let active = true; void api.designSummary(app).then((summary) => { if (active) setRevision((current) => current ?? summary.revision); }).catch(() => {}); return () => { active = false; }; }, [app, api]);
@@ -74,7 +76,7 @@ export function DesignArea({ app, api, ws, source, cache }: DesignAreaProps): JS
       <ul>{result.failed.map((failure) => <li key={failure.route}>{failure.route}<Diagnostics items={failure.diagnostics} /></li>)}</ul>
     </div>}
     {result?.ok && result.warnings.length > 0 && <p class="design-status" role="alert">{result.warnings.join(' ')}</p>}
-    <div class="design-workspace"><div class="design-canvas"><CanvasView key={previewVersion} source={source} cache={cache} onSelect={setSelection} />
+    <div class="design-workspace"><div class="design-canvas"><CanvasView key={previewVersion} source={source} cache={cache} frames={frames} onSelect={setSelection} />
       {!revision && <div class="design-empty">Import your pages to start designing.</div>}
     </div>
       <EditorPanel app={app} api={api} ws={ws} source={source} selection={selection} revision={revision} disabled={busy || building || sampleBusy} onApplied={edited} />

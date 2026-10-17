@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
-import { DEVICES, DEVICE_VIEWPORT_HEIGHT, DEVICE_WIDTH } from '@hub/protocol';
-import type { Device, HitBox, PageRender, RenderManifest } from '@hub/protocol';
+import { DEVICE_VIEWPORT_HEIGHT, DEVICE_WIDTH } from '@hub/protocol';
+import type { CanvasFrame, Device, HitBox, PageRender, RenderManifest } from '@hub/protocol';
 import type { ControllerDeps } from './controller.js';
 import { CanvasController } from './controller.js';
 import { createNullCache } from './cache.js';
@@ -9,7 +9,7 @@ import type { PointerIn } from './gestures.js';
 import { TileLoader } from './loader.js';
 import type { TileWant } from './loader.js';
 import { visibleTiles } from './tiles.js';
-import { fakeCtx } from './test-utils.js';
+import { fakeCtx, framesFor } from './test-utils.js';
 import type { Call } from './test-utils.js';
 
 const render = (device: Device, hash: string): PageRender => ({
@@ -49,6 +49,9 @@ const withBaseHash = (hash: string): RenderManifest => ({
     },
   ],
 });
+
+/** M's default layout: base at x 0, tablet at x 1520, mobile at x 2434, all at y 0. */
+const MF: CanvasFrame[] = framesFor(M);
 
 const maps: Record<string, HitBox[]> = {
   hb: [
@@ -110,6 +113,7 @@ function ready(now: () => number = () => 0, hitMaps?: ControllerDeps['hitMaps'])
   const h = harness(now, hitMaps);
   h.c.resize(800, 600, 1);
   h.c.setManifest(M);
+  h.c.setFrames(MF);
   h.flush();
   h.c.setCamera({ x: 0, y: 0, scale: 0.5 });
   h.flush();
@@ -125,8 +129,10 @@ describe('CanvasController', () => {
     const { c, flush } = harness();
     c.resize(800, 600, 1);
     c.setManifest(M);
+    c.setFrames(MF);
     flush();
-    expect(c.camera).toEqual(fitRect({ x: 0, y: 0, w: 2824, h: 1000 }, { w: 800, h: 600 }, 40));
+    // The tablet frame is its viewport tall (1194), taller than its 1000 px render.
+    expect(c.camera).toEqual(fitRect({ x: 0, y: 0, w: 2824, h: 1194 }, { w: 800, h: 600 }, 40));
   });
 
   it('tap selects the topmost node', async () => {
@@ -211,12 +217,22 @@ describe('CanvasController', () => {
     ]);
   });
 
-  it('hiding a device clears a selection on it', async () => {
-    const { c } = ready();
+  it('removing the selected frame clears the selection', async () => {
+    const { c, onSelect } = ready();
     await c.tap(15, 15);
-    c.setDevices(new Set<Device>(['tablet', 'mobile']));
+    c.setFrames(MF.slice(1));
     expect(c.selection).toBeNull();
+    expect(onSelect).toHaveBeenLastCalledWith(null);
     expect(c.frames.length).toBe(2);
+  });
+
+  it('setFrames keeps a selection whose frame still exists', async () => {
+    const { c, onSelect } = ready();
+    await c.tap(15, 15);
+    c.setFrames(MF.map((f) => ({ ...f, y: f.y + 400 })));
+    await settle();
+    expect(c.selection).toEqual({ pageId: 'home', device: 'base', nodeIds: ['n3'] });
+    expect(onSelect).not.toHaveBeenCalledWith(null);
   });
 
   it('setManifest keeps a selection whose frame still exists', async () => {
@@ -269,11 +285,11 @@ describe('CanvasController', () => {
     expect(onSelect).not.toHaveBeenCalledWith(null);
   });
 
-  it('a tap still loading its hit map is dropped by setDevices', async () => {
+  it('a tap still loading its hit map is dropped by setFrames', async () => {
     const d = deferredMaps();
     const { c, onSelect } = ready(undefined, d.hitMaps);
     const tap = c.tap(15, 15);
-    c.setDevices(new Set<Device>(['tablet', 'mobile']));
+    c.setFrames(MF.slice(1));
     d.pending.get('hb')!.ok(maps.hb!);
     await tap;
     expect(onSelect).not.toHaveBeenCalled();
@@ -312,10 +328,10 @@ describe('CanvasController', () => {
     expect(c.stats().lastMode).toBe('partial');
   });
 
-  it('tileLoaded after setDevices repaints the frame at its moved position', () => {
+  it('tileLoaded after setFrames repaints the frame at its moved position', () => {
     const { c, flush, base } = ready();
-    // Hiding base moves the tablet frame to x=0, so its tile is no longer at x=1520.
-    c.setDevices(new Set<Device>(['tablet', 'mobile']));
+    // The tablet frame moves to x=0, so its tile is no longer at x=1520.
+    c.setFrames(MF.slice(1).map((f, i) => (i === 0 ? { ...f, x: 0 } : f)));
     flush();
     const from = base.calls.length;
     c.tileLoaded('hth', 0, 0);
@@ -418,14 +434,13 @@ describe('CanvasController', () => {
   it('defers the first fit until a frame exists', () => {
     const { c, flush } = harness();
     c.resize(800, 600, 1);
-    c.setDevices(new Set<Device>());
     c.setManifest(M);
     flush();
     expect(c.frames).toEqual([]);
     expect(c.camera).toEqual({ x: 0, y: 0, scale: 1 });
-    c.setDevices(new Set<Device>(DEVICES));
+    c.setFrames(MF);
     flush();
-    expect(c.camera).toEqual(fitRect({ x: 0, y: 0, w: 2824, h: 1000 }, { w: 800, h: 600 }, 40));
+    expect(c.camera).toEqual(fitRect({ x: 0, y: 0, w: 2824, h: 1194 }, { w: 800, h: 600 }, 40));
   });
 });
 
@@ -484,6 +499,7 @@ describe('CanvasController with a real TileLoader', () => {
     });
     c.resize(800, 1333, 1.5);
     c.setManifest(BIG);
+    c.setFrames(framesFor(BIG));
     await tick();
     const fitCalls = source.tile.mock.calls.length;
     c.setCamera({ x: 0, y: 0, scale: 0.02 });
@@ -528,6 +544,7 @@ describe('CanvasController zoom preview', () => {
     });
     c.resize(800, 600, 1);
     c.setManifest(M);
+    c.setFrames(MF);
     flush();
     c.setCamera({ x: 0, y: 0, scale: 0.5 });
     flush();
@@ -643,13 +660,13 @@ describe('CanvasController zoom preview', () => {
     expect(show).toHaveBeenCalledWith(null);
   });
 
-  it('a device toggle repaints instead of previewing stale frames', () => {
+  it('a frames change repaints instead of previewing stale frames', () => {
     const t = 1000;
     const { c, q, show } = previewReady(() => t);
     c.zoomAt(100, 100, 1.2);
     q.shift()!();
     show.mockClear();
-    c.setDevices(new Set<Device>(['tablet', 'mobile']));
+    c.setFrames(MF.slice(1));
     q.shift()!();
     expect(c.stats().lastMode).toBe('full');
     expect(show).toHaveBeenCalledWith(null);
@@ -671,6 +688,7 @@ describe('CanvasController zoom preview', () => {
     });
     c.resize(800, 600, 1);
     c.setManifest(M);
+    c.setFrames(MF);
     c.zoomAt(100, 100, 1.2);
     // The clock never moves, so the zoom stays unsettled and each frame schedules the next.
     q.shift()!();
@@ -678,5 +696,83 @@ describe('CanvasController zoom preview', () => {
     expect(show).not.toHaveBeenCalled();
     q.shift()!();
     expect(c.stats()).toMatchObject({ lastMode: 'preview', previewFrames: 1 });
+  });
+});
+
+describe('CanvasController frames of any size', () => {
+  const hit = (nodeId: string): HitBox[] => [{ nodeId, x: 20, y: 20, w: 100, h: 40 }];
+  const sized = (device: Device, hash: string, width: number, viewportHeight: number): PageRender => ({
+    ...render(device, hash),
+    width,
+    viewportHeight,
+  });
+  const P1: RenderManifest = {
+    version: 2,
+    pages: [
+      {
+        pageId: 'p1',
+        name: '/ads',
+        route: '/ads',
+        renders: {
+          '1440x900': sized('base', 'w14', 1440, 900),
+          '1600x900': sized('base', 'w16', 1600, 900),
+          '700x1000': sized('tablet', 'w7', 700, 1000),
+        },
+      },
+    ],
+  };
+  const frames: CanvasFrame[] = [
+    { id: 'f0000000000001440', pageId: 'p1', x: 0, y: 0, width: 1440, viewportHeight: 900 },
+    { id: 'f0000000000001600', pageId: 'p1', x: 2000, y: 0, width: 1600, viewportHeight: 900 },
+    { id: 'f0000000000000700', pageId: 'p1', x: 4000, y: 0, width: 700, viewportHeight: 1000 },
+  ];
+  const sizedMaps: Record<string, HitBox[]> = { w14: hit('a14'), w16: hit('a16'), w7: hit('a7') };
+  const hitMaps: ControllerDeps['hitMaps'] = { get: (h) => sizedMaps[h], load: async (h) => sizedMaps[h] ?? [] };
+
+  function sizedReady() {
+    const h = harness(() => 0, hitMaps);
+    h.c.resize(800, 600, 1);
+    h.c.setManifest(P1);
+    h.c.setFrames(frames);
+    h.flush();
+    return h;
+  }
+
+  it('a tap in the 1600 frame selects from its render and highlights in that frame only', async () => {
+    const { c, flush, overlay, onSelect } = sizedReady();
+    c.setCamera({ x: 2000, y: 0, scale: 0.5 });
+    flush();
+    await c.tap(15, 15);
+    expect(onSelect).toHaveBeenLastCalledWith({ pageId: 'p1', device: 'base', nodeIds: ['a16'] });
+    expect(c.selection).toEqual({ pageId: 'p1', device: 'base', nodeIds: ['a16'] });
+    overlay.calls.length = 0;
+    flush();
+    // The box at (20, 20) in the frame at world x 2000, seen from camera x 2000 at scale 0.5.
+    expect(overlay.calls.filter((call) => call.m === 'strokeRect').map((call) => call.a)).toEqual([[10, 10, 50, 20]]);
+  });
+
+  it('a tap in a 700 wide frame selects with tablet styles', async () => {
+    const { c, flush, onSelect } = sizedReady();
+    c.setCamera({ x: 4000, y: 0, scale: 0.5 });
+    flush();
+    await c.tap(15, 15);
+    expect(onSelect).toHaveBeenLastCalledWith({ pageId: 'p1', device: 'tablet', nodeIds: ['a7'] });
+  });
+
+  it('a resized frame with no render yet is pending, with its last render as stale', () => {
+    const { c } = sizedReady();
+    const before = c.frames.find((f) => f.frameId === 'f0000000000001600')!.render;
+    c.setFrames(frames.map((f) => (f.width === 1600 ? { ...f, width: 1680 } : f)));
+    const moved = c.frames.find((f) => f.frameId === 'f0000000000001600')!;
+    expect(moved).toMatchObject({ pending: true, render: null, w: 1680 });
+    expect(moved.stale).toBe(before);
+  });
+
+  it('requests the stale tiles of a pending frame', () => {
+    const { c, tiles, flush } = sizedReady();
+    c.setFrames(frames.map((f) => (f.width === 1600 ? { ...f, width: 1680 } : f)));
+    flush();
+    const wants = tiles.request.mock.lastCall?.[0] as readonly TileWant[];
+    expect(wants.some((w) => w.key.startsWith('w16'))).toBe(true);
   });
 });

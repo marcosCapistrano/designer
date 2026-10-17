@@ -1,3 +1,6 @@
+import { defaultFrames } from '@hub/protocol';
+import type { CanvasFrame, RenderManifest } from '@hub/protocol';
+import { frameHeightIn } from './frames.js';
 import type { TileImage } from './loader.js';
 
 /** One recorded canvas call, with the style state in effect when it ran. */
@@ -22,6 +25,10 @@ const METHODS = [
   'clearRect',
   'fillText',
   'drawImage',
+  'setLineDash',
+  'moveTo',
+  'lineTo',
+  'stroke',
 ] as const;
 
 /**
@@ -69,4 +76,15 @@ export function fakeCtx(
 /** A tile image whose identity is its `id`, so draw calls can be asserted by name. */
 export function img(id: string): TileImage & { id: string } {
   return { id, width: 512, height: 512, close() {} };
+}
+
+/** Ids f0000000000000001, f0000000000000002, ... in call order. */
+export function sequentialIds(): () => string {
+  let n = 0;
+  return () => `f${(++n).toString(16).padStart(16, '0')}`;
+}
+
+/** The server's default layout for `m`: three frames per page, one row per page. */
+export function framesFor(m: RenderManifest): CanvasFrame[] {
+  return defaultFrames(m.pages, [], (pageId, size) => frameHeightIn(m, pageId, size), sequentialIds());
 }

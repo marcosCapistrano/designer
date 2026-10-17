@@ -2,14 +2,15 @@ import { describe, expect, it } from 'vitest';
 import {
   DEVICE_VIEWPORT_HEIGHT,
   DEVICE_WIDTH,
+  type CanvasFrame,
   type Device,
   type PageRender,
   type RenderManifest,
 } from '@hub/protocol';
 import { frameAt, layoutBounds, layoutFrames } from './layout.js';
 
-function render(device: Device, height: number): PageRender {
-  return { device, hash: 'h', width: DEVICE_WIDTH[device], viewportHeight: DEVICE_VIEWPORT_HEIGHT[device], height, levels: [] };
+function render(device: Device, height: number, hash = 'h'): PageRender {
+  return { device, hash, width: DEVICE_WIDTH[device], viewportHeight: DEVICE_VIEWPORT_HEIGHT[device], height, levels: [] };
 }
 
 const manifest: RenderManifest = {
@@ -21,7 +22,7 @@ const manifest: RenderManifest = {
       route: '/',
       renders: {
         '1440x900': render('base', 2000),
-        '834x1194': render('tablet', 2400),
+        '834x1194': render('tablet', 600),
         '390x844': render('mobile', 3000),
       },
     },
@@ -34,45 +35,66 @@ const manifest: RenderManifest = {
   ],
 };
 
-const ALL = new Set<Device>(['base', 'tablet', 'mobile']);
+const cf = (id: string, pageId: string, x: number, y: number, width: number, viewportHeight: number): CanvasFrame => ({
+  id,
+  pageId,
+  x,
+  y,
+  width,
+  viewportHeight,
+});
+
+const FRAMES: CanvasFrame[] = [
+  cf('fa', 'p1', 100, -50, 1440, 900),
+  cf('fb', 'p1', 1700, 40, 834, 1194),
+  cf('fc', 'p2', -400, 3000, 1440, 900),
+  cf('fd', 'p2', 1200, 3000, 1600, 900),
+];
 
 describe('layoutFrames', () => {
-  it('a row per page, devices side by side', () => {
-    const frames = layoutFrames(manifest, ALL);
-    expect(frames.map((f) => [f.pageId, f.device, f.x, f.y, f.w, f.h])).toEqual([
-      ['p1', 'base', 0, 0, 1440, 2000],
-      ['p1', 'tablet', 1520, 0, 834, 2400],
-      ['p1', 'mobile', 2434, 0, 390, 3000],
-      ['p2', 'base', 0, 3200, 1440, 1000],
-      ['p2', 'tablet', 1520, 3200, 834, 1194],
-      ['p2', 'mobile', 2434, 3200, 390, 844],
+  it('places frames at their saved positions with their page and tier', () => {
+    const frames = layoutFrames(FRAMES, manifest);
+    expect(frames.map((f) => [f.frameId, f.pageId, f.name, f.device, f.x, f.y, f.w, f.viewportHeight])).toEqual([
+      ['fa', 'p1', 'Home', 'base', 100, -50, 1440, 900],
+      ['fb', 'p1', 'Home', 'tablet', 1700, 40, 834, 1194],
+      ['fc', 'p2', 'About', 'base', -400, 3000, 1440, 900],
+      ['fd', 'p2', 'About', 'base', 1200, 3000, 1600, 900],
     ]);
-    const p2Tablet = frames.find((f) => f.pageId === 'p2' && f.device === 'tablet');
-    expect(p2Tablet?.render).toBeNull();
   });
 
-  it('hidden devices collapse', () => {
-    const frames = layoutFrames(manifest, new Set<Device>(['base', 'mobile']));
-    expect(frames).toHaveLength(4);
-    const p1Mobile = frames.find((f) => f.pageId === 'p1' && f.device === 'mobile');
-    expect(p1Mobile?.x).toBe(1520);
+  it('is as tall as the render or the viewport, whichever is taller', () => {
+    const [fa, fb] = layoutFrames(FRAMES, manifest);
+    expect(fa?.h).toBe(2000);
+    expect(fb?.h).toBe(1194);
   });
 
-  it('no visible device', () => {
-    expect(layoutFrames(manifest, new Set<Device>())).toEqual([]);
+  it('skips a frame whose page is not in the manifest', () => {
+    const frames = layoutFrames([...FRAMES, cf('fz', 'gone', 0, 0, 1440, 900)], manifest);
+    expect(frames.map((f) => f.frameId)).toEqual(['fa', 'fb', 'fc', 'fd']);
+  });
+
+  it('a size with no render is pending at its viewport height, with the frame\'s last render as stale', () => {
+    const last = render('base', 1200, 'old');
+    const frames = layoutFrames(FRAMES, manifest, new Map([['fd', last], ['fa', render('base', 5, 'x')]]));
+    const fd = frames.find((f) => f.frameId === 'fd');
+    expect(fd).toMatchObject({ render: null, pending: true, stale: last, h: 900 });
+    const fa = frames.find((f) => f.frameId === 'fa');
+    expect(fa).toMatchObject({ pending: false, stale: null });
+    expect(fa?.render).toBe(manifest.pages[0]!.renders['1440x900']);
+    expect(layoutFrames(FRAMES, manifest).find((f) => f.frameId === 'fd')?.stale).toBeNull();
   });
 });
 
 describe('frameAt', () => {
   it('finds the frame under a point and returns null in a gap', () => {
-    const frames = layoutFrames(manifest, ALL);
-    expect(frameAt(frames, { x: 1520, y: 10 })).toMatchObject({ pageId: 'p1', device: 'tablet' });
-    expect(frameAt(frames, { x: 1500, y: 10 })).toBeNull();
+    const frames = layoutFrames(FRAMES, manifest);
+    expect(frameAt(frames, { x: 1700, y: 50 })).toMatchObject({ frameId: 'fb' });
+    expect(frameAt(frames, { x: 1600, y: 50 })).toBeNull();
   });
 });
 
 describe('layoutBounds', () => {
   it('is the union of all frames', () => {
-    expect(layoutBounds(layoutFrames(manifest, ALL))).toEqual({ x: 0, y: 0, w: 2824, h: 4394 });
+    expect(layoutBounds(layoutFrames(FRAMES, manifest))).toEqual({ x: -400, y: -50, w: 3200, h: 4050 });
   });
 });

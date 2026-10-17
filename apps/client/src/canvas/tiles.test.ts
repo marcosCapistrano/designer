@@ -17,6 +17,10 @@ const render: PageRender = {
 };
 
 const F: Frame = {
+  frameId: 'f',
+  viewportHeight: 900,
+  stale: null,
+  pending: false,
   pageId: 'p1',
   name: 'Home',
   device: 'base',

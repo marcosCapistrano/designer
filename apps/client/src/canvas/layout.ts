@@ -1,54 +1,58 @@
-// Device frame layout for the canvas: one row per manifest page, one frame per
-// visible device, in world px. Frames only carry geometry and their render
+// Frame layout for the canvas: one Frame per saved CanvasFrame whose page is in
+// the manifest, in world px. Frames only carry geometry and their render
 // metadata; tiles and hit maps are looked up elsewhere by `render`.
 
-import {
-  DEFAULT_FRAME_SIZES,
-  DEVICES,
-  DEVICE_VIEWPORT_HEIGHT,
-  DEVICE_WIDTH,
-  FRAME_GAP,
-  ROW_GAP,
-  sizeKey,
-} from '@hub/protocol';
-import type { Device, PageRender, RenderManifest } from '@hub/protocol';
+import { sizeKey, tierForWidth } from '@hub/protocol';
+import type { CanvasFrame, Device, PageRender, RenderManifest } from '@hub/protocol';
 import type { Point, Rect } from './geom.js';
 
 export interface Frame {
+  frameId: string;
   pageId: string;
   name: string;
+  /** The style tier the frame's width gets. */
   device: Device;
   x: number;
   y: number;
   w: number;
   h: number;
+  viewportHeight: number;
+  /** The render of this page at this frame's size, or null while there is none. */
   render: PageRender | null;
+  /** While pending, the last render this frame showed, drawn pinned to its top-left. */
+  stale: PageRender | null;
+  pending: boolean;
 }
 
-export { FRAME_GAP, ROW_GAP };
-
-export function layoutFrames(m: RenderManifest, visible: ReadonlySet<Device>): Frame[] {
-  const devices = DEVICES.filter((d) => visible.has(d));
-  // Task 4 replaces this device grid; until then each device maps to its default size.
-  const keyOf = (d: Device): string => sizeKey(DEFAULT_FRAME_SIZES[DEVICES.indexOf(d)]!);
-  if (devices.length === 0) return [];
-
-  const frames: Frame[] = [];
-  let rowY = 0;
-  for (const page of m.pages) {
-    let x = 0;
-    let rowH = 0;
-    for (const device of devices) {
-      const render = page.renders[keyOf(device)] ?? null;
-      const w = DEVICE_WIDTH[device];
-      const h = render && render.height > 0 ? render.height : DEVICE_VIEWPORT_HEIGHT[device];
-      frames.push({ pageId: page.pageId, name: page.name, device, x, y: rowY, w, h, render });
-      x += w + FRAME_GAP;
-      rowH = Math.max(rowH, h);
-    }
-    rowY += rowH + ROW_GAP;
+/** `lastRenders` maps a frame id to the last render it was laid out with. */
+export function layoutFrames(
+  frames: readonly CanvasFrame[],
+  m: RenderManifest,
+  lastRenders?: ReadonlyMap<string, PageRender>,
+): Frame[] {
+  const pages = new Map(m.pages.map((p) => [p.pageId, p]));
+  const out: Frame[] = [];
+  for (const f of frames) {
+    const page = pages.get(f.pageId);
+    if (page === undefined) continue;
+    const render = page.renders[sizeKey(f)] ?? null;
+    const pending = render === null;
+    out.push({
+      frameId: f.id,
+      pageId: f.pageId,
+      name: page.name,
+      device: tierForWidth(f.width),
+      x: f.x,
+      y: f.y,
+      w: f.width,
+      h: Math.max(render?.height ?? 0, f.viewportHeight),
+      viewportHeight: f.viewportHeight,
+      render,
+      stale: pending ? lastRenders?.get(f.id) ?? null : null,
+      pending,
+    });
   }
-  return frames;
+  return out;
 }
 
 export function frameAt(frames: readonly Frame[], p: Point): Frame | null {

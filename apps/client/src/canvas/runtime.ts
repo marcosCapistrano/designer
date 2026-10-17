@@ -1,13 +1,15 @@
 // The non-DOM half of the canvas component: builds the tile loader, hit map
-// store and controller, feeds the controller manifests, and tears it all down.
+// store and controller, feeds the controller manifests and frame layouts, and
+// tears it all down.
 // CanvasView owns the DOM (canvases, events, toolbar) and delegates here, so the
 // lifecycle can be tested without a browser.
 
-import type { NodeSelection, RenderManifest } from '@hub/protocol';
+import type { CanvasFrame, NodeSelection, RenderManifest } from '@hub/protocol';
 import type { BlobCache } from './cache.js';
 import { liveKeys } from './cache.js';
 import { CanvasController } from './controller.js';
 import type { LayerTransform } from './controller.js';
+import type { FrameStore } from './frames.js';
 import { HitMapStore } from './hitmaps.js';
 import { TileLoader } from './loader.js';
 import type { LoaderOptions } from './loader.js';
@@ -22,11 +24,13 @@ export interface CanvasRuntimeOptions {
   /** Shows the painted layers moved and scaled while a zoom settles (see ControllerDeps). */
   setLayerTransform?: (t: LayerTransform | null) => void;
   source: TileSource;
+  /** The frame layout the canvas is drawn from. */
+  frames: FrameStore;
   cache: BlobCache;
   requestFrame: (cb: () => void) => void;
   now: () => number;
   onSelect?: (s: NodeSelection | null) => void;
-  /** The manifest error to show, or null to clear it. */
+  /** The manifest or frames error to show, or null to clear it. */
   onError: (message: string | null) => void;
   /** Passed through to the TileLoader (tests inject a decoder). */
   loader?: Pick<LoaderOptions, 'decode' | 'maxImages'>;
@@ -84,6 +88,50 @@ export function createCanvasRuntime(opts: CanvasRuntimeOptions): CanvasRuntime {
   // applied manifest is dropped, and so is a failure of such a response.
   let tickets = 0;
   let applied = 0;
+  let manifestError: string | null = null;
+  let framesError: string | null = null;
+  const report = (): void => opts.onError(manifestError ?? framesError);
+
+  // The layout comes from the frames store. A page that is new to the manifest (an import) has
+  // frames only once the store has laid it out, so such a manifest reloads the layout. A manifest
+  // arriving while a load runs is checked when that load lands, so each manifest costs at most one load.
+  let manifest: RenderManifest | null = null;
+  let layout: readonly CanvasFrame[] | null = null;
+  let loading = false;
+  let recheck = false;
+  const uncovered = (): boolean => {
+    if (manifest === null || layout === null) return false;
+    const covered = new Set(layout.map((f) => f.pageId));
+    return manifest.pages.some((p) => !covered.has(p.pageId));
+  };
+  const loadFrames = (): void => {
+    loading = true;
+    recheck = false;
+    opts.frames.load().then(
+      (frames) => {
+        loading = false;
+        if (disposed) return;
+        layout = frames;
+        controller.setFrames(frames);
+        if (framesError !== null) {
+          framesError = null;
+          report();
+        }
+        if (recheck && uncovered()) loadFrames();
+      },
+      (e: unknown) => {
+        loading = false;
+        if (disposed) return;
+        framesError = `Could not load the canvas frames: ${errorMessage(e)}`;
+        report();
+      },
+    );
+  };
+  const framesFor = (m: RenderManifest): void => {
+    manifest = m;
+    if (loading) recheck = true;
+    else if (layout === null || uncovered()) loadFrames();
+  };
 
   const apply = (m: unknown, ticket: number): void => {
     if (disposed || ticket < applied) return;
@@ -92,12 +140,17 @@ export function createCanvasRuntime(opts: CanvasRuntimeOptions): CanvasRuntime {
     applied = ticket;
     // The cache is an optimization; a failed collection is not worth an error.
     cache.gc(liveKeys(m)).catch(() => {});
-    opts.onError(null);
+    manifestError = null;
+    report();
+    framesFor(m);
   };
   const fail = (e: unknown, ticket: number): void => {
     if (disposed || ticket < applied) return;
-    opts.onError(`Could not load the render manifest: ${errorMessage(e)}`);
+    manifestError = `Could not load the render manifest: ${errorMessage(e)}`;
+    report();
   };
+
+  loadFrames();
 
   const initial = ++tickets;
   source
