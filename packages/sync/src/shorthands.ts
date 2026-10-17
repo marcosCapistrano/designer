@@ -118,6 +118,34 @@ export function longhands(property: string): ReadonlySet<string> {
   return found;
 }
 
+// A single logical inline side or corner resolves to one physical longhand that depends on direction: it may set
+// either, but is not known to set any one of them.
+const EITHER = /(?:^|-)inline-(?:start|end)(?:-|$)|-(?:start|end)-(?:start|end)-radius$/;
+const certain = new Map<string, ReadonlySet<string>>();
+/** The physical longhands a declaration of `property` sets whatever the direction. */
+export function definiteLonghands(property: string): ReadonlySet<string> {
+  let found = certain.get(property);
+  if (!found) {
+    const expand = (name: string): string[] => EITHER.test(name) ? [] : TABLE.has(name) ? TABLE.get(name)!.flatMap(expand) : [name];
+    found = new Set(expand(canonical(property)));
+    certain.set(property, found);
+  }
+  return found;
+}
+
+/**
+ * True when a later declaration of `later` resets every longhand an earlier declaration of `earlier` may set, so the
+ * earlier one has no effect on the element and can be dropped without changing the result.
+ */
+export function resets(earlier: string, later: string): boolean {
+  if (earlier === later || earlier.startsWith('--') || later.startsWith('--')) return false;
+  if (later === 'all') return !['direction', 'unicode-bidi'].includes(earlier);
+  if (earlier === 'all') return false;
+  const covered = definiteLonghands(later);
+  for (const longhand of longhands(earlier)) if (!covered.has(longhand)) return false;
+  return true;
+}
+
 /** True when a declaration of one property sets or resets a longhand the other also sets. */
 export function overlaps(a: string, b: string): boolean {
   if (a === b) return false;

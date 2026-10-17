@@ -160,11 +160,11 @@ describe('stylesheet parsing', () => {
     expect(parsed.rules).toHaveLength(1);
   });
 
-  it('keeps animation longhands after the shorthand, and still rejects a shorthand that resets earlier longhands', () => {
+  it('keeps animation longhands after the shorthand, and drops longhands a later shorthand resets', () => {
     expect(style('.a { animation: var(--animate-spin); animation-duration: 2s }').base).toEqual({ animation: 'var(--animate-spin)', 'animation-duration': '2s' });
     expect(style('.a { animation: var(--animate-spin) } p.a { animation-duration: 2s }').base).toEqual({ animation: 'var(--animate-spin)', 'animation-duration': '2s' });
-    expect(() => style('.a { animation-duration: 2s; animation: var(--animate-spin) }')).toThrow('Unsupported CSS declaration order: animation-duration before animation in .a');
-    expect(() => style('.a { animation-duration: 2s } p.a { animation: var(--animate-spin) }')).toThrow('Unsupported CSS declaration order: animation-duration before animation in .a and p.a');
+    expect(style('.a { animation-duration: 2s; animation: var(--animate-spin) }').base).toEqual({ animation: 'var(--animate-spin)' });
+    expect(style('.a { animation-duration: 2s } p.a { animation: var(--animate-spin) }').base).toEqual({ animation: 'var(--animate-spin)' });
   });
 
   // The design model sorts declarations on export, so every pair where one property resets the other must cascade in sorted order.
@@ -176,24 +176,34 @@ describe('stylesheet parsing', () => {
     ['.a { place-self: center; align-self: start }', 'place-self before align-self'],
     ['.a { flex-flow: row wrap; flex-direction: column }', 'flex-flow before flex-direction'],
     ['.a { inset: 0; bottom: 4px }', 'inset before bottom'],
-    ['.a { border-image: url(x.png) 30; border: 0 }', 'border-image before border'],
     ['.a { all: unset; align-items: center }', 'all before align-items'],
     ['.a { white-space: nowrap; text-wrap: balance }', 'white-space before text-wrap'],
-    ['.a { margin-left: 2px; margin: 4px }', 'margin-left before margin'],
-    ['.a { padding-left: 2px; padding-inline: 4px }', 'padding-left before padding-inline'],
-    ['.a { width: 10px } p.a { inline-size: 20px }', 'width before inline-size'],
-    ['.a { height: 10px; block-size: 20px }', 'height before block-size'],
-    ['.a { max-height: 10px; max-block-size: 20px }', 'max-height before max-block-size'],
-    ['.a { min-width: 10px; min-inline-size: 20px }', 'min-width before min-inline-size'],
-    ['.a { word-wrap: break-word; overflow-wrap: normal }', 'word-wrap before overflow-wrap'],
-    ['.a { mask-image: none; -webkit-mask-image: url(x.png) }', 'mask-image before -webkit-mask-image'],
-    ['.a { appearance: none; -webkit-appearance: auto }', 'appearance before -webkit-appearance'],
-    ['.a { font-synthesis-weight: none; font-synthesis: style }', 'font-synthesis-weight before font-synthesis'],
     ['.a { padding-right: 2px; padding-inline-start: 4px }', 'padding-right before padding-inline-start'],
-    ['.a { page-break-before: always; break-before: auto }', 'page-break-before before break-before'],
     ['.a { margin-inline-start: 1px; margin-inline-end: 2px }', 'margin-inline-start before margin-inline-end'],
+    ['.a { word-wrap: break-word } .a { overflow-wrap: normal } p.a { padding-inline: 1px; padding-left: 2px; padding-inline-start: 3px }', 'padding-left before padding-inline-start'],
   ])('rejects %s, whose sorted export would change the result', (text, order) => {
     expect(() => style(text)).toThrow(`Unsupported CSS declaration order: ${order} in `);
+  });
+
+  // A declaration whose every longhand a later declaration resets has no effect, so it is dropped and cannot misorder.
+  it.each([
+    ['.a { border-image: url(x.png) 30; border: 0 }', { border: '0' }],
+    ['.a { margin-left: 2px; margin: 4px }', { margin: '4px' }],
+    ['.a { padding-left: 2px; padding-inline: 4px }', { 'padding-inline': '4px' }],
+    ['.a { width: 10px } p.a { inline-size: 20px }', { 'inline-size': '20px' }],
+    ['.a { height: 10px; block-size: 20px }', { 'block-size': '20px' }],
+    ['.a { max-height: 10px; max-block-size: 20px }', { 'max-block-size': '20px' }],
+    ['.a { min-width: 10px; min-inline-size: 20px }', { 'min-inline-size': '20px' }],
+    ['.a { word-wrap: break-word; overflow-wrap: normal }', { 'overflow-wrap': 'normal' }],
+    ['.a { mask-image: none; -webkit-mask-image: url(x.png) }', { '-webkit-mask-image': 'url(x.png)' }],
+    ['.a { appearance: none; -webkit-appearance: auto }', { '-webkit-appearance': 'auto' }],
+    ['.a { font-synthesis-weight: none; font-synthesis: style }', { 'font-synthesis': 'style' }],
+    ['.a { page-break-before: always; break-before: auto }', { 'break-before': 'auto' }],
+    ['.a { gap: 16px } .a { row-gap: 0 } p.a { gap: 0 }', { gap: '0' }],
+    ['.a { color: red; all: unset }', { all: 'unset' }],
+    ['.a { padding-right: 1px; padding-inline: 2px }', { 'padding-inline': '2px' }],
+  ])('drops the reset declaration in %s', (text, base) => {
+    expect(style(text).base).toEqual(base);
   });
 
   it.each([
@@ -205,9 +215,9 @@ describe('stylesheet parsing', () => {
     ['.a { border: 1px solid; border-color: red }', { border: '1px solid', 'border-color': 'red' }],
     ['.a { all: unset; color: red }', { all: 'unset', color: 'red' }],
     ['.a { margin: 4px; margin-left: 2px }', { margin: '4px', 'margin-left': '2px' }],
-    ['.a { column-gap: 16px; gap: 8px }', { 'column-gap': '16px', gap: '8px' }],
+    ['.a { column-gap: 16px; gap: 8px }', { gap: '8px' }],
     ['.a { inset: 0; left: 4px }', { inset: '0', left: '4px' }],
-    ['.a { -webkit-appearance: none; appearance: none }', { '-webkit-appearance': 'none', appearance: 'none' }],
+    ['.a { -webkit-appearance: none; appearance: none }', { appearance: 'none' }],
     ['.a { inline-size: 100%; block-size: auto; max-inline-size: 100% }', { 'inline-size': '100%', 'block-size': 'auto', 'max-inline-size': '100%' }],
     ['.a { width: 10px; height: 20px }', { width: '10px', height: '20px' }],
   ])('accepts %s, unrelated or in sorted order', (text, base) => {

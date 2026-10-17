@@ -1,7 +1,7 @@
 import * as css from 'css-tree';
 import type { Device, ElementNode, StyleMap, Tokens } from '@hub/design-model';
 import { TOKEN_GROUP, TOKEN_NAME } from './tokens.js';
-import { overlaps } from './shorthands.js';
+import { overlaps, resets } from './shorthands.js';
 import { hasPseudoElement, isSourceOnly, matchSelector, restingPseudoElement, specificity, type SelectorAst, type TreeNode } from './selectors.js';
 
 /** `file` is the stylesheet that declares the rule and `text` its unscoped selector, for diagnostics. */
@@ -205,6 +205,9 @@ export function applyStyles(root: ElementNode, rules: Rule[], inline: Map<string
           const message = `Unsupported CSS writing-mode ${mode.trim()} in ${rule ? rule.text : 'inline style'}`;
           throw rule ? new CssError(rule.file, message) : new Error(message);
         }
+        // A declaration whose every longhand a later one resets has no effect: dropping it keeps the result exactly.
+        const cascade = Object.keys(style);
+        cascade.forEach((earlier, i) => { if (cascade.slice(i + 1).some((later) => resets(earlier, later))) delete style[earlier]; });
         const order = Object.keys(style);
         order.forEach((earlier, i) => order.slice(i + 1).forEach((later) => {
           if (earlier < later || !overlaps(earlier, later)) return;
