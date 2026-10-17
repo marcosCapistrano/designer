@@ -677,6 +677,10 @@ function extractOnce(project: SourceProject, entries: RouteEntry[], options: Ext
           else throw new Error('JSX attribute requires a static value');
           if (declarations && typeof props[name] === 'string' && /\{\{[A-Za-z_][A-Za-z0-9_]*\}\}/.test(props[name])) throw new Error('Literal placeholder syntax in shared components needs an adapter');
         }
+        // `data-name` is the layer's name (Figma's code-export convention): never an attribute or a component prop.
+        const named = props['data-name'];
+        const dataName = typeof named === 'string' ? named.trim() : '';
+        delete props['data-name'];
         const nodes = ts.isJsxElement(jsx) ? children(jsx.children, mod, env, `${path}/children`) : [];
         if (adapter?.kind === 'children') return nodes;
         if (adapter?.kind === 'element') {
@@ -707,7 +711,10 @@ function extractOnce(project: SourceProject, entries: RouteEntry[], options: Ext
               }
               const expanded = renderComponent(file, exportName, props, `${path}/${tag}`);
               const root = expanded[0];
-              if (expanded.length === 1 && root?.kind === 'element' && root.name === undefined) root.name = nameOf(key);
+              if (expanded.length === 1 && root?.kind === 'element') {
+                if (dataName) root.name = dataName;
+                else if (root.name === undefined) root.name = nameOf(key);
+              }
               return expanded;
             }
             const component = `C${stableId(`${file}:${exportName}`)}`;
@@ -734,12 +741,13 @@ function extractOnce(project: SourceProject, entries: RouteEntry[], options: Ext
                   throw error;
                 }
                 if (rendered.length !== 1 || rendered[0]?.kind !== 'element') throw new Error('Shared components require one element root');
+                if (rendered[0].name === undefined) rendered[0].name = nameOf(key);
                 definitions[component] = { name: component, props: declared, root: rendered[0] };
                 requirements.set(component, required);
               } finally { idNamespace = oldNamespace; declarations = oldDeclarations; requiredProps = oldRequired; }
             }
             for (const key of requirements.get(component) ?? []) if (!Object.hasOwn(passed, key)) throw new Error(`Missing preview prop ${key} for ${tag}`);
-            const instance: InstanceNode = { id: nodeId(mod.source.fileName, path), kind: 'instance', component, props: passed, style: { base: {} } };
+            const instance: InstanceNode = { id: nodeId(mod.source.fileName, path), kind: 'instance', ...(dataName ? { name: dataName } : {}), component, props: passed, style: { base: {} } };
             if (declarations) return [instance];
             // R3: style the occurrence expanded in its real context; it becomes an instance afterwards.
             const expanded = renderComponent(file, exportName, props, `${path}/${tag}`);
@@ -747,8 +755,10 @@ function extractOnce(project: SourceProject, entries: RouteEntry[], options: Ext
             occurrences.set(expanded[0], { instance, component, label: `${exportName} in ${file}` });
             return expanded;
           }
-          return imported ? renderComponent(resolveFile(project, mod.source.fileName, imported.file), imported.name, props, `${path}/${tag}`)
+          const expanded = imported ? renderComponent(resolveFile(project, mod.source.fileName, imported.file), imported.name, props, `${path}/${tag}`)
             : renderComponent(mod.source.fileName, tag, props, `${path}/${tag}`);
+          if (dataName && expanded.length === 1 && expanded[0]?.kind === 'element') expanded[0].name = dataName;
+          return expanded;
         }
         if (!/^[a-z][a-z0-9-]*$/.test(tag)) throw new Error(`Unsupported JSX tag ${tag}`);
         const attrs: Record<string, string> = {};
@@ -776,7 +786,7 @@ function extractOnce(project: SourceProject, entries: RouteEntry[], options: Ext
             if (attr !== null && rendered !== null) attrs[attr] = rendered;
           }
         }
-        return [{ id, kind: 'element', tag, attrs, style: { base: {} }, children: nodes }];
+        return [{ id, kind: 'element', ...(dataName ? { name: dataName } : {}), tag, attrs, style: { base: {} }, children: nodes }];
       }
       // Layout styles load before the page's styles, as in an App Router source hierarchy.
       for (const layout of entry.layouts ?? []) module(layout);
