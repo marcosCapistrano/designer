@@ -13,7 +13,8 @@ import { isPlainObject } from '../shape.js';
 import type { HandlerMap } from './handler.js';
 import { lookupNode, ownValue, requireElement, requireNode, validateAttrName } from './util.js';
 
-const NAME_PATTERN = /^[a-z][a-z0-9-]*$/;
+// A token group has no dash: `--group-name` is split back at its first dash, so a dashed group would not round-trip.
+const GROUP_PATTERN = /^[a-z][a-z0-9]*$/;
 // A token name follows its group in `--group-name`, so it may start with a digit and use `_` (`--space-0_5`).
 const TOKEN_NAME_PATTERN = /^[a-z0-9_][a-z0-9_-]*$/;
 
@@ -132,7 +133,7 @@ export const basicHandlers: HandlerMap = {
   setToken: {
     validate(_doc, op) {
       // group and name become the CSS custom property name `--group-name`.
-      if (!NAME_PATTERN.test(op.group) || !TOKEN_NAME_PATTERN.test(op.name)) {
+      if (!GROUP_PATTERN.test(op.group) || !TOKEN_NAME_PATTERN.test(op.name)) {
         return `Invalid token name: group "${op.group}", name "${op.name}"`;
       }
       if (op.value === null) return null;

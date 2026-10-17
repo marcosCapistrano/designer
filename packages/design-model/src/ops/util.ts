@@ -1,3 +1,4 @@
+import { SVG_CASED_ATTRS } from '../rules.js';
 import { MAX_DEPTH } from '../shape.js';
 import { findNode, type Container, type Located } from '../tree.js';
 import type { DesignDoc, DesignNode, ElementNode } from '../types.js';
@@ -31,7 +32,7 @@ const RESERVED_ATTRS: ReadonlySet<string> = new Set(['style', 'class', 'data-d-i
 export function validateAttrName(name: string): string | null {
   // Op logs are decoded without a shape check, so a name can arrive here as another type.
   if (typeof name !== 'string') return 'Attribute name must be a string';
-  if (!ATTR_NAME_PATTERN.test(name) || RESERVED_ATTRS.has(name) || name.startsWith('on')) {
+  if ((!ATTR_NAME_PATTERN.test(name) && !SVG_CASED_ATTRS.has(name)) || RESERVED_ATTRS.has(name) || name.startsWith('on')) {
     return `Attribute "${name}" is not allowed`;
   }
   return null;

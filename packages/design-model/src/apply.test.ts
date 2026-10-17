@@ -139,6 +139,14 @@ describe('setAttr', () => {
     expect(error).toContain('is not allowed');
   });
 
+  test.each(['viewBox', 'preserveAspectRatio', 'stdDeviation'])('accepts the case-sensitive SVG attribute %s', (name) => {
+    expect(attrsOf(applied(sampleDoc(), { op: 'setAttr', node: 'n3', name, value: '0 0 1 1' }), 'n3')).toEqual({ [name]: '0 0 1 1' });
+  });
+
+  test.each(['strokeWidth', 'fillRule', 'ViewBox'])('rejects the camelCase name %s, which no SVG attribute has', (name) => {
+    expect(rejected(sampleDoc(), { op: 'setAttr', node: 'n3', name, value: '1' })).toContain('is not allowed');
+  });
+
   test('rejects an event handler attribute', () => {
     const error = rejected(sampleDoc(), { op: 'setAttr', node: 'n3', name: 'onclick', value: 'alert(1)' });
     expect(error).toBe('Attribute "onclick" is not allowed');
@@ -218,6 +226,8 @@ describe('setToken', () => {
     ['space', ''],
     ['space_x', '1'],
     ['1space', 'x'],
+    // The importer splits `--group-name` at the first dash, so a dashed group would not round-trip.
+    ['brand-color', 'x'],
   ])('rejects token group %j and name %j', (group, name) => {
     const error = rejected(sampleDoc(), { op: 'setToken', group, name, value: '1px' });
     expect(error).toContain('Invalid token name');

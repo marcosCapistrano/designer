@@ -40,6 +40,20 @@ export const DENIED_TAGS: ReadonlySet<string> = new Set([
   'xmp', 'plaintext', 'noembed', 'noframes', 'listing',
 ]);
 
+// The SVG attributes whose names are mixed case (the HTML parser's "adjust SVG attributes" table). SVG reads
+// attribute names case-sensitively, so these are the only attribute names that may hold uppercase letters.
+export const SVG_CASED_ATTRS: ReadonlySet<string> = new Set([
+  'attributeName', 'attributeType', 'baseFrequency', 'baseProfile', 'calcMode', 'clipPathUnits', 'diffuseConstant',
+  'edgeMode', 'filterUnits', 'glyphRef', 'gradientTransform', 'gradientUnits', 'kernelMatrix', 'kernelUnitLength',
+  'keyPoints', 'keySplines', 'keyTimes', 'lengthAdjust', 'limitingConeAngle', 'markerHeight', 'markerUnits',
+  'markerWidth', 'maskContentUnits', 'maskUnits', 'numOctaves', 'pathLength', 'patternContentUnits',
+  'patternTransform', 'patternUnits', 'pointsAtX', 'pointsAtY', 'pointsAtZ', 'preserveAlpha', 'preserveAspectRatio',
+  'primitiveUnits', 'refX', 'refY', 'repeatCount', 'repeatDur', 'requiredExtensions', 'requiredFeatures',
+  'specularConstant', 'specularExponent', 'spreadMethod', 'startOffset', 'stdDeviation', 'stitchTiles',
+  'surfaceScale', 'systemLanguage', 'tableValues', 'targetX', 'targetY', 'textLength', 'viewBox', 'viewTarget',
+  'xChannelSelector', 'yChannelSelector', 'zoomAndPan',
+]);
+
 const TAG_PATTERN = /^[a-z][a-z0-9-]*$/;
 
 export function validateTag(tag: string): string | null {

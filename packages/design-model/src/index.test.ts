@@ -4,6 +4,7 @@ import { describe, expect, test } from 'vitest';
 const PUBLIC_EXPORTS = [
   'DEVICES',
   'DesignSession',
+  'SVG_CASED_ATTRS',
   'allIds',
   'allocIds',
   'applyBatch',
