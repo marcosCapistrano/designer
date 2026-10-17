@@ -23,6 +23,8 @@ export interface DesignTarget {
   /** For an instance: its component's title. */
   title?: string;
 }
+/** Edits made while editing one component in place: they apply at once when they stay inside its definition. */
+export interface EditScope { component: string }
 export interface LayerNode { id: string; name: string; kind: 'element' | 'text' | 'instance'; component?: string; text?: string; children: LayerNode[] }
 export interface DesignLayers { revision: string; root: LayerNode; components: Record<string, { title: string; uses: number }> }
 export interface DesignSelection { revision: string; targets: DesignTarget[]; selection: NodeSelection }
