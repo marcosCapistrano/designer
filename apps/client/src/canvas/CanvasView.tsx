@@ -38,8 +38,10 @@ export interface CanvasViewProps {
    */
   framesEditable?: boolean;
   onSelect?: (s: NodeSelection | null) => void;
-  /** Called with the camera scale whenever it changes (pans included), for a zoom readout. */
-  onZoom?: (scale: number) => void;
+  /** Called after every camera change (pans included). */
+  onCamera?: (camera: Camera) => void;
+  /** Where to start instead of fitting the first page. Read at mount. */
+  initialCamera?: Camera;
   /** Screen space covered by floating chrome over the canvas; fits keep frames clear of it. Read at mount. */
   insets?: Insets;
   /** Set on mount to a function that fits every frame into view; cleared on unmount. */
@@ -84,7 +86,7 @@ function menuPanelStyle(at: { x: number; y: number }, root: HTMLElement | null):
   return `position:absolute;left:${left}px;top:${top}px;width:${width}px;max-height:${h - top - 8}px;overflow-y:auto;box-sizing:border-box;background:var(--surface);border:1px solid var(--border);border-radius:10px;box-shadow:var(--shadow);touch-action:pan-y`;
 }
 
-export function CanvasView({ source, cache, frames, framesEditable = true, onSelect, onZoom, insets, fitRef, debug = false }: CanvasViewProps): JSX.Element {
+export function CanvasView({ source, cache, frames, framesEditable = true, onSelect, onCamera, initialCamera, insets, fitRef, debug = false }: CanvasViewProps): JSX.Element {
   const rootRef = useRef<HTMLDivElement>(null);
   const layersRef = useRef<HTMLDivElement>(null);
   const baseRef = useRef<HTMLCanvasElement>(null);
@@ -135,7 +137,8 @@ export function CanvasView({ source, cache, frames, framesEditable = true, onSel
       requestFrame: (cb) => requestAnimationFrame(() => cb()),
       now: () => performance.now(),
       onSelect,
-      onCamera: onZoom ? (camera) => onZoom(camera.scale) : undefined,
+      onCamera,
+      initialCamera,
       insets,
       onError: setError,
       onFrameMenu: (frameId, p) => setMenu({ frameId, x: p.x, y: p.y }),

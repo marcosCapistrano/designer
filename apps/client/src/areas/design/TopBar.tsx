@@ -7,6 +7,8 @@ import { Menu } from '../../ui/Menu.js';
 import type { MenuItem } from '../../ui/Menu.js';
 import { Segmented } from '../../ui/Segmented.js';
 import { BackIcon, MoreIcon, RedoIcon, UndoIcon } from '../../ui/icons.js';
+import { useValue } from '../../ui/value-store.js';
+import type { ValueStore } from '../../ui/value-store.js';
 
 export interface TopBarProps {
   app: string;
@@ -17,7 +19,7 @@ export interface TopBarProps {
   onUndo(): void;
   onRedo(): void;
   /** The camera scale as a whole percentage. */
-  zoom: number;
+  zoom: ValueStore<number>;
   onFit(): void;
   menu: readonly MenuItem[];
 }
@@ -33,8 +35,17 @@ export function TopBar(p: TopBarProps): JSX.Element {
       <span class="design-topbar-spacer" />
       <IconButton label="Undo" icon={<UndoIcon />} disabled={!p.canUndo} onClick={p.onUndo} data-testid="topbar-undo" />
       <IconButton label="Redo" icon={<RedoIcon />} disabled={!p.canRedo} onClick={p.onRedo} data-testid="topbar-redo" />
-      <button type="button" class="design-topbar-zoom ui-mono" title="Fit all frames" aria-label={`Zoom ${p.zoom}%, fit all frames`} data-testid="topbar-fit" onClick={p.onFit}>{`${p.zoom}%`}</button>
+      <ZoomReadout store={p.zoom} onFit={p.onFit} />
       <Menu label="More" icon={<MoreIcon />} items={p.menu} data-testid="topbar-menu" />
     </header>
   );
+}
+
+export function ZoomReadoutView({ value, onFit }: { value: number; onFit(): void }): JSX.Element {
+  return <button type="button" class="design-topbar-zoom ui-mono" title="Fit all frames" aria-label={`Zoom ${value}%, fit all frames`} data-testid="topbar-fit" onClick={onFit}>{`${value}%`}</button>;
+}
+
+/** The only part of the screen that re-renders while the camera moves. */
+export function ZoomReadout({ store, onFit }: { store: ValueStore<number>; onFit(): void }): JSX.Element {
+  return ZoomReadoutView({ value: useValue(store), onFit });
 }

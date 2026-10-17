@@ -19,7 +19,8 @@ export function ColorField({ value, label, placeholder, disabled, busy, muted, o
   const literal = isLiteralColor(value);
   const off = Boolean(disabled || busy);
   return (
-    <label class="ui-field" data-testid={id}>
+    // A div, not a label: a label would forward a tap on its caption to its first control (the − button or the picker).
+    <div class="ui-field" role="group" aria-label={label} data-testid={id}>
       <span class="ui-field-label">{label}{busy && <span class="ui-spinner" aria-hidden="true" />}</span>
       <span class="ui-color">
         <span class={literal ? 'ui-swatch' : 'ui-swatch ui-swatch-neutral'} data-testid={`${id}-swatch`} style={literal ? `background:${value}` : undefined}>
@@ -30,6 +31,6 @@ export function ColorField({ value, label, placeholder, disabled, busy, muted, o
         </span>
         <input key={value} class={muted ? 'ui-input ui-mono ui-input-muted' : 'ui-input ui-mono'} data-testid={`${id}-input`} defaultValue={value} placeholder={placeholder} disabled={off} aria-label={label} {...commitHandlers(value, onCommit)} />
       </span>
-    </label>
+    </div>
   );
 }

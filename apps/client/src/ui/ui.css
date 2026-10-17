@@ -225,7 +225,8 @@
   /* Fixed and above modals (z 50), so a toast's action stays reachable while a sheet is open. */
   position: fixed;
   left: 50%;
-  bottom: 96px;
+  /* Above the chat bar (64), the tool pill (16 gap + 54) and a margin, so neither is covered. */
+  bottom: 146px;
   z-index: 60;
   display: flex;
   flex-direction: column;
@@ -282,3 +283,4 @@
 }
 .ui-input-muted { color: var(--text-3); }
 .ui-toast-warning { border-left: 4px solid var(--warning); }
+.ui-toast-passive { pointer-events: none; }

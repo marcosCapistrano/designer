@@ -22,13 +22,14 @@ export function Stepper({ value, label, placeholder, disabled, busy, muted, onCo
   const steppable = parseLength(value) !== null;
   const off = Boolean(disabled || busy);
   return (
-    <label class="ui-field" data-testid={id}>
+    // A div, not a label: a label would forward a tap on its caption to its first control (the − button or the picker).
+    <div class="ui-field" role="group" aria-label={label} data-testid={id}>
       <span class="ui-field-label">{label}{busy && <span class="ui-spinner" aria-hidden="true" />}</span>
       <span class="ui-stepper">
         <button type="button" class="ui-stepper-btn" aria-label={`Decrease ${label}`} data-testid={`${id}-minus`} disabled={off || !steppable} onClick={() => onCommit(stepValue(value, -1))}>−</button>
         <input key={value} class={muted ? 'ui-input ui-mono ui-input-muted' : 'ui-input ui-mono'} data-testid={`${id}-input`} defaultValue={value} placeholder={placeholder} disabled={off} aria-label={label} {...commitHandlers(value, onCommit)} />
         <button type="button" class="ui-stepper-btn" aria-label={`Increase ${label}`} data-testid={`${id}-plus`} disabled={off || !steppable} onClick={() => onCommit(stepValue(value, 1))}>+</button>
       </span>
-    </label>
+    </div>
   );
 }

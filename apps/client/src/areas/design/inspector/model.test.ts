@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { DesignEditResult, DesignSelection, NodeSelection } from '@hub/protocol';
 import { ApiError } from '../../../net/api.js';
-import { createInspectorModel } from './model.js';
+import { createInspectorModel, pendingFor } from './model.js';
 
 const sel = (id: string, device: NodeSelection['device'] = 'base'): NodeSelection => ({ pageId: 'p', device, nodeIds: [id] });
 const info = (id: string, revision = 'r1', device: NodeSelection['device'] = 'base'): DesignSelection => ({
@@ -64,12 +64,12 @@ describe('inspector model', () => {
     const a = t.model.select(sel('n1')); t.loads[0]!.resolve(info('n1', 'r7')); await a;
     const ops = [{ op: 'setStyle', node: 'n1', device: 'base', prop: 'color', value: 'red' }];
     const edit = t.model.edit('typography:color', ops);
-    expect(t.model.state().pending.has('typography:color')).toBe(true);
+    expect(pendingFor(t.model.state(), 'n1').has('typography:color')).toBe(true);
     expect(t.api.editDesign).toHaveBeenCalledWith('a', 'r7', ops, sel('n1'));
     const result: DesignEditResult = { mode: 'applied', revision: 'r8', warnings: [] };
     t.edits[0]!.resolve(result);
     await edit;
-    expect(t.model.state().pending.size).toBe(0);
+    expect(pendingFor(t.model.state(), 'n1').size).toBe(0);
     expect(t.onResult).toHaveBeenCalledWith(result);
   });
 
@@ -112,5 +112,29 @@ describe('inspector model', () => {
     expect(t.model.state().error).toBe('Selection could not be read.');
     await t.model.select(null);
     expect(t.model.state()).toMatchObject({ info: null, error: null, loading: false });
+  });
+
+  it('keeps a failed edit for the previous selection out of the new one (errors, field reset, spinners)', async () => {
+    const t = setup();
+    const a = t.model.select(sel('n1')); t.loads[0]!.resolve(info('n1')); await a;
+    const edit = t.model.edit('typography:color', []);
+    const b = t.model.select(sel('n2')); t.loads[1]!.resolve(info('n2')); await b;
+    const epoch = t.model.state().epoch;
+    expect(pendingFor(t.model.state(), 'n2').has('typography:color')).toBe(false);
+    t.edits[0]!.reject(new Error('Invalid value'));
+    await edit;
+    expect(t.model.state().errors).toEqual({});
+    expect(t.model.state().epoch).toBe(epoch);
+    expect(pendingFor(t.model.state(), 'n1').size).toBe(0);
+  });
+
+  it('still shows the error when the same selection reloaded (a new revision) before the edit failed', async () => {
+    const t = setup();
+    const a = t.model.select(sel('n1')); t.loads[0]!.resolve(info('n1')); await a;
+    const edit = t.model.edit('typography:color', []);
+    const b = t.model.select(sel('n1')); t.loads[1]!.resolve(info('n1', 'r2')); await b;
+    t.edits[0]!.reject(new Error('Invalid value'));
+    await edit;
+    expect(t.model.state().errors).toEqual({ typography: 'Invalid value' });
   });
 });

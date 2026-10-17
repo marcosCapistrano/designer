@@ -72,3 +72,12 @@ describe('ToastStack', () => {
     expect(onDismiss).toHaveBeenCalledWith(2);
   });
 });
+
+describe('ToastStack passive toasts', () => {
+  it('lets taps through a toast with no buttons, but not one with an action or a dismiss button', () => {
+    const els = elements(ToastStack({ toasts: [{ id: 1, kind: 'ok', text: 'Undone.' }, { id: 2, kind: 'warning', text: 'x', sticky: true }, { id: 3, kind: 'ok', text: 'y', action: { label: 'Details', run: () => {} } }], onDismiss: () => {} }));
+    expect(String(props(byTestId(els, 'toast-1')).class)).toContain('ui-toast-passive');
+    expect(String(props(byTestId(els, 'toast-2')).class)).not.toContain('ui-toast-passive');
+    expect(String(props(byTestId(els, 'toast-3')).class)).not.toContain('ui-toast-passive');
+  });
+});

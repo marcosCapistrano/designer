@@ -77,3 +77,34 @@ describe('Stepper', () => {
     expect(props(s.get('fs-input')).placeholder).toBe('inherits Desktop');
   });
 });
+
+describe('Stepper label', () => {
+  it('has no <label> wrapping its buttons, so tapping the caption never steps the value', () => {
+    const s = setup('16px');
+    expect(s.els.filter((e) => e.type === 'label')).toEqual([]);
+    expect(props(s.get('fs')).role).toBe('group');
+    expect(props(s.get('fs'))['aria-label']).toBe('Font size');
+  });
+});
+
+describe('Stepper commits once', () => {
+  it('does not commit the same typed value again when the field blurs after Enter', () => {
+    const s = setup('16px');
+    const input = props(s.get('fs-input'));
+    const target = { value: '20px' };
+    const ev = (key?: string) => ({ currentTarget: target, key, preventDefault() {} }) as unknown as Event;
+    (input.onKeyDown as (e: Event) => void)(ev('Enter'));
+    (input.onBlur as (e: Event) => void)(ev());
+    expect(s.onCommit.mock.calls).toEqual([['20px']]);
+  });
+  it('commits again when the user types a different value after Enter', () => {
+    const s = setup('16px');
+    const input = props(s.get('fs-input'));
+    const target = { value: '20px' };
+    const ev = (key?: string) => ({ currentTarget: target, key, preventDefault() {} }) as unknown as Event;
+    (input.onKeyDown as (e: Event) => void)(ev('Enter'));
+    target.value = '24px';
+    (input.onBlur as (e: Event) => void)(ev());
+    expect(s.onCommit.mock.calls).toEqual([['20px'], ['24px']]);
+  });
+});

@@ -18,6 +18,9 @@ import { Modal } from '../../ui/Modal.js';
 import { SheetView } from '../../ui/Sheet.js';
 import { ToastStack } from '../../ui/ToastStack.js';
 import { useToasts } from '../../ui/toasts.js';
+import { createValueStore } from '../../ui/value-store.js';
+import type { ValueStore } from '../../ui/value-store.js';
+import type { Camera } from '../../canvas/geom.js';
 import type { ToastInput, ToastItem } from '../../ui/toasts.js';
 import { ChatSheet } from './ChatSheet.js';
 import { ImportSheet } from './ImportSheet.js';
@@ -27,6 +30,8 @@ import type { Details } from './import-result.js';
 import { CANVAS_INSETS, INSPECTOR_WIDTH, panelLayout } from './layout.js';
 import { PreviewBanner } from './PreviewBanner.js';
 import { proposalSource } from './preview-source.js';
+import { resultToast } from './result-toast.js';
+import type { ResultOrigin } from './result-toast.js';
 import { TopBar } from './TopBar.js';
 import './design.css';
 
@@ -47,22 +52,28 @@ export interface DesignAreaViewProps {
   inspectorOpen: boolean;
   selectionLabel: string | null;
   width: number;
-  zoom: number;
+  zoom: ValueStore<number>;
+  /** The live canvas's last camera, so a remounted canvas (live ↔ preview) starts where the user was. */
+  camera: Camera | null;
   busy: boolean;
   building: boolean;
   chatBusy: boolean;
+  /** An inspector edit is in flight. */
+  inspectorBusy: boolean;
   toasts: readonly ToastItem[];
   details: Details | null;
   importOpen: boolean;
   fitRef: { current: (() => void) | null };
   onSelect(selection: NodeSelection | null): void;
+  /** An edit result from chat (the inspector reports through onInspectorResult). */
   onResult(result: DesignEditResult): void;
+  onInspectorResult(result: DesignEditResult): void;
   onApply(): void;
   onCancel(): void;
   onUndo(): void;
   onRedo(): void;
   onFit(): void;
-  onZoom(scale: number): void;
+  onCamera(camera: Camera): void;
   onArea(area: Area): void;
   onImportOpen(open: boolean): void;
   onImported(out: ImportResponse): void;
@@ -71,6 +82,7 @@ export interface DesignAreaViewProps {
   onDismissToast(id: number): void;
   onDetails(details: Details | null): void;
   onCloseInspector(): void;
+  onInspectorBusy(busy: boolean): void;
   onSelectionLabel(label: string | null): void;
   onChatBusy(busy: boolean): void;
   onSampleBusy(busy: boolean): void;
@@ -79,8 +91,8 @@ export interface DesignAreaViewProps {
 
 function inspector(p: DesignAreaViewProps, locked: boolean, side: 'right' | 'bottom'): JSX.Element {
   return (
-    <SheetView open side={side} width={side === 'right' ? INSPECTOR_WIDTH : undefined} maxHeight="55%" label="Inspector" onClose={p.onCloseInspector} data-testid="inspector-sheet">
-      <Inspector app={p.app} api={p.api} selection={p.selection!} revision={p.revision} disabled={locked} onResult={p.onResult} onClose={p.onCloseInspector} onLabel={p.onSelectionLabel} />
+    <SheetView open side={side} width={side === 'right' ? INSPECTOR_WIDTH : undefined} maxHeight="55vh" label="Inspector" onClose={p.onCloseInspector} data-testid="inspector-sheet">
+      <Inspector app={p.app} api={p.api} selection={p.selection!} revision={p.revision} disabled={locked} onResult={p.onInspectorResult} onClose={p.onCloseInspector} onLabel={p.onSelectionLabel} onPending={p.onInspectorBusy} />
     </SheetView>
   );
 }
@@ -88,8 +100,10 @@ function inspector(p: DesignAreaViewProps, locked: boolean, side: 'right' | 'bot
 export function DesignAreaView(p: DesignAreaViewProps): JSX.Element {
   const previewing = p.proposal !== null;
   const showPreview = previewing && p.previewSource !== null;
-  // Edits wait while Build runs, while another design action is in flight, and while a preview awaits a decision.
-  const locked = p.busy || p.building || previewing;
+  // Edits wait while Build runs, while another design action or a chat turn is in flight, and while a preview
+  // awaits a decision. Undo and redo also wait for the inspector's own edits.
+  const locked = p.busy || p.building || p.chatBusy || previewing;
+  const history = !!p.revision && !locked && !p.inspectorBusy;
   const layout = panelLayout(p.width, p.inspectorOpen && p.selection !== null);
   return (
     <div class="design-area" data-testid="design-area">
@@ -101,7 +115,8 @@ export function DesignAreaView(p: DesignAreaViewProps): JSX.Element {
           frames={showPreview ? p.previewFrames : p.frames}
           framesEditable={!showPreview}
           onSelect={showPreview ? undefined : p.onSelect}
-          onZoom={p.onZoom}
+          onCamera={p.onCamera}
+          initialCamera={p.camera ?? undefined}
           insets={CANVAS_INSETS}
           fitRef={p.fitRef}
         />
@@ -118,8 +133,8 @@ export function DesignAreaView(p: DesignAreaViewProps): JSX.Element {
         app={p.app}
         area="design"
         onArea={p.onArea}
-        canUndo={!!p.revision && !locked}
-        canRedo={!!p.revision && !locked}
+        canUndo={history}
+        canRedo={history}
         onUndo={p.onUndo}
         onRedo={p.onRedo}
         zoom={p.zoom}
@@ -131,10 +146,11 @@ export function DesignAreaView(p: DesignAreaViewProps): JSX.Element {
       />
       {p.building && <p class="design-building" role="status" data-testid="design-building">Wait for Build to finish before importing or editing.</p>}
       {previewing && <PreviewBanner proposal={p.proposal!} busy={p.busy} onApply={p.onApply} onCancel={p.onCancel} />}
-      {layout.inspector === 'bottom' && inspector(p, locked, 'bottom')}
-      {/* Chat keeps one place in the tree, so opening the inspector never remounts it (and loses the draft). */}
-      <div class={layout.chatDocked ? 'design-side design-side-docked' : 'design-side'}>
-        {layout.inspector === 'right' && inspector(p, locked, 'right')}
+      {/* Inspector and chat keep one place each in this column, so opening the inspector or rotating the tablet
+          never remounts them (and loses a draft or a device choice). Wide: a right column; narrow: stacked at the
+          bottom, inspector above chat, so neither covers the other. */}
+      <div class={layout.inspector === 'right' ? 'design-side design-side-docked' : layout.inspector === 'bottom' ? 'design-side design-side-stacked' : 'design-side'}>
+        {layout.inspector !== 'none' && inspector(p, locked, layout.inspector)}
         <ChatSheet app={p.app} api={p.api} ws={p.ws} selection={p.selection} selectionLabel={p.selectionLabel} disabled={locked} docked={layout.chatDocked}
           onResult={p.onResult} onBusy={p.onChatBusy} onPreview={p.onPreviewFocus} />
       </div>
@@ -166,7 +182,9 @@ export function DesignArea({ app, api, ws, source, cache }: DesignAreaProps): JS
   const [building, setBuilding] = useState(false);
   const [sampleBusy, setSampleBusy] = useState(false);
   const [chatBusy, setChatBusy] = useState(false);
-  const [zoom, setZoom] = useState(100);
+  const [inspectorBusy, setInspectorBusy] = useState(false);
+  const zoom = useMemo(() => createValueStore(100), []);
+  const cameraRef = useRef<Camera | null>(null);
   const [width, setWidth] = useState(1440);
   const [importOpen, setImportOpen] = useState(false);
   const [details, setDetails] = useState<Details | null>(null);
@@ -199,11 +217,12 @@ export function DesignArea({ app, api, ws, source, cache }: DesignAreaProps): JS
     return () => observer.disconnect();
   }, []);
 
-  const onResult = useCallback((result: DesignEditResult, done = 'Design updated.') => {
+  const onResult = useCallback((result: DesignEditResult, origin: ResultOrigin) => {
+    const toast = resultToast(result, origin);
+    if (toast) push(toast);
     if (result.mode === 'preview') { setProposal(result.proposal); return; }
     setProposal(null);
     setRevision(result.revision);
-    push({ kind: 'ok', text: result.warnings[0] ?? done });
   }, [push]);
 
   const act = useCallback(async (task: () => Promise<void>, failure: string) => {
@@ -213,7 +232,7 @@ export function DesignArea({ app, api, ws, source, cache }: DesignAreaProps): JS
 
   const history = (action: 'undo' | 'redo') => {
     if (!revision) return;
-    void act(async () => onResult(await api.designHistory(app, revision, action), action === 'undo' ? 'Undone.' : 'Redone.'), action === 'undo' ? 'Undo failed.' : 'Redo failed.');
+    void act(async () => onResult(await api.designHistory(app, revision, action), action), action === 'undo' ? 'Undo failed.' : 'Redo failed.');
   };
 
   const onImported = useCallback((out: ImportResponse) => {
@@ -230,16 +249,17 @@ export function DesignArea({ app, api, ws, source, cache }: DesignAreaProps): JS
         app={app} api={api} ws={ws} live={source} cache={cache} previewCache={previewCache} frames={frames} previewFrames={previewFrames}
         revision={revision} proposal={proposal} previewSource={previewSource}
         selection={selection} inspectorOpen={selection !== null && selection !== hiddenFor} selectionLabel={selectionLabel}
-        width={width} zoom={zoom} busy={busy || sampleBusy} building={building} chatBusy={chatBusy}
+        width={width} zoom={zoom} camera={cameraRef.current} busy={busy || sampleBusy} building={building} chatBusy={chatBusy} inspectorBusy={inspectorBusy}
         toasts={toasts.items} details={details} importOpen={importOpen} fitRef={fitRef}
         onSelect={setSelection}
-        onResult={(r) => onResult(r)}
-        onApply={() => proposal && void act(async () => onResult(await api.applyDesign(app, proposal.id)), 'Apply failed.')}
+        onResult={(r) => onResult(r, 'chat')}
+        onInspectorResult={(r) => onResult(r, 'inspector')}
+        onApply={() => proposal && void act(async () => onResult(await api.applyDesign(app, proposal.id), 'apply'), 'Apply failed.')}
         onCancel={() => proposal && void act(async () => { await api.cancelDesign(app, proposal.id); setProposal(null); }, 'Cancel failed.')}
         onUndo={() => history('undo')}
         onRedo={() => history('redo')}
         onFit={() => fitRef.current?.()}
-        onZoom={(scale) => setZoom(Math.round(scale * 100))}
+        onCamera={(camera) => { cameraRef.current = camera; zoom.set(Math.round(camera.scale * 100)); }}
         onArea={(area) => { location.hash = formatRoute({ name: 'app', app, area }); }}
         onImportOpen={setImportOpen}
         onImported={onImported}
@@ -248,6 +268,7 @@ export function DesignArea({ app, api, ws, source, cache }: DesignAreaProps): JS
         onDismissToast={toasts.dismiss}
         onDetails={setDetails}
         onCloseInspector={() => setHiddenFor(selection)}
+        onInspectorBusy={setInspectorBusy}
         onSelectionLabel={setSelectionLabel}
         onChatBusy={setChatBusy}
         onSampleBusy={setSampleBusy}

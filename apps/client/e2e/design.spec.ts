@@ -115,8 +115,9 @@ test('tap editing supports immediate instance edits, undo/redo and shared previe
   await selectLastBox(page);
   await page.getByTestId('typography-color-input').fill('red');
   await page.getByTestId('typography-color-input').press('Enter');
-  await expect(toasts(page)).toContainText('Design updated.');
-  expect(await pending(page)).toBe(initial + 1);
+  // A successful inspector edit is confirmed by the field, not a toast.
+  await expect.poll(() => pending(page)).toBe(initial + 1);
+  await expect(page.getByTestId('topbar-undo')).toBeEnabled();
   await page.getByTestId('topbar-undo').click();
   await expect.poll(() => pending(page)).toBe(initial);
   await expect(page.getByTestId('topbar-redo')).toBeEnabled();
@@ -146,7 +147,9 @@ test('on a tablet-width screen the inspector is a bottom sheet and chat stays re
   await page.getByTestId('chat-input').fill('Make it bigger');
   await expect(page.getByTestId('chat-send')).toBeVisible();
   await expect(page.getByTestId('chat-send')).toBeEnabled();
-  const send = await page.getByTestId('chat-send').boundingBox();
+  // The inspector ends where the chat begins: nothing of either is covered.
+  const chat = await page.getByTestId('chat-sheet').boundingBox();
   const sheet = await page.getByTestId('inspector-sheet').boundingBox();
-  expect(send!.y).toBeGreaterThanOrEqual(sheet!.y + sheet!.height - 1);
+  expect(sheet!.y + sheet!.height).toBeLessThanOrEqual(chat!.y + 1);
+  await expect(page.getByTestId('section-raw')).toBeVisible();
 });

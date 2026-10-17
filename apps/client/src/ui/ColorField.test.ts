@@ -48,3 +48,11 @@ describe('ColorField', () => {
     expect(() => named.get('c-picker')).toThrow();
   });
 });
+
+describe('ColorField label', () => {
+  it('has no <label> wrapping the hidden picker, so tapping the caption never opens it', () => {
+    const onCommit = vi.fn();
+    const els = elements(ColorField({ value: '#ff0000', label: 'Color', onCommit, 'data-testid': 'c' }));
+    expect(els.filter((e) => e.type === 'label')).toEqual([]);
+  });
+});

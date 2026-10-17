@@ -3,10 +3,14 @@
 
 type InputEvent = { currentTarget: { value: string }; key?: string; preventDefault(): void };
 
+/** The value each field last committed, so Enter followed by blur (tapping elsewhere) commits once, not twice. */
+const committed = new WeakMap<object, string>();
+
 export function commitHandlers(current: string, onCommit: (value: string | null) => void) {
-  const commit = (raw: string): void => {
-    const next = raw.trim();
-    if (next === current.trim()) return;
+  const commit = (field: { value: string }): void => {
+    const next = field.value.trim();
+    if (next === current.trim() || committed.get(field) === next) return;
+    committed.set(field, next);
     onCommit(next === '' ? null : next);
   };
   return {
@@ -14,8 +18,8 @@ export function commitHandlers(current: string, onCommit: (value: string | null)
       const e = event as unknown as InputEvent;
       if (e.key !== 'Enter') return;
       e.preventDefault();
-      commit(e.currentTarget.value);
+      commit(e.currentTarget);
     },
-    onBlur: (event: Event): void => commit((event as unknown as InputEvent).currentTarget.value),
+    onBlur: (event: Event): void => commit((event as unknown as InputEvent).currentTarget),
   };
 }

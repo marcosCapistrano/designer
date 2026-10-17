@@ -33,6 +33,8 @@ export interface CanvasRuntimeOptions {
   onSelect?: (s: NodeSelection | null) => void;
   /** Screen space covered by the app's floating chrome; fits keep frames clear of it. */
   insets?: Insets;
+  /** Where to start instead of fitting the first page, e.g. the camera of the canvas this one replaces. */
+  initialCamera?: Camera;
   /** Called after every camera change (pan, zoom, fit). */
   onCamera?: (camera: Camera) => void;
   /** A tap on a frame's label band: the frame and the screen point tapped. */
@@ -103,6 +105,7 @@ export function createCanvasRuntime(opts: CanvasRuntimeOptions): CanvasRuntime {
     onFrameMenu: opts.onFrameMenu,
     framesEditable: opts.framesEditable,
   });
+  if (opts.initialCamera) controller.setCamera(opts.initialCamera);
 
   // Every manifest, initial or subscribed, goes through apply(). A request's
   // ticket is taken when it starts, so a response that is older than the newest

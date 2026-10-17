@@ -591,3 +591,16 @@ describe('createCanvasRuntime insets', () => {
     h.rt.dispose();
   });
 });
+
+describe('createCanvasRuntime initial camera', () => {
+  it('starts at the given camera instead of fitting the first page', () => {
+    const initialCamera = { x: 123, y: 456, scale: 0.42 };
+    const h = harness({ initialCamera });
+    h.rt.controller.resize(800, 600, 1);
+    h.rt.controller.setFrames([{ id: 'f0000000000000001', pageId: 'p', x: 0, y: 0, width: 1440, viewportHeight: 900 }]);
+    h.rt.controller.setManifest({ version: 2, pages: [{ pageId: 'p', name: '/', route: '/', renders: {} }] });
+    h.runFrames();
+    expect(h.rt.controller.camera).toEqual(initialCamera);
+    h.rt.dispose();
+  });
+});

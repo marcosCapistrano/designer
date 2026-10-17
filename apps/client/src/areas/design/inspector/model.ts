@@ -10,7 +10,7 @@ export interface InspectorState {
   error: string | null;
   targetId: string;
   device: Device;
-  /** Control keys (`section:prop`) with an edit in flight. */
+  /** Edits in flight, as `targetId␀section:prop`; read them for one target with pendingFor. */
   pending: ReadonlySet<string>;
   /** The last failed edit's message, by section. */
   errors: Readonly<Record<string, string>>;
@@ -22,6 +22,14 @@ export interface InspectorModelDeps {
   app: string;
   api: Pick<ApiClient, 'designSelection' | 'editDesign'>;
   onResult(result: DesignEditResult): void;
+}
+
+const SEP = '\u0000';
+
+/** The control keys (`section:prop`) with an edit in flight for one target. */
+export function pendingFor(state: InspectorState, targetId: string): ReadonlySet<string> {
+  const prefix = targetId + SEP;
+  return new Set([...state.pending].filter((k) => k.startsWith(prefix)).map((k) => k.slice(prefix.length)));
 }
 
 const message = (error: unknown, fallback: string): string => (error instanceof Error && error.message ? error.message : fallback);
@@ -61,14 +69,19 @@ export function createInspectorModel({ app, api, onResult }: InspectorModelDeps)
     const info = state.info;
     if (!info) return;
     const section = key.split(':')[0]!;
+    const pendingKey = state.targetId + SEP + key;
+    // The selection this edit belongs to: if the user has moved on when it fails, the failure is not shown on
+    // the new selection (a reload of the same nodes at a new revision still counts as the same selection).
+    const at = current;
     const { [section]: _cleared, ...errors } = state.errors;
-    set({ pending: new Set([...state.pending, key]), errors });
-    const done = (): ReadonlySet<string> => new Set([...state.pending].filter((k) => k !== key));
+    set({ pending: new Set([...state.pending, pendingKey]), errors });
+    const done = (): ReadonlySet<string> => new Set([...state.pending].filter((k) => k !== pendingKey));
     try {
       const result = await api.editDesign(app, info.revision, ops, info.selection);
       set({ pending: done() });
       onResult(result);
     } catch (error) {
+      if (!sameNodes(at, current)) { set({ pending: done() }); return; }
       set({ pending: done(), errors: { ...state.errors, [section]: message(error, 'Edit failed.') }, epoch: state.epoch + 1 });
       // Another edit (say, from chat) moved the design on: read the selection again at the new revision.
       if (error instanceof ApiError && error.status === 409) void select(current);

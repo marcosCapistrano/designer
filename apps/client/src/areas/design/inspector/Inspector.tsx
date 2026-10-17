@@ -9,7 +9,7 @@ import { CloseIcon } from '../../../ui/icons.js';
 import { BorderSection, FillSection, PropsSection, RawSection, SizeSection, SpacingSection, TextSection, TypographySection, VisibilitySection } from './sections.js';
 import type { SectionProps } from './sections.js';
 import type { SideKind } from './values.js';
-import { createInspectorModel } from './model.js';
+import { createInspectorModel, pendingFor } from './model.js';
 import type { InspectorState } from './model.js';
 import './inspector.css';
 
@@ -98,7 +98,7 @@ export function InspectorView(p: InspectorViewProps): JSX.Element {
             </button>
             {open && (
               <div class="inspector-section-body">
-                <View target={target} device={state.device} epoch={state.epoch} pending={state.pending} locked={p.locked} linked={p.linked} onLink={p.onLink} onEdit={p.onEdit} />
+                <View target={target} device={state.device} epoch={state.epoch} pending={pendingFor(state, target.id)} locked={p.locked} linked={p.linked} onLink={p.onLink} onEdit={p.onEdit} />
                 {state.errors[s.id] && <p class="inspector-section-error" role="alert" data-testid={`section-${s.id}-error`}>{state.errors[s.id]}</p>}
               </div>
             )}
@@ -120,9 +120,11 @@ export interface InspectorProps {
   onClose(): void;
   /** The active target's name ("h3", "AdListCard"), or null while none is loaded. */
   onLabel?(label: string | null): void;
+  /** Whether any of its edits is in flight. */
+  onPending?(busy: boolean): void;
 }
 
-export function Inspector({ app, api, selection, revision, disabled, onResult, onClose, onLabel }: InspectorProps): JSX.Element {
+export function Inspector({ app, api, selection, revision, disabled, onResult, onClose, onLabel, onPending }: InspectorProps): JSX.Element {
   const [, rerender] = useState(0);
   const resultRef = useRef(onResult);
   resultRef.current = onResult;
@@ -135,6 +137,10 @@ export function Inspector({ app, api, selection, revision, disabled, onResult, o
   const active = state.info?.targets.find((t) => t.id === state.targetId);
   const label = active ? (active.tag ?? active.component ?? active.kind) : null;
   useEffect(() => { onLabel?.(label); }, [label, onLabel]);
+  const busy = state.pending.size > 0;
+  useEffect(() => { onPending?.(busy); }, [busy, onPending]);
+  // Unmounting mid-edit must not leave the area thinking an edit is still in flight.
+  useEffect(() => () => onPending?.(false), [onPending]);
   return (
     <InspectorView
       state={state}

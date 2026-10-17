@@ -11,9 +11,10 @@ import { ImportFormView, importRequest } from './ImportSheet.js';
 import { ImportSheet } from './ImportSheet.js';
 import { Inspector } from './inspector/Inspector.js';
 import { PreviewBanner } from './PreviewBanner.js';
-import { TopBar } from './TopBar.js';
+import { TopBar, ZoomReadout, ZoomReadoutView } from './TopBar.js';
+import { createValueStore } from '../../ui/value-store.js';
 
-const SHALLOW = new Set<unknown>([CanvasView, Inspector, ChatSheet, ImportSheet, Menu, Modal]);
+const SHALLOW = new Set<unknown>([CanvasView, Inspector, ChatSheet, ImportSheet, Menu, Modal, TopBar, ZoomReadout]);
 const live = { manifest: async () => ({ version: 2 as const, pages: [] }), tile: async () => new Blob(), hitMap: async () => [], subscribe: () => () => {} };
 const previewSource = { ...live };
 const selection: NodeSelection = { pageId: 'p', device: 'base', nodeIds: ['n1'] };
@@ -21,14 +22,14 @@ const proposal: DesignProposal = { id: 'prop1', revision: 'r1', descriptions: ['
 
 function render(extra: Partial<DesignAreaViewProps> = {}) {
   const h = {
-    onSelect: vi.fn(), onResult: vi.fn(), onApply: vi.fn(), onCancel: vi.fn(), onUndo: vi.fn(), onRedo: vi.fn(), onFit: vi.fn(), onZoom: vi.fn(),
+    onSelect: vi.fn(), onResult: vi.fn(), onInspectorResult: vi.fn(), onApply: vi.fn(), onCancel: vi.fn(), onUndo: vi.fn(), onRedo: vi.fn(), onFit: vi.fn(), onCamera: vi.fn(),
     onArea: vi.fn(), onImportOpen: vi.fn(), onImported: vi.fn(), onRetried: vi.fn(), onDismissToast: vi.fn(), onDetails: vi.fn(),
-    onCloseInspector: vi.fn(), onSelectionLabel: vi.fn(), onChatBusy: vi.fn(), onSampleBusy: vi.fn(), onPreviewFocus: vi.fn(), onError: vi.fn(),
+    onCloseInspector: vi.fn(), onInspectorBusy: vi.fn(), onSelectionLabel: vi.fn(), onChatBusy: vi.fn(), onSampleBusy: vi.fn(), onPreviewFocus: vi.fn(), onError: vi.fn(),
   };
   const p: DesignAreaViewProps = {
     app: 'adhunters-v7', api: {} as never, ws: {} as never, live, cache: {} as never, previewCache: {} as never, frames: {} as never, previewFrames: {} as never,
     revision: 'r1', proposal: null, previewSource: null, selection: null, inspectorOpen: false, selectionLabel: null,
-    width: 1440, zoom: 25, busy: false, building: false, chatBusy: false, toasts: [], details: null, importOpen: false, fitRef: { current: null },
+    width: 1440, zoom: createValueStore(25), camera: null, busy: false, building: false, chatBusy: false, inspectorBusy: false, toasts: [], details: null, importOpen: false, fitRef: { current: null },
     ...h, ...extra,
   };
   const els = elements(DesignAreaView(p), [], SHALLOW);
@@ -110,8 +111,9 @@ describe('DesignAreaView status', () => {
 describe('TopBar', () => {
   const bar = (extra = {}) => {
     const h = { onArea: vi.fn(), onUndo: vi.fn(), onRedo: vi.fn(), onFit: vi.fn() };
-    const els = elements(TopBar({ app: 'adhunters-v7', area: 'design', canUndo: true, canRedo: false, zoom: 37, menu: [], ...h, ...extra }), [], SHALLOW);
-    return { ...h, get: (id: string) => byTestId(els, id) };
+    const zoom = createValueStore(37);
+    const els = elements(TopBar({ app: 'adhunters-v7', area: 'design', canUndo: true, canRedo: false, zoom, menu: [], ...h, ...extra }), [], SHALLOW);
+    return { ...h, zoom, els, get: (id: string) => byTestId(els, id) };
   };
   it('links back to all apps and names the app', () => {
     const b = bar();
@@ -122,12 +124,19 @@ describe('TopBar', () => {
     const b = bar();
     (props(b.get('topbar-area-build')).onClick as () => void)();
     (props(b.get('topbar-undo')).onClick as () => void)();
-    (props(b.get('topbar-fit')).onClick as () => void)();
     expect(b.onArea).toHaveBeenCalledWith('build');
     expect(b.onUndo).toHaveBeenCalled();
-    expect(b.onFit).toHaveBeenCalled();
-    expect(text(b.get('topbar-fit'))).toBe('37%');
     expect(props(b.get('topbar-redo')).disabled).toBe(true);
+    const readout = props(byType(b.els, ZoomReadout));
+    expect(readout.store).toBe(b.zoom);
+    expect(readout.onFit).toBe(b.onFit);
+  });
+  it('shows the zoom as a percentage and fits on tap', () => {
+    const onFit = vi.fn();
+    const els = elements(ZoomReadoutView({ value: 37, onFit }));
+    expect(text(byTestId(els, 'topbar-fit'))).toBe('37%');
+    (props(byTestId(els, 'topbar-fit')).onClick as () => void)();
+    expect(onFit).toHaveBeenCalled();
   });
 });
 
@@ -158,5 +167,63 @@ describe('import form', () => {
     expect(() => byTestId(react, 'import-file')).not.toThrow();
     (props(byTestId(react, 'import-retry')).onClick as () => void)();
     expect(h.onRetry).toHaveBeenCalled();
+  });
+});
+
+describe('DesignAreaView locks while something else is changing the design', () => {
+  const topbar = (v: ReturnType<typeof render>) => props(byType(v.els, TopBar));
+  it('locks the inspector and Undo/Redo while a chat turn runs', () => {
+    const v = render({ selection, inspectorOpen: true, chatBusy: true });
+    expect(props(byType(v.els, Inspector)).disabled).toBe(true);
+    expect(topbar(v).canUndo).toBe(false);
+    expect(topbar(v).canRedo).toBe(false);
+  });
+  it('keeps the inspector live but disables Undo/Redo while an inspector edit is in flight', () => {
+    const v = render({ selection, inspectorOpen: true, inspectorBusy: true });
+    expect(props(byType(v.els, Inspector)).disabled).toBe(false);
+    expect(topbar(v).canUndo).toBe(false);
+  });
+  it('enables Undo/Redo when nothing is busy', () => {
+    expect(topbar(render()).canUndo).toBe(true);
+  });
+});
+
+describe('DesignAreaView result routing', () => {
+  it('routes inspector results separately from chat results', () => {
+    const v = render({ selection, inspectorOpen: true });
+    expect(props(byType(v.els, Inspector)).onResult).toBe(v.onInspectorResult);
+    expect(props(byType(v.els, ChatSheet)).onResult).toBe(v.onResult);
+  });
+});
+
+describe('DesignAreaView inspector and chat share one column', () => {
+  const side = (v: ReturnType<typeof render>) => v.els.find((e) => String(props(e).class ?? '').includes('design-side'))!;
+  it('stacks the bottom-sheet inspector above chat in one column below 900 px', () => {
+    const v = render({ selection, inspectorOpen: true, width: 834 });
+    expect(String(props(side(v)).class)).toContain('design-side-stacked');
+    const kids = elements(props(side(v)).children as never, [], SHALLOW);
+    const sheet = kids.findIndex((e) => props(e)['data-testid'] === 'inspector-sheet');
+    const chat = kids.findIndex((e) => e.type === ChatSheet);
+    expect(sheet).toBeGreaterThanOrEqual(0);
+    expect(chat).toBeGreaterThan(sheet);
+  });
+  it('keeps the inspector in the same tree position on both sides, so rotating does not remount it', () => {
+    const wide = props(side(render({ selection, inspectorOpen: true, width: 1440 }))).children as unknown[];
+    const narrow = props(side(render({ selection, inspectorOpen: true, width: 834 }))).children as unknown[];
+    const sheetSlot = (children: unknown[]) => children.findIndex((c) => !!c && typeof c === 'object' && props(c as never)['data-testid'] === 'inspector-sheet');
+    expect(sheetSlot(wide)).toBe(0);
+    expect(sheetSlot(narrow)).toBe(0);
+    expect((wide[0] as { type: unknown }).type).toBe((narrow[0] as { type: unknown }).type);
+  });
+});
+
+describe('DesignAreaView camera', () => {
+  it('starts the canvas at the last camera and reports camera changes, without a zoom number in its own props', () => {
+    const camera = { x: 1, y: 2, scale: 0.3 };
+    const v = render({ camera });
+    const canvas = props(byType(v.els, CanvasView));
+    expect(canvas.initialCamera).toBe(camera);
+    expect(canvas.onCamera).toBe(v.onCamera);
+    expect(props(byType(v.els, TopBar)).zoom).toBeDefined();
   });
 });
