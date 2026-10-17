@@ -404,6 +404,12 @@ describe('BasePainter frame handles', () => {
     expect(calls.filter(c => c.m === 'fillRect' && c.fill === '#9aa0a6').map(c => c.a)).toContainEqual([720, 438, 24, 24]);
   });
 
+  it('draws no handles when the frames are not editable', () => {
+    const { ctx, calls } = fakeCtx();
+    new BasePainter(ctx, tilesOf()).paint(input([frame()], { camera: { x: 0, y: 0, scale: 0.5 }, handles: false }));
+    expect(calls.filter(c => c.m === 'fillRect' && c.fill === '#9aa0a6')).toEqual([]);
+  });
+
   it('draws the readout next to the handle being dragged', () => {
     const { ctx, calls } = fakeCtx();
     const f = frame({ w: 1640, render: null, pending: true, h: 900 });

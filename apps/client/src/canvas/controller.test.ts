@@ -86,7 +86,7 @@ function deferredMaps() {
   return { hitMaps, pending };
 }
 
-function harness(now: () => number = () => 0, hitMaps: ControllerDeps['hitMaps'] = defaultHitMaps) {
+function harness(now: () => number = () => 0, hitMaps: ControllerDeps['hitMaps'] = defaultHitMaps, extra: Partial<ControllerDeps> = {}) {
   const q: (() => void)[] = [];
   const flush = () => {
     while (q.length) q.shift()!();
@@ -109,12 +109,13 @@ function harness(now: () => number = () => 0, hitMaps: ControllerDeps['hitMaps']
     onSelect,
     onFramesChange,
     onFrameMenu,
+    ...extra,
   });
   return { c, q, flush, base, overlay, tiles, onSelect, onFramesChange, onFrameMenu };
 }
 
-function ready(now: () => number = () => 0, hitMaps?: ControllerDeps['hitMaps']) {
-  const h = harness(now, hitMaps);
+function ready(now: () => number = () => 0, hitMaps?: ControllerDeps['hitMaps'], extra?: Partial<ControllerDeps>) {
+  const h = harness(now, hitMaps, extra);
   h.c.resize(800, 600, 1);
   h.c.setManifest(M);
   h.c.setFrames(MF);
@@ -934,6 +935,29 @@ describe('CanvasController frame drags', () => {
     c.pointer(pen('up', 160, 30));
     expect(onFrameMenu).not.toHaveBeenCalled();
     expect(baseOf(c)).toMatchObject({ x: 64 });
+  });
+
+  it('with frames not editable, handles pan instead, a label tap opens no menu, and no handles are drawn', () => {
+    const h = ready(() => 0, undefined, { framesEditable: false });
+    h.c.setCamera({ x: 1000, y: -40, scale: 1 });
+    h.flush();
+    const { c, flush, base, onFramesChange, onFrameMenu } = h;
+    const before = c.frames.map((f) => ({ ...f }));
+    const touch = (kind: PointerIn['kind'], x: number, y: number): PointerIn => ({ ...pen(kind, x, y), pointerType: 'touch' });
+    c.pointer(touch('down', 450, 500));
+    c.pointer(touch('move', 550, 500));
+    c.pointer(touch('up', 550, 500));
+    expect(c.camera.x).toBe(900);
+    c.pointer(pen('down', 100, 30));
+    c.pointer(pen('up', 100, 30));
+    expect(onFrameMenu).not.toHaveBeenCalled();
+    expect(onFramesChange).not.toHaveBeenCalled();
+    expect(c.frames.map((f) => ({ ...f }))).toEqual(before);
+    base.calls.length = 0;
+    c.setCamera({ x: 1000, y: -40, scale: 1 });
+    c.panBy(1, 0);
+    flush();
+    expect(base.calls.filter((call) => call.m === 'fillRect' && call.fill === '#9aa0a6')).toEqual([]);
   });
 
   it('a tap on a resize handle or a cancelled press does not open the menu', () => {

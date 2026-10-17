@@ -1,12 +1,24 @@
 // Where the canvas keeps its frame layout. The hub stores it per app
 // (ServerFrameStore in net/frame-store.ts); MemoryFrameStore serves the dev
-// harness and tests with the default layout of a manifest.
+// harness and tests with the default layout of a manifest. Preview canvases
+// get stores that never save: previewFrameStore lays out exactly the sizes a
+// preview manifest was rendered at, and readOnlyFrameStore shows a stored
+// layout without writing to it.
 
-import { defaultFrames, sizeKey } from '@hub/protocol';
+import { DEFAULT_FRAME_SIZES, FRAME_GAP, ROW_GAP, defaultFrames, parseSizeKey, sizeKey } from '@hub/protocol';
 import type { CanvasFrame, FrameSize, RenderManifest } from '@hub/protocol';
 
+/**
+ * A loaded layout. `provisional` means the store placed some frames without knowing their pages'
+ * heights and did not keep them; the canvas asks again when a new manifest arrives.
+ */
+export interface FrameLayout {
+  frames: CanvasFrame[];
+  provisional?: boolean;
+}
+
 export interface FrameStore {
-  load(): Promise<CanvasFrame[]>;
+  load(): Promise<FrameLayout>;
   /** Replaces the whole layout; resolves with the layout as stored. */
   save(frames: readonly CanvasFrame[]): Promise<CanvasFrame[]>;
 }
@@ -33,16 +45,52 @@ export class MemoryFrameStore implements FrameStore {
     this.newId = newId;
   }
 
-  async load(): Promise<CanvasFrame[]> {
+  async load(): Promise<FrameLayout> {
     if (this.frames === null) {
       const m = await this.manifest;
       this.frames ??= defaultFrames(m.pages, [], (pageId, size) => frameHeightIn(m, pageId, size), this.newId);
     }
-    return this.frames.map((f) => ({ ...f }));
+    return { frames: this.frames.map((f) => ({ ...f })) };
   }
 
   async save(frames: readonly CanvasFrame[]): Promise<CanvasFrame[]> {
     this.frames = frames.map((f) => ({ ...f }));
     return this.frames.map((f) => ({ ...f }));
   }
+}
+
+/**
+ * A preview manifest's own layout: one row per page, one frame per size the page was rendered at
+ * (widest first), so the preview shows what was rendered rather than sizes it lacks. A page with no
+ * renders at all gets the default sizes. Saves are ignored.
+ */
+export function previewFrameStore(m: RenderManifest, newId: () => string = randomFrameId): FrameStore {
+  const frames: CanvasFrame[] = [];
+  let y = 0;
+  for (const page of m.pages) {
+    const rendered = Object.keys(page.renders)
+      .map(parseSizeKey)
+      .filter((s): s is FrameSize => s !== null)
+      .sort((a, b) => b.width - a.width || b.viewportHeight - a.viewportHeight);
+    let x = 0;
+    let rowHeight = 0;
+    for (const size of rendered.length > 0 ? rendered : DEFAULT_FRAME_SIZES) {
+      frames.push({ id: newId(), pageId: page.pageId, x, y, width: size.width, viewportHeight: size.viewportHeight });
+      x += size.width + FRAME_GAP;
+      rowHeight = Math.max(rowHeight, frameHeightIn(m, page.pageId, size));
+    }
+    y += rowHeight + ROW_GAP;
+  }
+  return {
+    load: async () => ({ frames: frames.map((f) => ({ ...f })) }),
+    save: async (next) => next.map((f) => ({ ...f })),
+  };
+}
+
+/** `store`'s layout, shown without ever being written back. */
+export function readOnlyFrameStore(store: FrameStore): FrameStore {
+  return {
+    load: () => store.load(),
+    save: async (next) => next.map((f) => ({ ...f })),
+  };
 }

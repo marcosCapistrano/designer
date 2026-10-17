@@ -4,10 +4,10 @@ import type { CanvasFrame, Device, PageRender, RenderManifest } from '@hub/proto
 import type { BlobCache } from './cache.js';
 import { liveKeys } from './cache.js';
 import { ApiError } from '../net/api.js';
-import { createCanvasRuntime } from './runtime.js';
+import { SAVE_ERROR_MS, createCanvasRuntime } from './runtime.js';
 import type { CanvasRuntimeOptions } from './runtime.js';
 import type { TileSource } from './source.js';
-import type { FrameStore } from './frames.js';
+import type { FrameLayout, FrameStore } from './frames.js';
 import { fakeCtx, framesFor } from './test-utils.js';
 
 const settle = () => new Promise<void>((r) => setTimeout(r, 0));
@@ -68,7 +68,7 @@ function controlledSource() {
     }
   };
   const frameStore = {
-    load: vi.fn(async (): Promise<CanvasFrame[]> => framesFor(known)),
+    load: vi.fn(async (): Promise<FrameLayout> => ({ frames: framesFor(known) })),
     save: vi.fn(async (f: readonly CanvasFrame[]) => [...f]),
   } satisfies FrameStore;
   const push = (m: RenderManifest) => {
@@ -353,6 +353,62 @@ describe('createCanvasRuntime frames', () => {
     expect(h.rt.controller.frames.map((f) => f.pageId)).toEqual(['b', 'b', 'b']);
   });
 
+  it('reloads a provisional layout on each manifest until the store returns a saved one', async () => {
+    const frames = framesFor(manifestOf('a'));
+    const store = {
+      load: vi
+        .fn(async (): Promise<FrameLayout> => ({ frames: frames.map((f) => ({ ...f, y: f.y + 5000 })), provisional: false }))
+        .mockResolvedValueOnce({ frames, provisional: true })
+        .mockResolvedValueOnce({ frames, provisional: true }),
+      save: vi.fn(async (f: readonly CanvasFrame[]) => [...f]),
+    };
+    const h = harness({ frames: store });
+    await settle();
+    expect(store.load).toHaveBeenCalledTimes(1);
+    // The pages are covered, so only the provisional flag asks for the layout again.
+    h.resolveManifest(manifestOf('a'));
+    await settle();
+    expect(store.load).toHaveBeenCalledTimes(2);
+
+    // Renders landed: the store now saves and returns the layout stacked from the real heights.
+    h.push(manifestOf('a'));
+    await settle();
+    expect(store.load).toHaveBeenCalledTimes(3);
+    expect(h.rt.controller.frames.map((f) => f.y)).toEqual(frames.map((f) => f.y + 5000));
+
+    h.push(manifestOf('a'));
+    await settle();
+    expect(store.load).toHaveBeenCalledTimes(3);
+  });
+
+  it('does not reload a provisional layout over a change the user made', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const frames = framesFor(manifestOf('a'));
+      const store = {
+        load: vi.fn(async (): Promise<FrameLayout> => ({ frames, provisional: true })),
+        save: vi.fn(async (f: readonly CanvasFrame[]) => [...f]),
+      };
+      const h = harness({ frames: store });
+      await vi.advanceTimersByTimeAsync(0);
+      h.resolveManifest(manifestOf('a'));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(store.load).toHaveBeenCalledTimes(2); // the first manifest re-checks the provisional layout
+      h.rt.changeFrames(frames.map((f) => ({ ...f, x: f.x + 8 })));
+      h.push(manifestOf('a'));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(store.load).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(300);
+      expect(store.save).toHaveBeenCalledTimes(1);
+      // The saved change is the layout now; it is not provisional any more.
+      h.push(manifestOf('a'));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(store.load).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('shows an error when the frames cannot be loaded, and a manifest does not hide it', async () => {
     const failing: FrameStore = {
       load: async () => {
@@ -437,6 +493,22 @@ describe('createCanvasRuntime frame saves', () => {
     }
   });
 
+  it('a save error clears by itself after SAVE_ERROR_MS', async () => {
+    try {
+      const h = await ready();
+      h.frameStore.save.mockRejectedValueOnce(new Error('HTTP 409'));
+      widen(h, 100);
+      await vi.advanceTimersByTimeAsync(300);
+      expect(h.onError).toHaveBeenLastCalledWith('Could not save the canvas frames: HTTP 409');
+      await vi.advanceTimersByTimeAsync(SAVE_ERROR_MS - 1);
+      expect(h.onError).toHaveBeenLastCalledWith('Could not save the canvas frames: HTTP 409');
+      await vi.advanceTimersByTimeAsync(1);
+      expect(h.onError).toHaveBeenLastCalledWith(null);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('a menu change goes to the controller and the save; a stale-layout refusal shows its message, reloads, and the next change saves', async () => {
     try {
       const h = await ready();
@@ -462,6 +534,19 @@ describe('createCanvasRuntime frame saves', () => {
       expect(h.frameStore.save).toHaveBeenCalledTimes(2);
       expect(h.frameStore.save.mock.calls[1]![0]).toHaveLength(4);
       expect(h.onError).toHaveBeenLastCalledWith(null);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('with frames not editable, a handle drag changes and saves nothing', async () => {
+    try {
+      const h = await ready({ framesEditable: false });
+      const before = h.rt.controller.canvasLayout.map((f) => ({ ...f }));
+      widen(h, 100);
+      await vi.advanceTimersByTimeAsync(300);
+      expect(h.rt.controller.canvasLayout).toEqual(before);
+      expect(h.frameStore.save).not.toHaveBeenCalled();
     } finally {
       vi.useRealTimers();
     }

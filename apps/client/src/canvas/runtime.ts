@@ -33,6 +33,8 @@ export interface CanvasRuntimeOptions {
   onSelect?: (s: NodeSelection | null) => void;
   /** A tap on a frame's label band: the frame and the screen point tapped. */
   onFrameMenu?: (frameId: string, screen: Point) => void;
+  /** Whether frames can be moved, resized or opened in the menu (default true); previews turn it off. */
+  framesEditable?: boolean;
   /** The manifest or frames error to show, or null to clear it. */
   onError: (message: string | null) => void;
   /** Passed through to the TileLoader (tests inject a decoder). */
@@ -49,6 +51,8 @@ export interface CanvasRuntime {
 
 /** A changed layout is saved once it has been still this long; only the last of a burst is sent. */
 export const SAVE_DEBOUNCE_MS = 300;
+/** A refused save's message is shown this long (or until a later save lands). */
+export const SAVE_ERROR_MS = 6000;
 
 function errorMessage(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
@@ -91,6 +95,7 @@ export function createCanvasRuntime(opts: CanvasRuntimeOptions): CanvasRuntime {
     onSelect: opts.onSelect,
     onFramesChange: (frames) => framesChanged(frames),
     onFrameMenu: opts.onFrameMenu,
+    framesEditable: opts.framesEditable,
   });
 
   // Every manifest, initial or subscribed, goes through apply(). A request's
@@ -105,10 +110,13 @@ export function createCanvasRuntime(opts: CanvasRuntimeOptions): CanvasRuntime {
   const report = (): void => opts.onError(manifestError ?? framesError ?? saveError);
 
   // The layout comes from the frames store. A page that is new to the manifest (an import) has
-  // frames only once the store has laid it out, so such a manifest reloads the layout. A manifest
-  // arriving while a load runs is checked when that load lands, so each manifest costs at most one load.
+  // frames only once the store has laid it out, so such a manifest reloads the layout. So does any
+  // manifest while the layout is provisional (placed before the pages' heights were known), unless
+  // the user has changed it since: their save makes it the stored layout. A manifest arriving while
+  // a load runs is checked when that load lands, so each manifest costs at most one load.
   let manifest: RenderManifest | null = null;
   let layout: readonly CanvasFrame[] | null = null;
+  let provisional = false;
   let loading = false;
   let recheck = false;
   const uncovered = (): boolean => {
@@ -116,20 +124,22 @@ export function createCanvasRuntime(opts: CanvasRuntimeOptions): CanvasRuntime {
     const covered = new Set(layout.map((f) => f.pageId));
     return manifest.pages.some((p) => !covered.has(p.pageId));
   };
+  const stale = (): boolean => uncovered() || (provisional && unsaved === null && saveTimer === null);
   const loadFrames = (): void => {
     loading = true;
     recheck = false;
     opts.frames.load().then(
-      (frames) => {
+      (loaded) => {
         loading = false;
         if (disposed) return;
-        layout = frames;
-        controller.setFrames(frames);
+        layout = loaded.frames;
+        provisional = loaded.provisional === true;
+        controller.setFrames(loaded.frames);
         if (framesError !== null) {
           framesError = null;
           report();
         }
-        if (recheck && uncovered()) loadFrames();
+        if (recheck && stale()) loadFrames();
       },
       (e: unknown) => {
         loading = false;
@@ -143,6 +153,21 @@ export function createCanvasRuntime(opts: CanvasRuntimeOptions): CanvasRuntime {
   // shows why and reloads the stored layout, dropping a change that was still waiting.
   let unsaved: CanvasFrame[] | null = null;
   let saveTimer: ReturnType<typeof setTimeout> | null = null;
+  let saveErrorTimer: ReturnType<typeof setTimeout> | null = null;
+  const setSaveError = (message: string | null): void => {
+    if (saveErrorTimer !== null) clearTimeout(saveErrorTimer);
+    saveErrorTimer = null;
+    saveError = message;
+    if (message !== null) {
+      saveErrorTimer = setTimeout(() => {
+        saveErrorTimer = null;
+        if (disposed) return;
+        saveError = null;
+        report();
+      }, SAVE_ERROR_MS);
+    }
+    report();
+  };
   const save = (): void => {
     saveTimer = null;
     const frames = unsaved;
@@ -151,22 +176,22 @@ export function createCanvasRuntime(opts: CanvasRuntimeOptions): CanvasRuntime {
     opts.frames.save(frames).then(
       () => {
         if (disposed || saveError === null) return;
-        saveError = null;
-        report();
+        setSaveError(null);
       },
       (e: unknown) => {
         if (disposed) return;
         if (saveTimer !== null) clearTimeout(saveTimer);
         saveTimer = null;
         unsaved = null;
-        saveError = `Could not save the canvas frames: ${errorMessage(e)}`;
-        report();
+        setSaveError(`Could not save the canvas frames: ${errorMessage(e)}`);
         loadFrames();
       },
     );
   };
   const framesChanged = (frames: CanvasFrame[]): void => {
     layout = frames;
+    // The save stores the whole layout, provisional frames included, as the user now sees it.
+    provisional = false;
     unsaved = frames;
     if (saveTimer !== null) clearTimeout(saveTimer);
     saveTimer = setTimeout(save, SAVE_DEBOUNCE_MS);
@@ -175,7 +200,7 @@ export function createCanvasRuntime(opts: CanvasRuntimeOptions): CanvasRuntime {
   const framesFor = (m: RenderManifest): void => {
     manifest = m;
     if (loading) recheck = true;
-    else if (layout === null || uncovered()) loadFrames();
+    else if (layout === null || stale()) loadFrames();
   };
 
   const apply = (m: unknown, ticket: number): void => {
@@ -227,6 +252,7 @@ export function createCanvasRuntime(opts: CanvasRuntimeOptions): CanvasRuntime {
         save();
       }
       disposed = true;
+      if (saveErrorTimer !== null) clearTimeout(saveErrorTimer);
       unsubscribe();
       loader.dispose();
     },

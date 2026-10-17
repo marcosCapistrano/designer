@@ -130,10 +130,13 @@ export class ApiClient {
   cancelSourcePreview(app: string,id: string): Promise<unknown> { return this.json(`${appPath(app)}/design/source-preview/cancel`, {method:'POST',body:{id}}); }
   stopSourcePreview(app: string): Promise<StopResponse> { return this.json(`${appPath(app)}/design/source-preview/stop`, {method:'POST'}); }
 
-  /** The app's canvas layout; the hub lays out pages that have no frames yet. */
-  async designFrames(app: string): Promise<CanvasFrame[]> {
-    const res = await this.json<{ frames: CanvasFrame[] }>(`${appPath(app)}/design/frames`);
-    return res.frames;
+  /**
+   * The app's canvas layout; the hub lays out pages that have no frames yet. `provisional` is set while some of
+   * those were placed before their pages' heights were known, and so were not saved: ask again after a render.
+   */
+  async designFrames(app: string): Promise<{ frames: CanvasFrame[]; provisional: boolean }> {
+    const res = await this.json<{ frames: CanvasFrame[]; provisional?: boolean }>(`${appPath(app)}/design/frames`);
+    return { frames: res.frames, provisional: res.provisional === true };
   }
 
   /** Replaces the app's canvas layout; resolves with the layout the hub stored. */

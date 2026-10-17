@@ -18,9 +18,14 @@ describe('ServerFrameStore', () => {
   it("load GETs the app's frames", async () => {
     const { calls, fetchFn } = fakeFetch(200, { frames: [frame] });
     const store = new ServerFrameStore('my app', new ApiClient({ fetchFn }));
-    expect(await store.load()).toEqual([frame]);
+    expect(await store.load()).toEqual({ frames: [frame], provisional: false });
     expect(calls[0]![0]).toBe('/api/apps/my%20app/design/frames');
     expect(calls[0]![1]?.method).toBe('GET');
+  });
+
+  it('load passes on a provisional layout', async () => {
+    const { fetchFn } = fakeFetch(200, { frames: [frame], provisional: true });
+    expect(await new ServerFrameStore('demo', new ApiClient({ fetchFn })).load()).toEqual({ frames: [frame], provisional: true });
   });
 
   it('save PUTs { frames } and returns the list the server kept', async () => {

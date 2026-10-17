@@ -51,6 +51,8 @@ export interface ControllerDeps {
   onFramesChange?: (frames: CanvasFrame[]) => void;
   /** A tap (not a drag) on a frame's label band: the frame and the tap's screen point, to open its menu at. */
   onFrameMenu?: (frameId: string, screen: Point) => void;
+  /** Whether frames can be moved, resized or opened in the menu (default true). Off, handles are neither drawn nor hit. */
+  framesEditable?: boolean;
 }
 
 /** Where the painted layers are shown: translate by (x, y) CSS px, then scale about the layer origin. */
@@ -342,6 +344,7 @@ export class CanvasController {
       zoom,
       smoothing,
       readout: this.drag?.moved ? { frameId: this.drag.frameId, kind: this.drag.kind } : null,
+      handles: this.deps.framesEditable !== false,
     };
     // While zooming, the last painted image is scaled on the compositor; the repaint comes at settle.
     const preview = smoothing ? null : this.previewOf(input);
@@ -566,7 +569,7 @@ export class CanvasController {
       this.cancelDrag();
       if (ev.kind === 'cancel') return true;
     }
-    if (ev.kind !== 'down' || ev.button !== 0) return false;
+    if (ev.kind !== 'down' || ev.button !== 0 || this.deps.framesEditable === false) return false;
     if (this.gestures.holds(ev.id)) this.resetGestures();
     if (this.gestures.active) return false;
     const hit = hitHandle(this.layout, screenToWorld(this.cam, ev), this.cam.scale);

@@ -1,6 +1,6 @@
 // The canvas component: owns the two paint layers, wires DOM events into the
-// controller, and renders the tool toolbar. Source, frames, cache, onSelect and
-// debug are read once at mount; the app passes stable values.
+// controller, and renders the tool toolbar. Source, frames, framesEditable, cache,
+// onSelect and debug are read once at mount; the app passes stable values.
 
 import { useEffect, useRef, useState } from 'preact/hooks';
 import type { JSX } from 'preact';
@@ -29,6 +29,11 @@ export interface CanvasViewProps {
   cache: BlobCache;
   /** The frame layout to draw the manifest's pages in. */
   frames: FrameStore;
+  /**
+   * Whether frames can be moved, resized and opened in the frame menu (default true). Preview
+   * canvases turn it off: their manifest is a fixed snapshot, so a change there could not render.
+   */
+  framesEditable?: boolean;
   onSelect?: (s: NodeSelection | null) => void;
   debug?: boolean;
 }
@@ -78,7 +83,7 @@ function menuPanelStyle(at: { x: number; y: number }, root: HTMLElement | null):
   return `position:absolute;left:${left}px;top:${top}px;width:${width}px;max-height:${h - top - 8}px;overflow-y:auto;box-sizing:border-box;background:#fff;border-radius:10px;box-shadow:0 2px 12px rgba(0,0,0,.3);touch-action:pan-y`;
 }
 
-export function CanvasView({ source, cache, frames, onSelect, debug = false }: CanvasViewProps): JSX.Element {
+export function CanvasView({ source, cache, frames, framesEditable = true, onSelect, debug = false }: CanvasViewProps): JSX.Element {
   const rootRef = useRef<HTMLDivElement>(null);
   const layersRef = useRef<HTMLDivElement>(null);
   const baseRef = useRef<HTMLCanvasElement>(null);
@@ -131,6 +136,7 @@ export function CanvasView({ source, cache, frames, onSelect, debug = false }: C
       onSelect,
       onError: setError,
       onFrameMenu: (frameId, p) => setMenu({ frameId, x: p.x, y: p.y }),
+      framesEditable,
     });
     const { controller, loader } = runtime;
     runtimeRef.current = runtime;
@@ -270,6 +276,8 @@ export function CanvasView({ source, cache, frames, onSelect, debug = false }: C
             data-testid="frame-menu-panel"
             style={menuPanelStyle(menu, rootRef.current)}
             onPointerDown={(e) => e.stopPropagation()}
+            // The canvas zooms on wheel; over the menu the wheel scrolls the menu instead.
+            onWheel={(e) => e.stopPropagation()}
           >
             <FrameMenu
               key={menuFrame.id}

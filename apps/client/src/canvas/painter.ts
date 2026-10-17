@@ -26,6 +26,8 @@ export interface PaintInput {
   smoothing: boolean;
   /** The handle being dragged, whose readout (size and style tier) is drawn next to it. */
   readout?: Readout | null;
+  /** Whether frame handles are drawn (default true); off where frames cannot be changed. */
+  handles?: boolean;
 }
 
 export interface Readout {
@@ -91,6 +93,7 @@ interface Pass {
   zoom: Zoom;
   smoothing: boolean;
   readout: Readout | null;
+  handles: boolean;
 }
 
 interface Counts {
@@ -239,7 +242,7 @@ export class BasePainter {
       }
     }
 
-    const pass: Pass = { cam, s, dpr: input.dpr, width, frames: input.frames, zoom: input.zoom, smoothing: input.smoothing, readout };
+    const pass: Pass = { cam, s, dpr: input.dpr, width, frames: input.frames, zoom: input.zoom, smoothing: input.smoothing, readout, handles: input.handles !== false };
     const counts: Counts = { tilesDrawn: 0, missing: 0 };
     for (const r of regions) this.paintRegion(target, r, pass, counts);
 
@@ -336,7 +339,7 @@ export class BasePainter {
           ctx.textBaseline = 'bottom';
           ctx.fillText(frameLabel(frame), fr.x, fr.y - 6 * dpr);
         }
-        if (cam.scale >= LABEL_MIN_SCALE) paintHandles(ctx, r, fr, handleYs(frame, cam, dpr), dpr);
+        if (pass.handles && cam.scale >= LABEL_MIN_SCALE) paintHandles(ctx, r, fr, handleYs(frame, cam, dpr), dpr);
       }
       if (pass.readout !== null) paintReadout(ctx, pass, pass.readout);
     } finally {
