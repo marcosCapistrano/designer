@@ -9,3 +9,6 @@ export function panelLayout(width: number, inspectorOpen: boolean): PanelLayout 
   if (!inspectorOpen) return { inspector: 'none', chatDocked: false };
   return width >= INSPECTOR_BREAKPOINT ? { inspector: 'right', chatDocked: true } : { inspector: 'bottom', chatDocked: false };
 }
+
+/** The top bar (56px) above, the chat bar (64px) and tool pill below: fits keep frames out from under them. */
+export const CANVAS_INSETS = { top: 56, right: 0, bottom: 136, left: 0 } as const;

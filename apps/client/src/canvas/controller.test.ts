@@ -4,7 +4,7 @@ import type { CanvasFrame, Device, HitBox, PageRender, RenderManifest } from '@h
 import type { ControllerDeps } from './controller.js';
 import { CanvasController } from './controller.js';
 import { createNullCache } from './cache.js';
-import { fitRect } from './geom.js';
+import { fitRect, fitRectInset } from './geom.js';
 import { layoutBounds } from './layout.js';
 import type { PointerIn } from './gestures.js';
 import { TileLoader } from './loader.js';
@@ -1113,5 +1113,22 @@ describe('CanvasController fit-all and camera reports', () => {
     h.c.setFrames(MF);
     h.flush();
     expect(onCamera).toHaveBeenCalledWith(h.c.camera);
+  });
+});
+
+describe('CanvasController fits around the app chrome', () => {
+  const insets = { top: 56, right: 0, bottom: 136, left: 0 };
+  it('fits the first page inside the insets', () => {
+    const h = harness(undefined, undefined, { insets });
+    h.c.resize(800, 600, 1);
+    h.c.setManifest(M);
+    h.c.setFrames(MF);
+    h.flush();
+    expect(h.c.camera).toEqual(fitRectInset(layoutBounds(h.c.frames), { w: 800, h: 600 }, 40, insets));
+  });
+  it('fits all frames inside the insets', () => {
+    const h = ready(undefined, undefined, { insets });
+    h.c.fitAll();
+    expect(h.c.camera).toEqual(fitRectInset(layoutBounds(h.c.frames), { w: 800, h: 600 }, 40, insets));
   });
 });

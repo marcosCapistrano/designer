@@ -1,3 +1,4 @@
+import { fitRectInset } from './geom.js';
 import { describe, expect, it, vi } from 'vitest';
 import { DEVICE_VIEWPORT_HEIGHT, DEVICE_WIDTH } from '@hub/protocol';
 import type { CanvasFrame, Device, PageRender, RenderManifest } from '@hub/protocol';
@@ -573,6 +574,20 @@ describe('createCanvasRuntime camera reports', () => {
     h.rt.controller.resize(800, 600, 1);
     h.rt.controller.panBy(5, 0);
     expect(onCamera).toHaveBeenCalledWith(h.rt.controller.camera);
+    h.rt.dispose();
+  });
+});
+
+describe('createCanvasRuntime insets', () => {
+  it('passes the chrome insets to the controller’s fits', () => {
+    const insets = { top: 56, right: 0, bottom: 136, left: 0 };
+    const h = harness({ insets });
+    h.rt.controller.resize(800, 600, 1);
+    h.rt.controller.setFrames([{ id: 'f0000000000000001', pageId: 'p', x: 0, y: 0, width: 1440, viewportHeight: 900 }]);
+    h.rt.controller.setManifest({ version: 2, pages: [{ pageId: 'p', name: '/', route: '/', renders: {} }] });
+    h.rt.controller.fitAll();
+    expect(h.rt.controller.camera).toEqual(fitRectInset({ x: 0, y: 0, w: 1440, h: 900 }, { w: 800, h: 600 }, 40, insets));
+    expect(h.rt.controller.camera).not.toEqual(fitRectInset({ x: 0, y: 0, w: 1440, h: 900 }, { w: 800, h: 600 }, 40, { top: 0, right: 0, bottom: 0, left: 0 }));
     h.rt.dispose();
   });
 });

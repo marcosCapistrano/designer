@@ -3,6 +3,7 @@ import {
   clampScale,
   expandRect,
   fitRect,
+  fitRectInset,
   intersectRect,
   normalizeRect,
   panBy,
@@ -99,5 +100,26 @@ describe('geom', () => {
       w: 1,
       h: 1,
     });
+  });
+});
+
+describe('fitRectInset', () => {
+  it('fits a rect inside the view minus the chrome around it', () => {
+    const r = { x: 100, y: 200, w: 2000, h: 1000 };
+    const view = { w: 1280, h: 800 };
+    const insets = { top: 56, right: 0, bottom: 136, left: 0 };
+    const cam = fitRectInset(r, view, 40, insets);
+    const topLeft = worldToScreen(cam, { x: r.x, y: r.y });
+    const bottomRight = worldToScreen(cam, { x: r.x + r.w, y: r.y + r.h });
+    expect(topLeft.y).toBeGreaterThanOrEqual(56 + 40 - 1e-6);
+    expect(bottomRight.y).toBeLessThanOrEqual(800 - 136 - 40 + 1e-6);
+    expect(topLeft.x).toBeGreaterThanOrEqual(40 - 1e-6);
+    expect(bottomRight.x).toBeLessThanOrEqual(1280 - 40 + 1e-6);
+    // Centered in the free area.
+    expect((topLeft.y + bottomRight.y) / 2).toBeCloseTo(56 + (800 - 56 - 136) / 2, 6);
+  });
+  it('equals fitRect with no insets', () => {
+    const r = { x: 0, y: 0, w: 500, h: 500 };
+    expect(fitRectInset(r, { w: 800, h: 600 }, 40, { top: 0, right: 0, bottom: 0, left: 0 })).toEqual(fitRect(r, { w: 800, h: 600 }, 40));
   });
 });

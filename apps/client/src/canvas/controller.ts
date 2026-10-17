@@ -8,7 +8,8 @@ import type { CanvasFrame, HitBox, NodeSelection, PageRender, RenderManifest, Ti
 import {
   clampScale,
   expandRect,
-  fitRect,
+  fitRectInset,
+  NO_INSETS,
   intersectRect,
   normalizeRect,
   panBy as panCamera,
@@ -17,7 +18,7 @@ import {
   viewRect,
   zoomAt as zoomCamera,
 } from './geom.js';
-import type { Camera, Point, Rect, Size } from './geom.js';
+import type { Camera, Insets, Point, Rect, Size } from './geom.js';
 import { dragTo, hitHandle, settleFrame } from './frame-drag.js';
 import type { FrameDrag } from './frame-drag.js';
 import { boxSelect, hitTest, toPagePoint } from './hit.js';
@@ -47,6 +48,8 @@ export interface ControllerDeps {
   requestFrame: (cb: () => void) => void;
   now: () => number;
   onSelect?: (s: NodeSelection | null) => void;
+  /** Screen space covered by the app's floating chrome; fits keep frames clear of it. */
+  insets?: Insets;
   /** Called after every camera change: pans, zooms, fits and explicit cameras. */
   onCamera?: (camera: Camera) => void;
   /** A frame drag was released with the frame changed: the whole layout, to save. */
@@ -239,7 +242,7 @@ export class CanvasController {
   /** Fits every frame into the view. Does nothing while there are no frames. */
   fitAll(): void {
     if (this.layout.length === 0 || this.viewSize.w === 0) return;
-    this.cam = fitRect(layoutBounds(this.layout), this.viewSize, FIT_PADDING);
+    this.cam = fitRectInset(layoutBounds(this.layout), this.viewSize, FIT_PADDING, this.deps.insets ?? NO_INSETS);
     this.needsFit = false;
     this.cameraSet = true;
     this.cameraChanged();
@@ -504,7 +507,7 @@ export class CanvasController {
     if (first === undefined) return;
     const pageFrames = this.layout.filter((f) => f.pageId === first.pageId);
     if (pageFrames.length === 0) return;
-    this.cam = fitRect(layoutBounds(pageFrames), this.viewSize, FIT_PADDING);
+    this.cam = fitRectInset(layoutBounds(pageFrames), this.viewSize, FIT_PADDING, this.deps.insets ?? NO_INSETS);
     this.needsFit = false;
     this.deps.onCamera?.(this.cam);
   }

@@ -1,6 +1,7 @@
 import { expect, test } from '@playwright/test';
 import type { Page } from '@playwright/test';
-import { fitRect, worldToScreen } from '../src/canvas/geom.js';
+import { fitRectInset, worldToScreen } from '../src/canvas/geom.js';
+import { CANVAS_INSETS } from '../src/areas/design/layout.js';
 import { layoutBounds, layoutFrames } from '../src/canvas/layout.js';
 
 async function openDesign(page: Page, app: string): Promise<void> {
@@ -25,7 +26,7 @@ async function importPages(page: Page): Promise<void> {
 
 const toasts = (page: Page) => page.locator('.ui-toasts');
 
-/** Taps the last hit box of the first page's 1440×900 frame with the Select tool, as the first-page fit places it. */
+/** Taps the last hit box of the first page's 1440×900 frame with the Select tool, as the first-page fit (clear of the chrome) places it. */
 async function selectLastBox(page: Page): Promise<void> {
   const manifest = await (await page.request.get('/api/apps/demo/render/manifest.json')).json();
   const boxes = await (await page.request.get(`/api/apps/demo/render/hitmaps/${manifest.pages[0].renders['1440x900'].hash}.json`)).json();
@@ -35,7 +36,7 @@ async function selectLastBox(page: Page): Promise<void> {
   if (!bounds) throw new Error('No canvas');
   const { frames } = await (await page.request.get('/api/apps/demo/design/frames')).json();
   const firstPage = layoutFrames(frames, manifest).filter((f) => f.pageId === manifest.pages[0].pageId);
-  const camera = fitRect(layoutBounds(firstPage), { w: bounds.width, h: bounds.height }, 40);
+  const camera = fitRectInset(layoutBounds(firstPage), { w: bounds.width, h: bounds.height }, 40, CANVAS_INSETS);
   const desktop = firstPage.find((f) => f.w === 1440 && f.viewportHeight === 900)!;
   const point = worldToScreen(camera, { x: desktop.x + box.x + box.w / 2, y: desktop.y + box.y + box.h / 2 });
   await page.getByTestId('tool-select').first().click();

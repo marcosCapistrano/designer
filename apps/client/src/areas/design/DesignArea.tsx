@@ -24,7 +24,7 @@ import { ImportSheet } from './ImportSheet.js';
 import { Inspector } from './inspector/Inspector.js';
 import { importOutcome } from './import-result.js';
 import type { Details } from './import-result.js';
-import { INSPECTOR_WIDTH, panelLayout } from './layout.js';
+import { CANVAS_INSETS, INSPECTOR_WIDTH, panelLayout } from './layout.js';
 import { PreviewBanner } from './PreviewBanner.js';
 import { proposalSource } from './preview-source.js';
 import { TopBar } from './TopBar.js';
@@ -102,6 +102,7 @@ export function DesignAreaView(p: DesignAreaViewProps): JSX.Element {
           framesEditable={!showPreview}
           onSelect={showPreview ? undefined : p.onSelect}
           onZoom={p.onZoom}
+          insets={CANVAS_INSETS}
           fitRef={p.fitRef}
         />
       </div>

@@ -8,7 +8,7 @@ import type { CanvasFrame, NodeSelection } from '@hub/protocol';
 import type { CanvasController, ControllerStats } from './controller.js';
 import type { BlobCache } from './cache.js';
 import type { FrameStore } from './frames.js';
-import type { Camera } from './geom.js';
+import type { Camera, Insets } from './geom.js';
 import { FrameMenu } from './FrameMenu.js';
 import type { PointerIn, Tool, WheelIn } from './gestures.js';
 import type { Frame } from './layout.js';
@@ -40,6 +40,8 @@ export interface CanvasViewProps {
   onSelect?: (s: NodeSelection | null) => void;
   /** Called with the camera scale whenever it changes (pans included), for a zoom readout. */
   onZoom?: (scale: number) => void;
+  /** Screen space covered by floating chrome over the canvas; fits keep frames clear of it. Read at mount. */
+  insets?: Insets;
   /** Set on mount to a function that fits every frame into view; cleared on unmount. */
   fitRef?: { current: (() => void) | null };
   debug?: boolean;
@@ -82,7 +84,7 @@ function menuPanelStyle(at: { x: number; y: number }, root: HTMLElement | null):
   return `position:absolute;left:${left}px;top:${top}px;width:${width}px;max-height:${h - top - 8}px;overflow-y:auto;box-sizing:border-box;background:var(--surface);border:1px solid var(--border);border-radius:10px;box-shadow:var(--shadow);touch-action:pan-y`;
 }
 
-export function CanvasView({ source, cache, frames, framesEditable = true, onSelect, onZoom, fitRef, debug = false }: CanvasViewProps): JSX.Element {
+export function CanvasView({ source, cache, frames, framesEditable = true, onSelect, onZoom, insets, fitRef, debug = false }: CanvasViewProps): JSX.Element {
   const rootRef = useRef<HTMLDivElement>(null);
   const layersRef = useRef<HTMLDivElement>(null);
   const baseRef = useRef<HTMLCanvasElement>(null);
@@ -134,6 +136,7 @@ export function CanvasView({ source, cache, frames, framesEditable = true, onSel
       now: () => performance.now(),
       onSelect,
       onCamera: onZoom ? (camera) => onZoom(camera.scale) : undefined,
+      insets,
       onError: setError,
       onFrameMenu: (frameId, p) => setMenu({ frameId, x: p.x, y: p.y }),
       framesEditable,
