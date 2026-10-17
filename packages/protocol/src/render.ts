@@ -18,9 +18,19 @@ export interface TileLevel { zoom: Zoom; key: string; cols: number; rows: number
  * Never rendered successfully: hash '', height 0, levels [].
  * error is set when the latest render failed; levels/hash are then the last good ones.
  */
-export interface PageRender { device: Device; hash: string; width: number; height: number; levels: TileLevel[]; error?: string }
-export interface ManifestPage { pageId: string; name: string; route: string; renders: Partial<Record<Device, PageRender>> }
-export interface RenderManifest { version: 1; pages: ManifestPage[] }
+export interface PageRender {
+  /** Always tierForWidth(width). */
+  device: Device;
+  hash: string;
+  width: number;
+  /** The browser viewport height the render used (what 100vh meant). */
+  viewportHeight: number;
+  height: number;
+  levels: TileLevel[];
+  error?: string;
+}
+export interface ManifestPage { pageId: string; name: string; route: string; /** Keyed by sizeKey(size), e.g. "1440x900". */ renders: Record<string, PageRender> }
+export interface RenderManifest { version: 2; pages: ManifestPage[] }
 /** What the canvas selected; sent with prompts in plan 6. */
 export interface NodeSelection { pageId: string; device: Device; nodeIds: string[] }
 

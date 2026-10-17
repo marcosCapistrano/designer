@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { DEVICES, DEVICE_WIDTH } from '@hub/protocol';
+import { DEVICES, DEVICE_VIEWPORT_HEIGHT, DEVICE_WIDTH } from '@hub/protocol';
 import type { Device, HitBox, PageRender, RenderManifest } from '@hub/protocol';
 import type { ControllerDeps } from './controller.js';
 import { CanvasController } from './controller.js';
@@ -16,6 +16,7 @@ const render = (device: Device, hash: string): PageRender => ({
   device,
   hash,
   width: DEVICE_WIDTH[device],
+  viewportHeight: DEVICE_VIEWPORT_HEIGHT[device],
   height: 1000,
   levels: [
     { zoom: 0.25, key: hash + 'q', cols: 1, rows: 1 },
@@ -25,26 +26,26 @@ const render = (device: Device, hash: string): PageRender => ({
 });
 
 const M: RenderManifest = {
-  version: 1,
+  version: 2,
   pages: [
     {
       pageId: 'home',
       name: 'Home',
       route: '/',
-      renders: { base: render('base', 'hb'), tablet: render('tablet', 'ht'), mobile: render('mobile', 'hm') },
+      renders: { '1440x900': render('base', 'hb'), '834x1194': render('tablet', 'ht'), '390x844': render('mobile', 'hm') },
     },
   ],
 };
 
 /** The home page with its base render keyed by `hash`, so each hash names its own hit-map load. */
 const withBaseHash = (hash: string): RenderManifest => ({
-  version: 1,
+  version: 2,
   pages: [
     {
       pageId: 'home',
       name: 'Home',
       route: '/',
-      renders: { base: render('base', hash), tablet: render('tablet', 'ht'), mobile: render('mobile', 'hm') },
+      renders: { '1440x900': render('base', hash), '834x1194': render('tablet', 'ht'), '390x844': render('mobile', 'hm') },
     },
   ],
 });
@@ -231,8 +232,8 @@ describe('CanvasController', () => {
     const { c, onSelect } = ready();
     await c.tap(15, 15);
     c.setManifest({
-      version: 1,
-      pages: [{ pageId: 'other', name: 'Other', route: '/other', renders: { base: render('base', 'ob') } }],
+      version: 2,
+      pages: [{ pageId: 'other', name: 'Other', route: '/other', renders: { '1440x900': render('base', 'ob') } }],
     });
     expect(c.selection).toBeNull();
     expect(onSelect).toHaveBeenLastCalledWith(null);
@@ -242,8 +243,8 @@ describe('CanvasController', () => {
     const { c, onSelect } = ready();
     await c.tap(15, 15);
     c.setManifest({
-      version: 1,
-      pages: [{ pageId: 'home', name: 'Home', route: '/', renders: { tablet: render('tablet', 'ht') } }],
+      version: 2,
+      pages: [{ pageId: 'home', name: 'Home', route: '/', renders: { '834x1194': render('tablet', 'ht') } }],
     });
     expect(c.selection).toBeNull();
     expect(onSelect).toHaveBeenLastCalledWith(null);
@@ -435,6 +436,7 @@ describe('CanvasController with a real TileLoader', () => {
     device,
     hash,
     width: DEVICE_WIDTH[device],
+    viewportHeight: DEVICE_VIEWPORT_HEIGHT[device],
     height: 1000,
     levels: [
       { zoom: 0.25, key: hash + 'q', cols: 1, rows: 1 },
@@ -443,15 +445,15 @@ describe('CanvasController with a real TileLoader', () => {
     ],
   });
   const BIG: RenderManifest = {
-    version: 1,
+    version: 2,
     pages: Array.from({ length: 50 }, (_, i) => ({
       pageId: `p${i}`,
       name: `Page ${i}`,
       route: `/p${i}`,
       renders: {
-        base: render1('base', `b${i}`),
-        tablet: render1('tablet', `t${i}`),
-        mobile: render1('mobile', `m${i}`),
+        '1440x900': render1('base', `b${i}`),
+        '834x1194': render1('tablet', `t${i}`),
+        '390x844': render1('mobile', `m${i}`),
       },
     })),
   };

@@ -28,7 +28,7 @@ async function setup(files: Record<string, string> = { 'app/page.tsx': 'export d
     store: () => store,
     readSource: vi.fn(async () => source),
     hub: { broadcast: (message) => { messages.push(message); } },
-    render: vi.fn(async () => ({ manifest: { version: 1 as const, pages: [] }, warnings: [] })),
+    render: vi.fn(async () => ({ manifest: { version: 2 as const, pages: [] }, warnings: [] })),
   };
   const service = new SyncService(deps);
   return { service, deps, store, source, messages };
@@ -62,7 +62,7 @@ describe('import service', () => {
     s.deps.render = async () => { throw new Error('browser unavailable'); };
     expect(await s.service.import('demo', { mode: 'next' })).toMatchObject({ ok: true, manifest: null, warnings: [expect.stringContaining('Preview')] });
     expect(await s.store.load()).not.toBeNull();
-    s.deps.render = async () => ({ manifest: { version: 1, pages: [] }, warnings: [] });
+    s.deps.render = async () => ({ manifest: { version: 2, pages: [] }, warnings: [] });
     expect(await s.service.retryPreview('demo')).toMatchObject({ warnings: [] });
     await s.service.close();
   });

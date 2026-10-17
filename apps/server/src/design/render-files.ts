@@ -5,7 +5,7 @@ import { MANIFEST_PATH, type RenderManifest } from '@hub/protocol';
 import { APP_NAME_RE } from '@hub/protocol/manifest';
 
 /** Served while an app has no render manifest yet. */
-export const EMPTY_MANIFEST: RenderManifest = { version: 1, pages: [] };
+export const EMPTY_MANIFEST: RenderManifest = { version: 2, pages: [] };
 
 // Anchored and strict: a URL segment that matches none of these never reaches the filesystem.
 const KEY_RE = /^[0-9a-f]{64}$/;

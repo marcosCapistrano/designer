@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { DEVICE_WIDTH } from '@hub/protocol';
+import { DEVICE_VIEWPORT_HEIGHT, DEVICE_WIDTH } from '@hub/protocol';
 import type { Device, PageRender, RenderManifest } from '@hub/protocol';
 import type { BlobCache } from './cache.js';
 import { liveKeys } from './cache.js';
@@ -14,19 +14,20 @@ const render = (device: Device, hash: string): PageRender => ({
   device,
   hash,
   width: DEVICE_WIDTH[device],
+  viewportHeight: DEVICE_VIEWPORT_HEIGHT[device],
   height: 1000,
   levels: [{ zoom: 0.25, key: hash + 'q', cols: 1, rows: 1 }],
 });
 
 /** A one-page manifest whose tile keys all start with `tag`. */
 const manifestOf = (tag: string): RenderManifest => ({
-  version: 1,
+  version: 2,
   pages: [
     {
       pageId: tag,
       name: tag,
       route: '/' + tag,
-      renders: { base: render('base', tag + 'b'), tablet: render('tablet', tag + 't'), mobile: render('mobile', tag + 'm') },
+      renders: { '1440x900': render('base', tag + 'b'), '834x1194': render('tablet', tag + 't'), '390x844': render('mobile', tag + 'm') },
     },
   ],
 });
@@ -121,7 +122,7 @@ describe('createCanvasRuntime manifests', () => {
   it.each([
     ['an object without pages', {}],
     ['null', null],
-    ['pages that is not an array', { version: 1, pages: 'nope' }],
+    ['pages that is not an array', { version: 2, pages: 'nope' }],
   ])('shows the error box for %s and does not apply it', async (_name, bad) => {
     const h = harness();
     h.resolveManifest(bad as unknown as RenderManifest);

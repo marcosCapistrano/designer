@@ -116,7 +116,7 @@ describe('FsTileStore', () => {
 
   it('manifest roundtrip', async () => {
     const store = new FsTileStore(dir);
-    const m: RenderManifest = { version: 1, pages: [] };
+    const m: RenderManifest = { version: 2, pages: [] };
     await store.writeManifest(m);
     expect(await store.readManifest()).toEqual(m);
   });
@@ -133,10 +133,10 @@ describe('FsTileStore', () => {
   });
 
   it.each([
-    ['missing', '{"version":1}'],
-    ['a string', '{"version":1,"pages":"nope"}'],
-    ['an object', '{"version":1,"pages":{}}'],
-    ['null', '{"version":1,"pages":null}'],
+    ['missing', '{"version":2}'],
+    ['a string', '{"version":2,"pages":"nope"}'],
+    ['an object', '{"version":2,"pages":{}}'],
+    ['null', '{"version":2,"pages":null}'],
   ])('pages that is %s is null', async (_name, text) => {
     const store = new FsTileStore(dir);
     await writeFile(join(dir, 'manifest.json'), text);
@@ -148,7 +148,7 @@ describe('FsTileStore', () => {
 
   it('wrong version is null', async () => {
     const store = new FsTileStore(dir);
-    await writeFile(join(dir, 'manifest.json'), '{"version":2,"pages":[]}');
+    await writeFile(join(dir, 'manifest.json'), '{"version":1,"pages":[]}');
     expect(await store.readManifest()).toBeNull();
   });
 });

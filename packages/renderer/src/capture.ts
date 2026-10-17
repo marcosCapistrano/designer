@@ -1,10 +1,4 @@
-import {
-  DEVICE_VIEWPORT_HEIGHT,
-  DEVICE_WIDTH,
-  MAX_PAGE_HEIGHT,
-  type Device,
-  type HitBox,
-} from '@hub/protocol';
+import { MAX_PAGE_HEIGHT, type FrameSize, type HitBox } from '@hub/protocol';
 import type { Frame, Page } from 'playwright';
 import { buildDocument } from './html.js';
 
@@ -12,7 +6,7 @@ export interface CaptureJob {
   html: string;
   /** Used as given; callers apply cssForDevice first when they need the device's effective CSS. */
   css: string;
-  device: Device;
+  size: FrameSize;
 }
 
 export interface Capture {
@@ -180,7 +174,7 @@ const CONTEXT_DESTROYED = /Execution context was destroyed/;
 const NAVIGATED = 'Page navigated during capture';
 
 /**
- * Renders one page at one device width and returns a full-page PNG plus its hit map.
+ * Renders one page at one frame size and returns a full-page PNG plus its hit map.
  *
  * Throws an Error starting "Page navigated during capture" when the main frame navigates (for
  * example through `<meta http-equiv=refresh>`), so the outcome never depends on a timing race.
@@ -212,9 +206,9 @@ export async function capturePage(page: Page, job: CaptureJob): Promise<Capture>
 }
 
 async function captureLoaded(page: Page, job: CaptureJob, failIfNavigated: () => void): Promise<Capture> {
-  const d = job.device;
-  await page.setViewportSize({ width: DEVICE_WIDTH[d], height: DEVICE_VIEWPORT_HEIGHT[d] });
-  await page.setContent(buildDocument(job.html, job.css, d), { waitUntil: 'load' });
+  const { width, viewportHeight } = job.size;
+  await page.setViewportSize({ width, height: viewportHeight });
+  await page.setContent(buildDocument(job.html, job.css, width), { waitUntil: 'load' });
   failIfNavigated();
   if (await page.evaluate(PENDING_REFRESH_SCRIPT)) throw new Error(`${NAVIGATED} (pending <meta http-equiv="refresh">)`);
   await page.evaluate('document.fonts.ready.then(() => true)');
@@ -222,8 +216,7 @@ async function captureLoaded(page: Page, job: CaptureJob, failIfNavigated: () =>
   const full = Number(
     await page.evaluate('Math.max(document.documentElement.scrollHeight, document.body.scrollHeight)'),
   );
-  const width = DEVICE_WIDTH[d];
-  const height = Math.min(MAX_PAGE_HEIGHT, Math.max(DEVICE_VIEWPORT_HEIGHT[d], full));
+  const height = Math.min(MAX_PAGE_HEIGHT, Math.max(viewportHeight, full));
 
   // The script already returns boxes in paint order, clipped to their overflow ancestors.
   const hitMap = ((await page.evaluate(HIT_MAP_SCRIPT)) as HitBox[]).filter(

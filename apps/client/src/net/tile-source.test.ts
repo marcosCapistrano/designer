@@ -69,7 +69,7 @@ describe('ServerTileSource', () => {
     const { ws, emit } = fakeWs();
     const onManifest = vi.fn();
     const off = new ServerTileSource('demo', ws).subscribe(onManifest);
-    const manifest: RenderManifest = { version: 1, pages: [] };
+    const manifest: RenderManifest = { version: 2, pages: [] };
     emit({ type: 'render.ready', app: 'other', manifest });
     expect(onManifest).not.toHaveBeenCalled();
     emit({ type: 'render.ready', app: 'demo', manifest });

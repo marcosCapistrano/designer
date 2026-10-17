@@ -12,8 +12,8 @@ test('authenticated import renders pages, reuses baseline and preserves design o
   const manifest = await page.request.get('/api/apps/demo/render/manifest.json');
   const rendered = await manifest.json();
   expect(rendered.pages).toHaveLength(1);
-  expect(rendered.pages[0].renders.base.levels.length).toBeGreaterThan(0);
-  expect(rendered.pages[0].renders.base.error).toBeUndefined();
+  expect(rendered.pages[0].renders['1440x900'].levels.length).toBeGreaterThan(0);
+  expect(rendered.pages[0].renders['1440x900'].error).toBeUndefined();
   await page.getByRole('button', { name: 'Import pages' }).click();
   await expect(page.getByRole('status')).toContainText('Imported 0 pages; reused 1.');
   await page.getByRole('combobox', { name: 'Source', exact: true }).selectOption('react');
@@ -73,7 +73,7 @@ test('tap editing supports immediate instance edits, undo/redo and shared previe
   const initialPending = (await (await page.request.get('/api/apps/demo/design')).json()).pending;
   const selectButton = async () => {
     const manifest = await (await page.request.get('/api/apps/demo/render/manifest.json')).json();
-    const boxes = await (await page.request.get(`/api/apps/demo/render/hitmaps/${manifest.pages[0].renders.base.hash}.json`)).json();
+    const boxes = await (await page.request.get(`/api/apps/demo/render/hitmaps/${manifest.pages[0].renders['1440x900'].hash}.json`)).json();
     const box = boxes[boxes.length - 1];
     const canvas = page.getByTestId('canvas').first();
     const bounds = await canvas.boundingBox();

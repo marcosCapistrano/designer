@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  DEVICE_VIEWPORT_HEIGHT,
   DEVICE_WIDTH,
   type Device,
   type PageRender,
@@ -8,27 +9,27 @@ import {
 import { frameAt, layoutBounds, layoutFrames } from './layout.js';
 
 function render(device: Device, height: number): PageRender {
-  return { device, hash: 'h', width: DEVICE_WIDTH[device], height, levels: [] };
+  return { device, hash: 'h', width: DEVICE_WIDTH[device], viewportHeight: DEVICE_VIEWPORT_HEIGHT[device], height, levels: [] };
 }
 
 const manifest: RenderManifest = {
-  version: 1,
+  version: 2,
   pages: [
     {
       pageId: 'p1',
       name: 'Home',
       route: '/',
       renders: {
-        base: render('base', 2000),
-        tablet: render('tablet', 2400),
-        mobile: render('mobile', 3000),
+        '1440x900': render('base', 2000),
+        '834x1194': render('tablet', 2400),
+        '390x844': render('mobile', 3000),
       },
     },
     {
       pageId: 'p2',
       name: 'About',
       route: '/about',
-      renders: { base: render('base', 1000) },
+      renders: { '1440x900': render('base', 1000) },
     },
   ],
 };

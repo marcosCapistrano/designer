@@ -17,7 +17,7 @@ afterEach(async () => {
 });
 
 it('serves files under /dev-renders and 404s the rest', async () => {
-  await writeFile(join(dir, 'manifest.json'), '{"version":1,"pages":[]}');
+  await writeFile(join(dir, 'manifest.json'), '{"version":2,"pages":[]}');
   const server = await createServer({
     configFile: false,
     root: dir,
@@ -32,7 +32,7 @@ it('serves files under /dev-renders and 404s the rest', async () => {
 
     const hit = await fetch(`${base}/dev-renders/manifest.json`);
     expect(hit.status).toBe(200);
-    expect(await hit.json()).toEqual({ version: 1, pages: [] });
+    expect(await hit.json()).toEqual({ version: 2, pages: [] });
 
     const miss = await fetch(`${base}/dev-renders/nope.json`);
     expect(miss.status).toBe(404);

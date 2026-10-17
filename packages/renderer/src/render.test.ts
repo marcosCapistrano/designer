@@ -1,5 +1,14 @@
 import { applyOp, exportPage, sampleDoc, type DesignDoc, type Result } from '@hub/design-model';
-import { hitMapPath, tilePath, type Device, type PageRender } from '@hub/protocol';
+import {
+  DEFAULT_FRAME_SIZES,
+  hitMapPath,
+  tilePath,
+  type FrameSize,
+  type PageRender,
+  type RenderManifest,
+} from '@hub/protocol';
+import sharp from 'sharp';
+import type { Page } from 'playwright';
 import { afterAll, beforeAll, beforeEach, expect, test } from 'vitest';
 import { cssForDevice } from './html.js';
 import { BrowserPool } from './pool.js';
@@ -44,7 +53,13 @@ class ScriptedStore extends MemoryTileStore {
   }
 }
 
-const all = ['base', 'tablet', 'mobile'] as const;
+const [BASE, TABLET, MOBILE] = DEFAULT_FRAME_SIZES as readonly [FrameSize, FrameSize, FrameSize];
+const BASE_KEY = '1440x900';
+const TABLET_KEY = '834x1194';
+const MOBILE_KEY = '390x844';
+const defaults = () => DEFAULT_FRAME_SIZES;
+const all = { sizes: defaults };
+const only = (...sizes: FrameSize[]) => ({ sizes: () => sizes });
 const must = (r: Result<{ doc: DesignDoc }>): DesignDoc => {
   if (!r.ok) throw new Error(r.error);
   return r.value.doc;
@@ -71,22 +86,27 @@ const brokenDoc = (): DesignDoc => {
 const mobileEdited = (): DesignDoc =>
   must(applyOp(sampleDoc(), { op: 'setStyle', node: 'n3', device: 'mobile', prop: 'padding', value: '4px' }));
 
-const renderOf = (r: RenderDocResult, pageId: string, device: Device): PageRender => {
-  const found = r.manifest.pages.find((p) => p.pageId === pageId)?.renders[device];
-  if (!found) throw new Error(`no render for ${pageId}@${device}`);
+const renderOf = (r: RenderDocResult, pageId: string, key: string): PageRender => {
+  const found = r.manifest.pages.find((p) => p.pageId === pageId)?.renders[key];
+  if (!found) throw new Error(`no render for ${pageId}@${key}`);
   return found;
 };
 
 test('renders every page and device the first time', async () => {
-  const result = await renderDoc(pool, sampleDoc(), { devices: all, prev: null, store });
-  expect(result.rendered).toEqual(['home@base', 'home@mobile', 'home@tablet']);
+  const result = await renderDoc(pool, sampleDoc(), { ...all, prev: null, store });
+  expect(result.rendered).toEqual(['home@1440x900', 'home@390x844', 'home@834x1194']);
   expect(result.reused).toEqual([]);
   expect(result.failed).toEqual([]);
 
   const page = result.manifest.pages[0]!;
   expect(page).toMatchObject({ pageId: 'home', name: 'Home', route: '/' });
-  const base = page.renders.base!;
-  expect({ width: base.width, height: base.height }).toEqual({ width: 1440, height: 900 });
+  const base = page.renders[BASE_KEY]!;
+  expect({ width: base.width, height: base.height, viewportHeight: base.viewportHeight, device: base.device }).toEqual({
+    width: 1440,
+    height: 900,
+    viewportHeight: 900,
+    device: 'base',
+  });
   expect(base.levels.length).toBe(3);
   expect(store.files.has(tilePath(base.levels[2]!.key, 0, 0))).toBe(true);
   expect(store.files.has(hitMapPath(base.hash))).toBe(true);
@@ -94,43 +114,43 @@ test('renders every page and device the first time', async () => {
 
 test('unchanged doc re-renders nothing', async () => {
   const doc = sampleDoc();
-  const first = await renderDoc(pool, doc, { devices: all, prev: null, store });
-  const second = await renderDoc(pool, doc, { devices: all, prev: first.manifest, store });
+  const first = await renderDoc(pool, doc, { ...all, prev: null, store });
+  const second = await renderDoc(pool, doc, { ...all, prev: first.manifest, store });
   expect(second.rendered).toEqual([]);
   expect(second.reused).toHaveLength(3);
   expect(second.manifest).toEqual(first.manifest);
   // Reused renders are copies: the new manifest never shares a levels array with prev.
-  expect(renderOf(second, 'home', 'base').levels).not.toBe(renderOf(first, 'home', 'base').levels);
+  expect(renderOf(second, 'home', BASE_KEY).levels).not.toBe(renderOf(first, 'home', BASE_KEY).levels);
 });
 
 test('mobile-only edit re-renders only mobile', async () => {
   const doc = sampleDoc();
-  const first = await renderDoc(pool, doc, { devices: all, prev: null, store });
+  const first = await renderDoc(pool, doc, { ...all, prev: null, store });
   const doc2 = must(applyOp(doc, { op: 'setStyle', node: 'n3', device: 'mobile', prop: 'padding', value: '4px' }));
-  const second = await renderDoc(pool, doc2, { devices: all, prev: first.manifest, store });
-  expect(second.rendered).toEqual(['home@mobile']);
-  expect(second.reused).toEqual(['home@base', 'home@tablet']);
+  const second = await renderDoc(pool, doc2, { ...all, prev: first.manifest, store });
+  expect(second.rendered).toEqual(['home@390x844']);
+  expect(second.reused).toEqual(['home@1440x900', 'home@834x1194']);
 });
 
 test('component edit re-renders only pages that use it', async () => {
-  const first = await renderDoc(pool, withAbout(), { devices: all, prev: null, store });
+  const first = await renderDoc(pool, withAbout(), { ...all, prev: null, store });
   const edited = must(applyOp(withAbout(), { op: 'setStyle', node: 'n7', device: 'base', prop: 'color', value: '#ff0000' }));
-  const second = await renderDoc(pool, edited, { devices: all, prev: first.manifest, store });
-  expect(second.rendered).toEqual(['home@base', 'home@mobile', 'home@tablet']);
-  expect(second.reused).toEqual(['about@base', 'about@mobile', 'about@tablet']);
+  const second = await renderDoc(pool, edited, { ...all, prev: first.manifest, store });
+  expect(second.rendered).toEqual(['home@1440x900', 'home@390x844', 'home@834x1194']);
+  expect(second.reused).toEqual(['about@1440x900', 'about@390x844', 'about@834x1194']);
 });
 
 test('pages are ordered by route', async () => {
-  const result = await renderDoc(pool, withAbout(), { devices: all, prev: null, store });
+  const result = await renderDoc(pool, withAbout(), { ...all, prev: null, store });
   expect(result.manifest.pages.map((p) => p.pageId)).toEqual(['home', 'about']);
 });
 
 test('failed export keeps the last good render with an error', async () => {
-  const first = await renderDoc(pool, sampleDoc(), { devices: all, prev: null, store });
-  const second = await renderDoc(pool, brokenDoc(), { devices: all, prev: first.manifest, store });
+  const first = await renderDoc(pool, sampleDoc(), { ...all, prev: null, store });
+  const second = await renderDoc(pool, brokenDoc(), { ...all, prev: first.manifest, store });
   expect(second.failed).toHaveLength(3);
-  const prevBase = renderOf(first, 'home', 'base');
-  const base = renderOf(second, 'home', 'base');
+  const prevBase = renderOf(first, 'home', BASE_KEY);
+  const base = renderOf(second, 'home', BASE_KEY);
   expect(base.levels).toEqual(prevBase.levels);
   expect(base.levels).not.toBe(prevBase.levels);
   expect(base.hash).toBe(prevBase.hash);
@@ -138,11 +158,12 @@ test('failed export keeps the last good render with an error', async () => {
 });
 
 test('failed export without a previous render gives an empty placeholder', async () => {
-  const result = await renderDoc(pool, brokenDoc(), { devices: all, prev: null, store });
-  expect(result.manifest.pages[0]!.renders.base).toEqual({
+  const result = await renderDoc(pool, brokenDoc(), { ...all, prev: null, store });
+  expect(result.manifest.pages[0]!.renders[BASE_KEY]).toEqual({
     device: 'base',
     hash: '',
     width: 1440,
+    viewportHeight: 900,
     height: 0,
     levels: [],
     error: expect.stringContaining('Component Card not found'),
@@ -154,7 +175,7 @@ test('renderJob is deterministic', async () => {
   if (!exported.ok) throw new Error(exported.error);
   const job: RenderJob = {
     pageId: 'home',
-    device: 'mobile',
+    size: MOBILE,
     html: exported.value.html,
     css: cssForDevice(exported.value.css, 'mobile'),
   };
@@ -165,75 +186,149 @@ test('renderJob is deterministic', async () => {
   expect(a.tiles).toEqual(b.tiles);
 });
 
-test('subset render carries the other devices over from prev unchanged', async () => {
-  const first = await renderDoc(pool, sampleDoc(), { devices: all, prev: null, store });
-  const second = await renderDoc(pool, mobileEdited(), { devices: ['mobile'], prev: first.manifest, store });
-  expect(second.rendered).toEqual(['home@mobile']);
-  expect(second.manifest.pages[0]!.renders.base).toEqual(first.manifest.pages[0]!.renders.base);
-  expect(second.manifest.pages[0]!.renders.tablet).toEqual(first.manifest.pages[0]!.renders.tablet);
-  expect(Object.keys(second.manifest.pages[0]!.renders)).toEqual(['base', 'tablet', 'mobile']);
+test('a call that drops a size returns a manifest without it', async () => {
+  const first = await renderDoc(pool, sampleDoc(), { ...all, prev: null, store });
+  const second = await renderDoc(pool, sampleDoc(), { ...only(BASE, TABLET), prev: first.manifest, store });
+  expect(second.rendered).toEqual([]);
+  expect(second.reused).toEqual(['home@1440x900', 'home@834x1194']);
+  expect(Object.keys(second.manifest.pages[0]!.renders)).toEqual([BASE_KEY, TABLET_KEY]);
 });
 
-test('subset render without prev yields only the requested devices', async () => {
-  const result = await renderDoc(pool, sampleDoc(), { devices: ['tablet'], prev: null, store });
-  expect(result.rendered).toEqual(['home@tablet']);
-  expect(Object.keys(result.manifest.pages[0]!.renders)).toEqual(['tablet']);
+test('a size absent from prev renders without touching the others', async () => {
+  const first = await renderDoc(pool, sampleDoc(), { ...only(TABLET), prev: null, store });
+  const second = await renderDoc(pool, sampleDoc(), { ...all, prev: first.manifest, store });
+  expect(second.rendered).toEqual(['home@1440x900', 'home@390x844']);
+  expect(second.reused).toEqual(['home@834x1194']);
+  expect(Object.keys(second.manifest.pages[0]!.renders).sort()).toEqual([BASE_KEY, MOBILE_KEY, TABLET_KEY]);
 });
 
-test('a carried-over render keeps its error unchanged', async () => {
-  const first = await renderDoc(pool, sampleDoc(), { devices: all, prev: null, store });
-  const failedRun = await renderDoc(pool, brokenDoc(), { devices: all, prev: first.manifest, store });
-  const mobileOnly = await renderDoc(pool, sampleDoc(), { devices: ['mobile'], prev: failedRun.manifest, store });
-  expect(mobileOnly.reused).toEqual(['home@mobile']);
-  expect(mobileOnly.rendered).toEqual([]);
-  const kept = mobileOnly.manifest.pages[0]!.renders;
-  expect(kept.base).toEqual(renderOf(failedRun, 'home', 'base'));
-  expect(kept.base!.error).toContain('Component Card not found');
-  expect(kept.tablet).toEqual(renderOf(failedRun, 'home', 'tablet'));
+test('a failed render at one size keeps the previous render for that key with an error', async () => {
+  const first = await renderDoc(pool, sampleDoc(), { ...all, prev: null, store });
+  store.putFails = true;
+  const second = await renderDoc(pool, mobileEdited(), { ...all, prev: first.manifest, store });
+  expect(second.failed).toEqual(['home@390x844']);
+  expect(renderOf(second, 'home', MOBILE_KEY)).toEqual({ ...renderOf(first, 'home', MOBILE_KEY), error: 'disk full' });
+});
+
+test('duplicate sizes render once and each size is keyed', async () => {
+  const wide: FrameSize = { width: 1600, viewportHeight: 900 };
+  const result = await renderDoc(pool, withAbout(), { ...only(wide, wide, MOBILE), prev: null, store });
+  expect(result.rendered).toEqual(['about@1600x900', 'about@390x844', 'home@1600x900', 'home@390x844']);
+  for (const page of result.manifest.pages) {
+    expect(Object.keys(page.renders)).toEqual(['1600x900', '390x844']);
+    expect(page.renders['1600x900']).toMatchObject({ width: 1600, viewportHeight: 900, device: 'base' });
+  }
+  const second = await renderDoc(pool, withAbout(), { ...only(wide, wide, MOBILE), prev: result.manifest, store });
+  expect(second.rendered).toEqual([]);
+  expect(second.reused).toEqual(result.rendered);
+});
+
+test('a prev manifest that is not version 2 is ignored', async () => {
+  const first = await renderDoc(pool, sampleDoc(), { ...all, prev: null, store });
+  const old = { ...first.manifest, version: 1 } as unknown as RenderManifest;
+  const second = await renderDoc(pool, sampleDoc(), { ...all, prev: old, store });
+  expect(second.reused).toEqual([]);
+  expect(second.rendered).toHaveLength(3);
+  expect(second.manifest.version).toBe(2);
+});
+
+test('css is reduced for the tier of each width', async () => {
+  let doc = sampleDoc();
+  for (const [node, device, prop, value] of [
+    ['n1', 'base', 'width', '50px'],
+    ['n1', 'base', 'height', '50px'],
+    ['n1', 'base', 'background-color', '#ff0000'],
+    ['n1', 'tablet', 'background-color', '#0000ff'],
+  ] as const) {
+    doc = must(applyOp(doc, { op: 'setStyle', node, device, prop, value }));
+  }
+  const exported = exportPage(doc, 'home');
+  if (!exported.ok) throw new Error(exported.error);
+  const css = exported.value.css;
+
+  // Records the document each capture loads, so the css the job carried is observable.
+  const docs: string[] = [];
+  const spy = {
+    withPage: <T>(fn: (page: Page) => Promise<T>): Promise<T> =>
+      pool.withPage((page) => {
+        const orig = page.setContent.bind(page);
+        page.setContent = (async (html: string, opts?: Parameters<Page['setContent']>[1]) => {
+          docs.push(html);
+          return orig(html, opts);
+        }) as Page['setContent'];
+        return fn(page).finally(() => {
+          page.setContent = orig;
+        });
+      }),
+  } as unknown as BrowserPool;
+
+  const pixel = async (r: RenderDocResult, key: string): Promise<[number, number, number]> => {
+    const level = renderOf(r, 'home', key).levels[2]!;
+    const tile = store.files.get(tilePath(level.key, 0, 0));
+    const { data } = await sharp(tile as Buffer).raw().toBuffer({ resolveWithObject: true });
+    return [data[0]!, data[1]!, data[2]!] as [number, number, number];
+  };
+
+  const at1023 = await renderDoc(spy, doc, { ...only({ width: 1023, viewportHeight: 400 }), prev: null, store });
+  const at1024 = await renderDoc(spy, doc, { ...only({ width: 1024, viewportHeight: 400 }), prev: null, store });
+  expect(docs).toHaveLength(2);
+  expect(docs[0]).toContain(cssForDevice(css, 'tablet'));
+  expect(docs[0]).toContain('@media (max-width: 1023px)');
+  expect(docs[1]).toContain(cssForDevice(css, 'base'));
+  expect(docs[1]).not.toContain('@media (max-width: 1023px)');
+  expect(renderOf(at1023, 'home', '1023x400').device).toBe('tablet');
+  expect(renderOf(at1024, 'home', '1024x400').device).toBe('base');
+  const [r1, g1, b1] = await pixel(at1023, '1023x400');
+  // Tiles are lossy WebP, so compare channel dominance instead of exact colors.
+  expect(b1).toBeGreaterThan(r1 + 40);
+  expect(b1).toBeGreaterThan(g1 + 40);
+  const [r2, g2, b2] = await pixel(at1024, '1024x400');
+  expect(r2).toBeGreaterThan(b2 + 40);
+  expect(r2).toBeGreaterThan(g2 + 40);
 });
 
 test('pages that left the doc are not carried over', async () => {
-  const first = await renderDoc(pool, withAbout(), { devices: all, prev: null, store });
-  const result = await renderDoc(pool, sampleDoc(), { devices: ['mobile'], prev: first.manifest, store });
+  const first = await renderDoc(pool, withAbout(), { ...all, prev: null, store });
+  const result = await renderDoc(pool, sampleDoc(), { ...only(MOBILE), prev: first.manifest, store });
   expect(result.manifest.pages.map((p) => p.pageId)).toEqual(['home']);
 });
 
 test('reused render has no error property', async () => {
-  const first = await renderDoc(pool, sampleDoc(), { devices: all, prev: null, store });
-  const failedRun = await renderDoc(pool, brokenDoc(), { devices: all, prev: first.manifest, store });
+  const first = await renderDoc(pool, sampleDoc(), { ...all, prev: null, store });
+  const failedRun = await renderDoc(pool, brokenDoc(), { ...all, prev: first.manifest, store });
   expect(failedRun.failed).toHaveLength(3);
-  const back = await renderDoc(pool, sampleDoc(), { devices: all, prev: failedRun.manifest, store });
-  expect(back.reused).toEqual(['home@base', 'home@mobile', 'home@tablet']);
-  for (const device of all) {
-    expect(renderOf(back, 'home', device)).not.toHaveProperty('error');
+  const back = await renderDoc(pool, sampleDoc(), { ...all, prev: failedRun.manifest, store });
+  expect(back.reused).toEqual(['home@1440x900', 'home@390x844', 'home@834x1194']);
+  for (const key of [BASE_KEY, TABLET_KEY, MOBILE_KEY]) {
+    expect(renderOf(back, 'home', key)).not.toHaveProperty('error');
   }
 });
 
 test('re-renders a device when a prev level is missing from the store', async () => {
-  const first = await renderDoc(pool, sampleDoc(), { devices: all, prev: null, store });
-  store.missing.add(renderOf(first, 'home', 'base').levels[0]!.key);
-  const second = await renderDoc(pool, sampleDoc(), { devices: all, prev: first.manifest, store });
-  expect(second.rendered).toEqual(['home@base']);
-  expect(second.reused).toEqual(['home@mobile', 'home@tablet']);
+  const first = await renderDoc(pool, sampleDoc(), { ...all, prev: null, store });
+  store.missing.add(renderOf(first, 'home', BASE_KEY).levels[0]!.key);
+  const second = await renderDoc(pool, sampleDoc(), { ...all, prev: first.manifest, store });
+  expect(second.rendered).toEqual(['home@1440x900']);
+  expect(second.reused).toEqual(['home@390x844', 'home@834x1194']);
 });
 
 test('a hasLevel error counts as a miss and re-renders', async () => {
-  const first = await renderDoc(pool, sampleDoc(), { devices: all, prev: null, store });
+  const first = await renderDoc(pool, sampleDoc(), { ...all, prev: null, store });
   store.hasLevelFailures = 1;
-  const second = await renderDoc(pool, sampleDoc(), { devices: all, prev: first.manifest, store });
+  const second = await renderDoc(pool, sampleDoc(), { ...all, prev: first.manifest, store });
   expect(second.failed).toEqual([]);
-  expect(second.rendered).toEqual(['home@base']);
-  expect(second.reused).toEqual(['home@mobile', 'home@tablet']);
-  expect(renderOf(second, 'home', 'base')).toEqual(renderOf(first, 'home', 'base'));
+  expect(second.rendered).toEqual(['home@1440x900']);
+  expect(second.reused).toEqual(['home@390x844', 'home@834x1194']);
+  expect(renderOf(second, 'home', BASE_KEY)).toEqual(renderOf(first, 'home', BASE_KEY));
 });
 
 test('a failed tile write falls back to the last good render', async () => {
-  const first = await renderDoc(pool, sampleDoc(), { devices: all, prev: null, store });
+  const first = await renderDoc(pool, sampleDoc(), { ...all, prev: null, store });
   store.putFails = true;
-  const second = await renderDoc(pool, mobileEdited(), { devices: all, prev: first.manifest, store });
-  expect(second.failed).toEqual(['home@mobile']);
-  expect(second.reused).toEqual(['home@base', 'home@tablet']);
-  expect(renderOf(second, 'home', 'mobile')).toEqual({ ...renderOf(first, 'home', 'mobile'), error: 'disk full' });
+  const second = await renderDoc(pool, mobileEdited(), { ...all, prev: first.manifest, store });
+  expect(second.failed).toEqual(['home@390x844']);
+  expect(second.reused).toEqual(['home@1440x900', 'home@834x1194']);
+  expect(renderOf(second, 'home', MOBILE_KEY)).toEqual({ ...renderOf(first, 'home', MOBILE_KEY), error: 'disk full' });
 });
 
 test('runs at most `concurrency` render jobs at once', async () => {
@@ -249,7 +344,7 @@ test('runs at most `concurrency` render jobs at once', async () => {
       throw new Error('stub page');
     },
   } as unknown as BrowserPool;
-  const result = await renderDoc(stub, withAbout(), { devices: all, prev: null, store, concurrency: 2 });
+  const result = await renderDoc(stub, withAbout(), { ...all, prev: null, store, concurrency: 2 });
   expect(maxInFlight).toBe(2);
   expect(result.failed).toHaveLength(6);
   expect(result.rendered).toEqual([]);

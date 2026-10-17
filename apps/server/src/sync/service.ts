@@ -3,7 +3,7 @@ import type { DesignDoc } from '@hub/design-model';
 import { ADAPTERS_FILE, FsSyncStore, countSourceOnly, discoverNextRoutes, projectAliases, synchronizePages, type SyncResult, type SyncState, type SyncStore } from '@hub/sync';
 import { APP_MANIFEST_FILE, APP_NAME_RE, routeIncluded } from '@hub/protocol/manifest';
 import { parseAdapters } from '@hub/protocol/adapters';
-import type { DesignSummary, ImportRequest, ImportResponse, RenderManifest } from '@hub/protocol';
+import { DEFAULT_FRAME_SIZES, type DesignSummary, ImportRequest, ImportResponse, type RenderManifest } from '@hub/protocol';
 import { BrowserPool, FsTileStore, renderDoc } from '@hub/renderer';
 import type { AppRegistry } from '../apps/registry.js';
 import { BuildError } from '../build/ci.js';
@@ -102,7 +102,7 @@ export class SyncService {
         return out;
       }
       const store = new FsTileStore(renderDir(this.deps.dataDir, app));
-      const out = await renderDoc(this.pool, doc, { devices: ['base', 'tablet', 'mobile'], prev: await store.readManifest(), store });
+      const out = await renderDoc(this.pool, doc, { sizes: () => DEFAULT_FRAME_SIZES, prev: await store.readManifest(), store });
       if (publish) {
         await store.writeManifest(out.manifest);
         this.deps.hub.broadcast({ type: 'render.ready', app, manifest: out.manifest });

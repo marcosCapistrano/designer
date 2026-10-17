@@ -9,7 +9,7 @@ export interface TileStore {
   /** Levels that already exist are left untouched. */
   putTiles(tiles: readonly TileFile[]): Promise<void>;
   putHitMap(hash: string, hitMap: readonly HitBox[]): Promise<void>;
-  /** null when missing, unparsable, version !== 1, or pages is not an array. */
+  /** null when missing, unparsable, version !== 2, or pages is not an array. */
   readManifest(): Promise<RenderManifest | null>;
   writeManifest(m: RenderManifest): Promise<void>;
 }
@@ -43,7 +43,7 @@ function parseManifest(text: string): RenderManifest | null {
     const m: unknown = JSON.parse(text);
     if (typeof m !== 'object' || m === null) return null;
     const { version, pages } = m as { version?: unknown; pages?: unknown };
-    return version === 1 && Array.isArray(pages) ? (m as RenderManifest) : null;
+    return version === 2 && Array.isArray(pages) ? (m as RenderManifest) : null;
   } catch {
     return null;
   }

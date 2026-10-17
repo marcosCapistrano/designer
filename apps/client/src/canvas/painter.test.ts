@@ -6,7 +6,7 @@ import type { Frame } from './layout.js';
 
 const lv = (zoom: Zoom, key: string, cols: number, rows: number) => ({ zoom, key, cols, rows });
 const frame = (over: Partial<Frame> = {}): Frame => ({ pageId: 'p', name: 'P', device: 'base', x: 0, y: 0, w: 1440, h: 1000,
-  render: { device: 'base', hash: 'h', width: 1440, height: 1000, levels: [lv(0.25, 'q', 1, 1), lv(0.5, 'k', 2, 1), lv(1, 'h', 3, 2)] }, ...over });
+  render: { device: 'base', hash: 'h', width: 1440, viewportHeight: 900, height: 1000, levels: [lv(0.25, 'q', 1, 1), lv(0.5, 'k', 2, 1), lv(1, 'h', 3, 2)] }, ...over });
 const tilesOf = (...ids: string[]) => { const m = new Map(ids.map(id => [id, img(id)])); return { get: (k: string, x: number, y: number) => m.get(`${k}/${x}_${y}`) }; };
 const input = (frames: Frame[], over: Partial<PaintInput> = {}): PaintInput =>
   ({ camera: { x: 0, y: 0, scale: 0.5 }, viewport: { w: 800, h: 600 }, dpr: 1, frames, zoom: 0.5, smoothing: true, ...over });

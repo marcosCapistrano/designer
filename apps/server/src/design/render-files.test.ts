@@ -11,13 +11,13 @@ const IMMUTABLE = 'private, max-age=31536000, immutable';
 const TILE = Buffer.from([0, 1, 2, 250, 255, 82, 73, 70, 70]);
 const HITS = [{ nodeId: 'n5/n6', x: 1, y: 2, w: 3, h: 4 }];
 const MANIFEST: RenderManifest = {
-  version: 1,
+  version: 2,
   pages: [
     {
       pageId: 'home',
       name: 'Home',
       route: '/',
-      renders: { base: { device: 'base', hash: K, width: 1440, height: 900, levels: [{ zoom: 1, key: K, cols: 1, rows: 1 }] } },
+      renders: { '1440x900': { device: 'base', hash: K, width: 1440, viewportHeight: 900, height: 900, levels: [{ zoom: 1, key: K, cols: 1, rows: 1 }] } },
     },
   ],
 };
@@ -56,8 +56,8 @@ describe('render file endpoints', () => {
   it('missing manifest is empty', async () => {
     const res = await server().request('/api/apps/empty/render/manifest.json');
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ version: 1, pages: [] });
-    expect(EMPTY_MANIFEST).toEqual({ version: 1, pages: [] });
+    expect(await res.json()).toEqual({ version: 2, pages: [] });
+    expect(EMPTY_MANIFEST).toEqual({ version: 2, pages: [] });
   });
 
   it('serves tiles as immutable webp', async () => {

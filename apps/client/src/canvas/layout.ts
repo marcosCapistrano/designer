@@ -3,9 +3,13 @@
 // metadata; tiles and hit maps are looked up elsewhere by `render`.
 
 import {
+  DEFAULT_FRAME_SIZES,
   DEVICES,
   DEVICE_VIEWPORT_HEIGHT,
   DEVICE_WIDTH,
+  FRAME_GAP,
+  ROW_GAP,
+  sizeKey,
 } from '@hub/protocol';
 import type { Device, PageRender, RenderManifest } from '@hub/protocol';
 import type { Point, Rect } from './geom.js';
@@ -21,11 +25,12 @@ export interface Frame {
   render: PageRender | null;
 }
 
-export const FRAME_GAP = 80; // world px between frames in a row
-export const ROW_GAP = 200; // world px between rows
+export { FRAME_GAP, ROW_GAP };
 
 export function layoutFrames(m: RenderManifest, visible: ReadonlySet<Device>): Frame[] {
   const devices = DEVICES.filter((d) => visible.has(d));
+  // Task 4 replaces this device grid; until then each device maps to its default size.
+  const keyOf = (d: Device): string => sizeKey(DEFAULT_FRAME_SIZES[DEVICES.indexOf(d)]!);
   if (devices.length === 0) return [];
 
   const frames: Frame[] = [];
@@ -34,7 +39,7 @@ export function layoutFrames(m: RenderManifest, visible: ReadonlySet<Device>): F
     let x = 0;
     let rowH = 0;
     for (const device of devices) {
-      const render = page.renders[device] ?? null;
+      const render = page.renders[keyOf(device)] ?? null;
       const w = DEVICE_WIDTH[device];
       const h = render && render.height > 0 ? render.height : DEVICE_VIEWPORT_HEIGHT[device];
       frames.push({ pageId: page.pageId, name: page.name, device, x, y: rowY, w, h, render });

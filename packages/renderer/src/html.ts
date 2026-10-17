@@ -1,4 +1,4 @@
-import { DEVICE_WIDTH, type Device } from '@hub/protocol';
+import type { Device } from '@hub/protocol';
 
 // Only html paints the canvas, with the Canvas system color: white under the default scheme, and the scheme's canvas
 // under a propagated color-scheme. body stays transparent, so a page's html rule (Ruling P: the propagated background
@@ -32,13 +32,13 @@ export function cssForDevice(css: string, device: Device): string {
 export const CSP_META =
   '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; img-src data:; style-src \'unsafe-inline\'; font-src data:; frame-src \'none\'">';
 
-export function buildDocument(html: string, css: string, device: Device): string {
+export function buildDocument(html: string, css: string, width: number): string {
   const safeCss = css.replace(/<\/style/gi, '<\\/style');
   return (
     '<!doctype html><html><head>' +
     CSP_META +
     '<meta charset="utf-8"><meta name="viewport" content="width=' +
-    DEVICE_WIDTH[device] +
+    width +
     '"><style>' +
     BASE_CSS +
     '</style><style>' +
